@@ -1,0 +1,15 @@
+{
+  "listen": "127.0.0.1:8080",
+  "upstream": "https://ark.cn-beijing.volces.com/api/plan",
+  "max_retries": 5,
+  "base_delay_ms": 500,
+  "max_delay_ms": 20000,
+  "total_budget_ms": 120000,
+  "retry_status_codes": [429, 500, 502, 503, 504],
+  "respect_retry_after": true,
+  "classifier_thinking_disabled": true,
+  "classifier_system_prefix": "You are a security monitor",
+  "classifier_max_tokens": 0,
+  "log_request_detail": false,
+  "live_stats": true
+}
