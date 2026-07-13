@@ -8,6 +8,7 @@ package main
 // 用法（在项目根目录执行）：go run ./test，监听 127.0.0.1:9099。
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,8 +31,8 @@ func main() {
 			thinking := p["thinking"]
 			reasoningEffort := p["reasoning_effort"]
 			maxTokens := p["max_tokens"]
-			log.Printf("[MOCK] 收到 %s %s mode=%s thinking=%v reasoning_effort=%v max_tokens=%v",
-				r.Method, r.URL.Path, mode, thinking, reasoningEffort, maxTokens)
+			log.Printf("[MOCK] 收到 %s %s mode=%s thinking=%v reasoning_effort=%v max_tokens=%v key顺序=%v",
+				r.Method, r.URL.Path, mode, thinking, reasoningEffort, maxTokens, topKeys(body))
 		} else {
 			log.Printf("[MOCK] 收到 %s %s mode=%s (body=%d字节)", r.Method, r.URL.Path, mode, len(body))
 		}
@@ -77,4 +78,29 @@ func main() {
 	})
 	log.Println("mock 服务器启动: 监听 127.0.0.1:9099 (?mode=429|bodyerr|ok)")
 	log.Fatal(http.ListenAndServe("127.0.0.1:9099", nil))
+}
+
+// topKeys 用 Decoder 流式提取顶层 object 的 key 顺序（保留出现顺序），用于验证改写是否重排。
+func topKeys(body []byte) []string {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil
+	}
+	var keys []string
+	for dec.More() {
+		tk, err := dec.Token()
+		if err != nil {
+			return keys
+		}
+		k, ok := tk.(string)
+		if !ok {
+			return keys
+		}
+		keys = append(keys, k)
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return keys
+		}
+	}
+	return keys
 }

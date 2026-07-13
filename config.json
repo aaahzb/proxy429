@@ -10,6 +10,7 @@
   "classifier_thinking_disabled": true,
   "classifier_system_prefix": "You are a security monitor",
   "classifier_max_tokens": 0,
+  "upstream_header_timeout_ms": 70000,
   "log_request_detail": false,
   "live_stats": true
 }
