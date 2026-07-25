@@ -1,0 +1,56 @@
+{
+  "listen": "127.0.0.1:8080",
+  "upstream": "https://ark.cn-beijing.volces.com/api/plan",
+  "max_retries": 5,
+  "base_delay_s": 0.5,
+  "max_delay_s": 20,
+  "total_budget_s": 120,
+  "retry_status_codes": [429, 500, 502, 503, 504],
+  "respect_retry_after": true,
+  "classifier_thinking_disabled": true,
+  "classifier_system_prefix": "You are a security monitor",
+  "classifier_max_tokens": 0,
+  "upstream_header_timeout_s": 70,
+  "ping_interval_s": 5,
+  "log_request_detail": false,
+  "log_file": "",
+  "recent_sample_window": 20,
+  "routes": [
+    {
+      "pattern": "claude-opus*",
+      "url": "https://api.deepseek.com",
+      "api": "sk-deepseek-替换成你的key",
+      "model": "deepseek-V4-pro",
+      "text_only": true,
+      "no_search": true
+    },
+    {
+      "pattern": "claude-haiku*",
+      "url": "https://your-other-upstream.example.com",
+      "api": "替换成对应上游的key",
+      "model": "目标模型名"
+    }
+  ],
+  "classifier_route": {
+    "url": "https://api.deepseek.com",
+    "api": "sk-deepseek-替换成你的key",
+    "model": "deepseek-v4-flash"
+  },
+  "fast_route": {
+    "url": "https://api.deepseek.com",
+    "api": "sk-deepseek-替换成你的key",
+    "model": "deepseek-v4-pro"
+  },
+  "multimodal_fallback": {
+    "url": "https://your-multimodal-upstream.example.com",
+    "api": "替换成多模态上游的key",
+    "model": "kimi-vl",
+    "no_search": false
+  },
+  "search_fallback": {
+    "url": "https://api.deepseek.com",
+    "api": "sk-deepseek-替换成你的key",
+    "model": "deepseek-search",
+    "text_only": true
+  }
+}

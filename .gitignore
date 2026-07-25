@@ -1,8 +1,21 @@
 # 编译产物
 *.exe
+*.exe~
+proxy429
+proxy429-*
+
+# macOS 目录元数据
+.DS_Store
 
 # 日志文件
 *.log
 
+# 本地配置（含 API key，勿入库）
+config.json
+
 # Claude Code 本地元数据
 .claude/
+
+
+# 本地发布目录（二进制+配置模板，纯本地，不入库）
+release/

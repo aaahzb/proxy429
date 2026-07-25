@@ -2,13 +2,14 @@
   "listen": "127.0.0.1:8081",
   "upstream": "http://127.0.0.1:9099",
   "max_retries": 3,
-  "base_delay_ms": 200,
-  "max_delay_ms": 2000,
-  "total_budget_ms": 10000,
+  "base_delay_s": 0.2,
+  "max_delay_s": 2,
+  "total_budget_s": 10,
   "retry_status_codes": [429, 500, 502, 503, 504],
   "respect_retry_after": false,
   "classifier_thinking_disabled": true,
   "classifier_system_prefix": "You are a security monitor",
   "classifier_max_tokens": 512,
-  "log_request_detail": false
+  "log_request_detail": false,
+  "recent_sample_window": 20
 }

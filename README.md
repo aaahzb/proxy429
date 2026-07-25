@@ -6,12 +6,14 @@
 
 Claude Code 的所有请求先发到本地代理（`127.0.0.1:8080`），代理原样转发给上游模型提供商：
 
-- **纯字节转发**：因为是 Anthropic 兼容接口，请求/响应头和体都原样透传，不做任何解析改写。
-- **自动重试（两种触发）**：
-  - **情况 A**：上游 HTTP 状态码是 `429/500/502/503/504` 或网络错误 → 重试。
+- **原样透传**：Anthropic 兼容接口，请求/响应头和体原样转发，不做解析改写。例外：分类器请求关掉 thinking、路由命中时改 model 名/上游/API key、fast 路由命中时移除 speed 字段并注入响应 headers（见「分类器请求自动关 thinking」「路由功能」两节）。
+- **自动重试（三种触发）**：
+  - **情况 0**：网络层错误（连接失败、首字节超时）-> 重试。客户端断开（ctx 取消）则立即停止重试、直接结束，不再白烧上游配额。
+  - **情况 A**：上游 HTTP 状态码是 `429/500/502/503/504` → 重试。
   - **情况 B**：状态码是 **200**，但响应体里藏着错误事件（`event: error` / `rate_limit` / `overloaded` / `"type":"error"` 等）→ 也重试。这点很关键——有些上游（含部分 Anthropic 兼容服务）限流时不返回 429 状态码，而是返回 200 把错误塞在 SSE 流里，只看状态码会漏掉。
-- **总预算**：`total_budget_ms` 限制总重试时长，超时后放弃并把最后一个响应透传给 Claude Code，避免 Claude Code 自己先超时。
-- **首字节超时内部重发**：`upstream_header_timeout_ms`（默认 70s）限制"等上游首字节"的时长。超时认为请求卡住，**内部自动重发**（不报错给 Claude Code）；重试用尽才透传 503 交给 Claude Code 自行重试。注意只限等首字节、不砍流式 Body（长输出不受影响）。
+  - **情况 C**：正常响应 → 直接透传，记录首字延迟 / 流式时长 / output_tokens 入滑动窗口。
+- **总预算**：`total_budget_s` 限制总重试时长，超时后放弃并把最后一个响应透传给 Claude Code，避免 Claude Code 自己先超时。
+- **首字节超时内部重发**：`upstream_header_timeout_s`（默认 70s）限制"等上游首字节"的时长。超时认为请求卡住，**内部自动重发**（不报错给 Claude Code）；重试用尽才透传 503 交给 Claude Code 自行重试。注意只限等首字节、不砍流式 Body（长输出不受影响）。
 - **流式透传**：每读到一点就 `Flush`，保证 SSE 增量输出，不会攒成一坨。判断错误时只偷看响应体开头，没消费的字节会补回去继续转发，不丢数据。
 - **关闭上游压缩**：代理强制 `Accept-Encoding: identity`，这样响应体是明文，才能做错误字符串匹配；代价是带宽略增。
 
@@ -19,15 +21,17 @@ Claude Code 的所有请求先发到本地代理（`127.0.0.1:8080`），代理�
 
 | 文件 | 作用 |
 |------|------|
-| `main.go` | 代理主程序 |
-| `vt_windows.go` / `vt_other.go` | 跨平台启用终端 ANSI 转义（状态行原地刷新用，build tag 分平台） |
-| `main_test.go` | SSE 解析 / 状态行格式化的单元测试 |
-| `config.json` | 运行配置（监听地址、上游、重试策略、分类器开关等） |
+| `main.go` | 代理主程序（含 `resolveConfigPath` 配置路径解析、`reloadConfig` 热重载、`logRing` 内存日志缓冲） |
+| `tray.go` | 跨平台托盘/菜单栏（`fyne.io/systray`）：菜单（仅「查看日志」+「退出代理」两项，全平台一致）、状态灯图标、tooltip、状态轮询 |
+| `logview.go` | 网页控制台（全平台唯一 UI）：挂 `/__logs`，状态/日志/配置三标签；同端口本地路由 `/__logs/data`、`/__config`、`/__reload`，仅本机访问 |
+| `main_test.go` / `tray_test.go` | 单元测试（SSE 解析 / 状态采样 / 托盘状态灯与 tooltip） |
+| `config.json` | 运行配置（监听地址、上游、重试策略、分类器开关等）。首次运行无配置时从 `//go:embed config.example.json` 自动生成 |
+| `config.example.json` | 内嵌的配置模板，首次启动自动生成 `config.json` 用 |
 | `go.mod` | Go 模块定义 |
 | `README.md` | 文档 |
 | `test/mock_429.go` | 本地测试用 mock 服务器（见「本地测试」） |
 | `test/config_test.json` | 本地测试用配置 |
-| `proxy429.exe` | 编译产物（.gitignore 忽略，不入库） |
+| `release/Proxy429.app` / `release/proxy429.exe` / `release/proxy429` | 编译产物（`build.sh` 按宿主平台输出；darwin 打包成 `.app`、windows 用 GUI 子系统、linux 纯二进制；`.gitignore` 忽略，不入库） |
 
 ## 配置说明（config.json）
 
@@ -38,47 +42,64 @@ Claude Code 的所有请求先发到本地代理（`127.0.0.1:8080`），代理�
   "listen": "127.0.0.1:8080",
   "upstream": "https://ark.cn-beijing.volces.com/api/plan",
   "max_retries": 5,
-  "base_delay_ms": 500,
-  "max_delay_ms": 20000,
-  "total_budget_ms": 120000,
+  "base_delay_s": 0.5,
+  "max_delay_s": 20,
+  "total_budget_s": 120,
   "retry_status_codes": [429, 500, 502, 503, 504],
   "respect_retry_after": true,
   "classifier_thinking_disabled": true,
   "classifier_system_prefix": "You are a security monitor",
   "classifier_max_tokens": 0,
-  "upstream_header_timeout_ms": 70000,
+  "upstream_header_timeout_s": 70,
   "log_request_detail": false,
-  "live_stats": true
+  "recent_sample_window": 20,
+  "routes": []
 }
 ```
 
 - **listen**：本地监听地址端口，Claude Code 连这里。
 - **upstream**：上游 ARK 的 Anthropic 兼容 Base URL。已带 `/api/plan` 前缀，Claude Code 自带的 `/v1/messages` 会被拼在后面，最终端点为 `https://ark.cn-beijing.volces.com/api/plan/v1/messages`（已实测返回 401 鉴权错误，证明路径正确）。
 - **max_retries**：最多重试次数。
-- **base_delay_ms / max_delay_ms**：指数退避的起步等待和上限。
-- **total_budget_ms**：总重试预算，超过即放弃。
+- **base_delay_s / max_delay_s**：指数退避的起步等待和上限（秒）。
+- **total_budget_s**：总重试预算（秒），超过即放弃。
 - **retry_status_codes**：触发重试的状态码。
 - **respect_retry_after**：是否优先听上游 `Retry-After` 头。
 - **classifier_thinking_disabled**：是否对安全分类器请求关掉 thinking（见下节）。
 - **classifier_system_prefix**：分类器请求的 system 提示词前缀，用于识别。
 - **classifier_max_tokens**：命中分类器后把 max_tokens 压到这个值（加速）。**注意：值太小（如 512）会让分类器的 thinking 被截断、Claude Code 收不到有效的安全判断，表现为 Bash 被拒且不给原因**。推荐 `0`（不压，用请求原 max_tokens；关 thinking 后输出很短，仍快速返回）。
-- **upstream_header_timeout_ms**：等上游首字节的最长时间（毫秒）。超过则认为请求卡住，**内部自动重发**（不报错给 Claude Code），重试用尽才透传 503 交给 Claude Code 自行重试。默认 `70000`（70s）。用首字节超时而非整体超时，只卡"等响应开头"而不砍掉长流式输出。
+- **upstream_header_timeout_s**：等上游首字节的最长时间（秒）。超过则认为请求卡住，**内部自动重发**（不报错给 Claude Code），重试用尽才透传 503 交给 Claude Code 自行重试。默认 `70`（70s）。用首字节超时而非整体超时，只卡"等响应开头"而不砍掉长流式输出。
+- **ping_interval_s**：429 重试时向客户端发 SSE ping 保活的间隔（秒）。代理重试期间客户端收不到上游数据，长时间无数据会触发 Claude Code 超时报 API error；代理定期发 ping 保活避免此问题。默认 `5`；`0` 用默认。详见「429 重试保活」一节。
 - **log_request_detail**：是否打印每个请求的 stream/tools/system 前缀（诊断分类器指纹用，默认关）。
-- **live_stats**：是否开启实时状态行（见「实时状态行」一节）。未配置默认开；非终端（stderr 重定向到文件）自动关，不会污染日志。
+- **recent_sample_window**：网页控制台「状态」标签「首字」「tok/s」取最近多少次请求的样本做统计（滑动窗口）。默认 `20`；改大更平滑、改小更跟手。仅统计正常透传（情况 C）的流。
+- **routes**：模型路由规则数组，按 `pattern` 通配匹配请求的 model 名，命中则改走指定上游（换 URL/API/model）。未配置或空数组则不路由，所有请求走默认 `upstream`。详见「路由功能」一节。
+- **classifier_route**：分类器请求专用路由（对象，与 `routes` 平级）。命中分类器（安全判断）的请求无视原 model 统一路由到指定 `url`/`api`/`model`；未配置则分类器请求仍按 model 走 `routes`（兼容）。详见「路由功能」一节。
+- **fast_route**：fast 模式请求专用路由（对象，与 `routes` 平级）。检测到 `"speed":"fast"` 的非分类器请求统一路由到指定 `url`/`api`/`model`；未配置则不干预（兼容）。详见「路由功能」一节。
+- **multimodal_fallback**：多模态兜底路由（对象，与 `routes` 平级）。请求带图片却命中 `text_only` 纯文本模型时，自动改走此处指定的 `url`/`api`/`model`；未配置则不兜底（透传给纯文本模型，由上游处理）。也可用 `no_search` 标记该兜底不支持搜索。详见「路由功能」一节。
+- **search_fallback**：搜索兜底路由（对象，与 `routes` 平级）。请求带搜索工具却命中 `no_search` 不支持搜索上游时，自动改走此处指定的 `url`/`api`/`model`；未配置则不兜底。也可用 `text_only` 标记该兜底不支持图片。详见「路由功能」一节。
+- **log_file**：日志文件路径（可选）。**默认空**：日志只进内存环形缓冲（`logRing`，500 行，供网页控制台「日志」标签轮询）+ stderr；windowsgui 子系统或无终端时 stderr 为空操作，即不落盘。设了非空值才同时追加写入此文件，方便留存排查或 RemoteApp 等无控制台场景复制查看。改了需重启代理生效（网页「配置」标签保存重载不会重开日志文件）。
 
 ## 用法
 
 ### 1. 启动代理
 
-在本目录打开 PowerShell（这个窗口要保持开着）：
+`build.sh` 产出的二进制在 `release/` 下（见「重新编译」），双击或命令行启动均可，启动后驻留托盘/菜单栏，**不需要保持终端窗口开着**：
 
 ```powershell
-.\proxy429.exe
+# Windows（GUI 子系统，不弹控制台窗口）
+.\release\proxy429.exe
+```
+```bash
+# macOS（.app 菜单栏应用，无 Dock 图标）
+open release/Proxy429.app
+# Linux
+./release/proxy429
 ```
 
-看到 `代理启动: 监听 http://127.0.0.1:8080 -> 转发到 https://ark.cn-beijing.volces.com/api/plan` 就说明跑起来了。
+启动日志（含 `代理启动 vc639d56-1606: 监听 http://127.0.0.1:8080 -> 转发到 https://ark.cn-beijing.volces.com/api/plan`，`v` 后是版本号 = git 短 hash + 构建时分）进内存环形缓冲，可在网页控制台「日志」标签查看；`log_file` 非空时也写入文件。
 
-> 默认读同目录的 `config.json`，也可以用 `-config` 指定别的配置文件。本地 mock 测试用 `test/config_test.json`，详见下文「本地测试」一节。
+> 默认按 `resolveConfigPath` 解析配置路径：`-config` 标志 > 当前目录 `./config.json`（若存在）> `os.UserConfigDir()/proxy429/config.json`（macOS `~/Library/Application Support/proxy429/`、Linux `~/.config/proxy429/`、Windows `%AppData%/proxy429/`）。首次运行无配置时从内嵌的 `config.example.json` 自动生成。本地 mock 测试用 `-config test/config_test.json`，详见下文「本地测试」一节。
+>
+> 启动后状态栏出现状态灯图标（灰/黄/绿）：macOS 在菜单栏（`.app` 打包，`LSUIElement=true` 无 Dock 图标）、Windows/Linux 在系统托盘。右键菜单全平台一致，仅 `查看日志`（浏览器打开网页控制台）+ `退出代理` 两项。Windows 用 GUI 子系统（`-H=windowsgui`）构建，启动不弹控制台窗口，纯托盘运行。
 
 ### 2. 让 Claude Code 走代理
 
@@ -98,11 +119,39 @@ set ANTHROPIC_AUTH_TOKEN=你的API Key
 claude
 ```
 
+macOS / Linux（bash/zsh）：
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
+export ANTHROPIC_AUTH_TOKEN="你在火山方舟控制台获取的 API Key"
+claude
+```
+
 ### 重新编译（改了 main.go 后）
 
-```powershell
-go build -o proxy429.exe
+用项目根的 `build.sh`，它会自动把版本号（git 短 hash + 构建时分）注入二进制，并按宿主平台输出对应产物到 `release/`：
+
+- **darwin** -> `release/Proxy429.app`（`LSUIElement=true` 菜单栏应用，无 Dock 图标）+ ad-hoc codesign（首次启动需 Finder 右键「打开」过 Gatekeeper）
+- **windows** -> `release/proxy429.exe`（链接器 `-H=windowsgui`，GUI 子系统，启动不弹控制台窗口，纯托盘运行）
+- **linux** -> `release/proxy429`
+
+同时把 `config.example.json` 和 `使用说明.md`（若存在）复制进 `release/`。
+
+```bash
+bash build.sh
 ```
+
+> 不要直接 `go build`--那样版本号会是 `dev`，网页控制台/启动日志显示 `vdev`，没法区分跑的是哪个构建。`build.sh` 核心等价于：
+>
+> ```bash
+> # macOS（托盘走 cgo，需 clang，macOS 自带）
+> CGO_ENABLED=1 go build -buildvcs=false -ldflags "-X main.Version=$(git rev-parse --short HEAD)-$(date +%H%M)" -o release/proxy429 .
+> # Windows（托盘纯 Go，免 C 编译器；-H=windowsgui 走 GUI 子系统不弹控制台）
+> CGO_ENABLED=0 go build -buildvcs=false -ldflags "-X main.Version=$(git rev-parse --short HEAD)-$(date +%H%M) -H=windowsgui" -o release/proxy429.exe .
+> # Linux（托盘走 D-Bus，纯 Go）
+> CGO_ENABLED=0 go build -buildvcs=false -ldflags "-X main.Version=$(git rev-parse --short HEAD)-$(date +%H%M)" -o release/proxy429 .
+> ```
+>
+> **跨平台与 cgo**：托盘库 `fyne.io/systray` 只有 macOS 需 cgo（Cocoa/AppKit，macOS 自带 clang 满足），Windows 和 Linux 均为纯 Go（Linux 走 D-Bus），可免 C 工具链直接交叉编译。即 `GOOS=windows CGO_ENABLED=0 go build` 和 `GOOS=linux CGO_ENABLED=0 go build` 在 macOS 上可直接产出对应平台二进制。
 
 ## 密钥传递（ARK 专属）
 
@@ -110,13 +159,13 @@ go build -o proxy429.exe
 
 ## 排错：代理"没反应"/看不到重试日志
 
-新版本加了**全量请求日志**，每个进来的请求都会打印 `[请求]`、每次上游返回都会打印 `[上游]`、每次重试都会打印 `[重试]`。所以一眼就能定位问题：
+新版本加了**全量请求日志**，每个进来的请求打印 `[请求]`、每次上游返回打印 `[尝试 N] 上游响应状态码`、重试时打印 `→ 状态码 X，等待 Y 后重试`。所以一眼就能定位问题：
 
-**启动代理后，在另一个终端跑 `claude`，然后看代理窗口：**
+**启动代理后，在另一个终端跑 `claude`，然后看网页控制台「日志」标签（托盘右键「查看日志」，或浏览器开 `http://127.0.0.1:8080/__logs`）：**
 
-- **看到 `[请求] POST /v1/messages ...`** → 请求已经进代理，代理在工作。接着看上游状态码日志：
-  - `[尝试 N] 上游响应状态码: 429` 然后重试 → 正常在重试，若最后仍 429 说明重试耗尽，把 `config.json` 的 `max_retries` / `total_budget_ms` 调大。
-  - `[尝试 N] 上游响应状态码: 200` 但 `→ 状态码 200 但响应体含错误` → 上游把限流错误塞在 200 响应体里了，代理也在重试（情况 B）。
+- **看到 `[请求] #N POST /v1/messages model=xxx (body=N字节) 来自 ...`** → 请求已经进代理，代理在工作。接着看上游状态码日志：
+  - `[尝试 N] 上游响应状态码: 429` 接着 `→ 状态码 429，等待 ... 后重试` → 正常在重试，若最后仍 429 说明重试耗尽，把 `config.json` 的 `max_retries` / `total_budget_s` 调大。
+  - `[尝试 N] 上游响应状态码: 200` 接着 `→ 状态码 200 但响应体含错误` → 上游把限流错误塞在 200 响应体里了，代理也在重试（情况 B）。
   - `[尝试 N] 上游响应状态码: 401` → 鉴权方式错了，改用 `ANTHROPIC_AUTH_TOKEN`（见下）。
 - **完全没有 `[请求]` 日志** → **Claude Code 根本没走代理**，它的 429 是直接从 ARK 拿的。这是最常见的"没反应"原因，按下面修。
 
@@ -144,7 +193,7 @@ Claude Code 跑 Bash 前会用模型做一次"安全分类"。这个分类请求
 
 ### 怎么确认生效
 
-1. 跑 `claude` 触发一次 Bash 操作，看代理窗口有没有 `[改写] 命中分类器请求` 日志。有 → 分类器走代理了且已改写。
+1. 跑 `claude` 触发一次 Bash 操作，看网页控制台「日志」标签有没有 `[改写] 命中分类器请求` 日志。有 → 分类器走代理了且已改写。
 2. 如果没看到 `[改写]` 但 Bash 还是慢/失败：把 `config.json` 的 `log_request_detail` 改成 `true`，再触发一次，看 `[详情]` 日志里那个非流式请求的 `sys=` 前缀到底是什么，把 `classifier_system_prefix` 改成它。
 3. 如果 ARK 的 glm-5.2 不认 `thinking:{type:"disabled"}`（改写了但分类还是慢），目前没有完美办法——三字段已经一起塞了，多余的会被上游忽略。可以先观察 `[改写]` 之后 Bash 是否还报 unavailable。
 
@@ -154,63 +203,262 @@ ARK 的 Base URL 带 `/api/plan` 前缀，但因为 Claude Code 自带 `/v1/mess
 
 只有当上游期望的路径不是简单的「Base URL + `/v1/...`」时（比如它要 `/anthropic/messages` 而不是 `/anthropic/v1/messages`），才需要改 `main.go` 里的拼接逻辑。
 
-## 实时状态行
+## 路由功能
 
-透传响应时，代理会在终端最后一行**原地刷新**一个状态行（不新增日志行），实时显示流量与 token：
+按请求的 model 名把请求路由到不同上游（换 URL + API key + model 名），支持多组、`*` 通配。**未配置 `routes`（或空数组）时完全不路由，所有请求走默认 `upstream`，行为和没这功能一样。**
+
+配置示例（把 `claude-opus*` 开头的请求改走 DeepSeek，model 名换成 `deepseek-V4-pro`）：
+
+```json
+"routes": [
+  {
+    "pattern": "claude-opus*",
+    "url": "https://api.deepseek.com",
+    "api": "sk-deepseek-xxx",
+    "model": "deepseek-V4-pro",
+    "text_only": true
+  }
+]
+```
+
+- **pattern**：模型名通配符，仅支持 `*`（匹配任意长度任意字符，含空）。`claude-opus*` 命中 `claude-opus-4-8`/`claude-opus`；`*opus` 匹配后缀；`claude-*` 匹配前缀；`a*b*c` 要求中间出现 b。无 `*` 则精确匹配。多条规则按数组顺序匹配，**第一个命中的生效**。
+- **url**：目标上游 Base URL（覆盖默认 `upstream`）。Claude Code 的 `/v1/messages` 会拼在后面，拼接规则和默认 upstream 一致。
+- **api**：目标 API key，设为 `Authorization: Bearer` 头。命中后会**删掉客户端原带的 `Authorization` 与 `x-api-key`**（避免把 ARK 的 token 透传到 DeepSeek 之类），再设新 key。留空则透传客户端原 token。
+- **model**：替换成的目标模型名（改写请求体 `"model"` 字段的值，长度变化自动重算 Content-Length）。留空则不改 model。
+- **text_only**：布尔，标记目标模型**仅支持纯文本**。设为 `true` 后，若该请求带图片，会自动改走 `multimodal_fallback` 兜底（详见「图片路由」一节）。不设或 `false` 则不兜底。
+- **no_search**：布尔，标记目标上游**不支持搜索**。设为 `true` 后，若该请求带搜索工具，会自动改走 `search_fallback` 兜底（详见「搜索路由」一节）。不设或 `false` 则不兜底。
+
+命中时打 `[路由]` 日志，如 `[路由] #1 claude-opus-4-8 -> https://api.deepseek.com (model claude-opus-4-8 -> deepseek-V4-pro)`；`[请求]` 行仍显示路由前的原始 model 名。路由命中后的重试仍走同一目标上游（URL/API/model 不变）。网页控制台「配置」标签保存重载会重新读 `routes`，热生效。
+
+> 路由只改 URL/API/model 三项，不动 thinking、messages 等其他字段；分类器关 thinking 的逻辑在路由之前执行，两者互不影响。
+
+**响应 model 回改**：路由改写请求 model 后，上游返回的 SSE 响应里 `"model"` 字段值（可能是上游实际 model ID，如 `glm-5-2-260617`，与请求里写的 `glm-5.2` 不一定一致）会被**字段定位替换回原始 model 名**，不依赖字符串匹配。这样 Claude Code 看到的始终是它发出的原始 model，不会因保存了上游 model 名而在重启时报 `Session model ... could not be restored`。改写时打 `[改写] #N 响应流 model 回改 <上游实际model> -> <原始model>` 日志，显示上游真正返回的 model 名。该行为对 model 路由、分类器路由、fast 路由均生效。
+
+### 分类器路由（classifier_route）
+
+上面按 model 名路由是给正常对话请求分流用的。还有一种**只针对分类器请求**的路由模式：不管请求原本是什么 model，只要它命中分类器（即 Claude Code 工具调用前的安全判断请求，system 前缀匹配），就统一路由到指定上游。适合把这类轻量安全判断请求甩到便宜模型，省主模型额度。
+
+配置（与 `routes` 平级，是一个对象，不是数组）：
+
+```json
+"classifier_route": {
+  "url": "https://api.deepseek.com",
+  "api": "sk-deepseek-xxx",
+  "model": "deepseek-v4-flash"
+}
+```
+
+- **url / api / model**：含义同 `routes` 里的同名字段。
+- **优先级**：命中分类器且配了 `classifier_route` 时，**无视原 model**，走分类器路由，不再匹配 `routes`。若命中分类器但**没配** `classifier_route`，则回退到按 model 走 `routes`（兼容旧行为）。
+- **独立性**：与 `classifier_thinking_disabled` 互不依赖--即使没开「关 thinking」，也能单独用分类器路由；反过来开了关 thinking 也能不配分类器路由。
+- 命中时打 `[路由] #N 分类器 <原model> -> <url> (model <原> -> <目标>)`，带「分类器」标识以区别于普通 model 路由。同样走网页控制台热重载。
+
+> 分类器路由的判定（system 前缀匹配）与 `[改写]` 关 thinking 用的是同一套识别逻辑，但分类器路由只判定、不改写 body，两者可独立开关。
+
+### fast 路由（fast_route）
+
+> **前置条件**：Claude Code 的 `/fast` 默认仅支持 Anthropic 官方 API。通过第三方代理使用时，需要先设置 `penguinModeOrgEnabled: true` 才能开启。项目里已提供 `enableFast.txt` 脚本，复制其内容到终端执行即可（或手动在 `~/.claude.json` 里加上 `"penguinModeOrgEnabled": true`）。
+
+Claude Code `/fast` 模式在请求体里加 `"speed":"fast"` 字段、请求头加 `Anthropic-Beta: fast-mode-2026-02-01`。fast 路由检测到这个字段时，把非分类器请求统一甩到指定上游。
+
+```json
+"fast_route": {
+  "url": "https://api.deepseek.com",
+  "api": "sk-deepseek-你的key",
+  "model": "deepseek-v4-pro"
+}
+```
+
+- **触发条件**：请求体含 `"speed":"fast"` 且不是分类器请求。
+- **改写行为**：命中后 **移除** `"speed":"fast"` 字段（上游不支持）、**删除** `Anthropic-Beta` 请求头（上游不认识），并在响应里**注入假的 fast 限流 headers**（`anthropic-fast-output-tokens-remaining: 999999` 等），让 Claude Code 认为 fast 模式可用。
+- **优先级**：分类器路由 > **fast 路由** > model 路由。分类器请求即使带 `"speed":"fast"` 也不走 fast 路由。
+- **未配置**：不做任何处理，`"speed":"fast"` 和 `Anthropic-Beta` 头原样透传给上游。
+- 命中时打 `[路由] #N fast <原model> -> <url> (model <原> -> <目标>)`，带「fast」标识。同样走网页控制台热重载。
+
+### 图片路由（multimodal_fallback）
+
+某些上游模型只支持纯文本（如 DeepSeek-V4），收到带图片的请求会报错。图片路由解决这个问题：给纯文本模型的目标规则打上 `text_only: true` 标记，再配一个支持多模态的兜底上游；代理检测到请求带图片、且命中的是纯文本模型时，自动改走兜底上游。
+
+配置（与 `routes` 平级，是一个对象）：
+
+```json
+"routes": [
+  {
+    "pattern": "claude-opus*",
+    "url": "https://api.deepseek.com",
+    "api": "sk-deepseek-xxx",
+    "model": "deepseek-V4-pro",
+    "text_only": true
+  }
+],
+"multimodal_fallback": {
+  "url": "https://your-multimodal-upstream.example.com",
+  "api": "sk-mm-xxx",
+  "model": "kimi-vl",
+  "no_search": false
+}
+```
+
+- **text_only**（`routes` 条目内）：标记该条目标模型仅支持纯文本。
+- **url / api / model**（`multimodal_fallback` 内）：兜底多模态上游，含义同 `routes` 里的同名字段。
+- **no_search**（`multimodal_fallback` 内，可选）：标记该图片兜底**也不支持搜索**。若请求同时带搜索工具，会改走 `search_fallback`（见下节）。不设或 `false` 表示该兜底支持搜索。
+- **触发条件**：请求体含 Anthropic 图片内容块（`{"type":"image",...}`） **且** 命中的 `routes` 规则 `text_only: true` **且** 配了 `multimodal_fallback`。三者同时满足才兜底。
+- **改写行为**：命中兜底后，URL/API 改用 `multimodal_fallback` 的值，请求体 `"model"` 改写成兜底 model 名。响应里的 `"model"` 仍会**回改成原始 model 名**（和普通路由一样，见上文「响应 model 回改」），Claude Code 看到的还是它发出的原始 model。
+- **不兜底的情况**：请求无图片；命中的规则 `text_only` 为 `false`/未设（目标模型自己支持多模态）；配了 `text_only: true` 但没配 `multimodal_fallback`（降级透传给纯文本模型，由上游处理）。分类器路由、fast 路由不参与图片兜底。
+- 命中时打 `[路由] #N 图片兜底 <原model> -> <兜底url> (model <原> -> <兜底model>)`，带「图片兜底」标识。同样走网页控制台热重载。
+
+### 搜索路由（search_fallback）
+
+有些上游不支持搜索（如火山），有些支持（如 DeepSeek、Kimi）。给不支持搜索的目标规则打上 `no_search: true` 标记，再配一个支持搜索的兜底上游；代理检测到请求带搜索工具、且命中的是不支持搜索的上游时，自动改走兜底上游。
+
+"带搜索工具"特指请求 `tools` 里含 **Anthropic server-side** `web_search_*` 工具（如 `web_search_20250305`，由上游执行搜索）。**刻意不识别客户端侧 `WebSearch` 工具**——Claude Code 每个请求都带它的定义，无法据此区分是不是真要搜索，会误判所有对话为搜索请求。所以这套兜底主要服务于 Claude Desktop 等走服务端搜索的客户端；Claude Code CLI 的搜索由它自己执行，不经过这个兜底。
+
+配置（与 `routes` 平级，是一个对象）：
+
+```json
+"routes": [
+  {
+    "pattern": "claude-opus*",
+    "url": "https://volces.example.com",
+    "api": "sk-volc-xxx",
+    "model": "ark-opus",
+    "no_search": true
+  }
+],
+"search_fallback": {
+  "url": "https://api.deepseek.com",
+  "api": "sk-deepseek-xxx",
+  "model": "deepseek-search",
+  "text_only": true
+}
+```
+
+- **no_search**（`routes` 条目内）：标记该条目标上游不支持搜索。
+- **url / api / model**（`search_fallback` 内）：兜底支持搜索的上游，含义同 `routes` 里的同名字段。
+- **text_only**（`search_fallback` 内，可选）：标记该搜索兜底**也不支持图片**。若请求同时带图片，会改走 `multimodal_fallback`。不设或 `false` 表示该兜底支持图片。
+- **触发条件**：请求带搜索工具 **且** 命中的 `routes` 规则 `no_search: true` **且** 配了 `search_fallback`。
+- **改写行为**：同图片兜底，URL/API/model 改写，响应 model 回改成原始 model 名。
+- 命中时打 `[路由] #N 搜索兜底 <原model> -> <兜底url> (model <原> -> <兜底model>)`，带「搜索兜底」标识。同样走网页控制台热重载。
+
+### 图片 + 搜索同时出现（能力兜底组合）
+
+请求可能**同时带图片和搜索工具**（例如上传一张图让它"搜一下图里的东西"）。这时目标模型若两个能力都缺（`text_only: true` + `no_search: true`），需要走到一个**两个能力都满足**的兜底。代理按以下顺序选兜底：
+
+1. `search_fallback`：若它两个能力都满足（即 `text_only` 不为 `true`，能认图），走它。
+2. `multimodal_fallback`：若它两个能力都满足（即 `no_search` 不为 `true`，能搜索），走它。
+3. 纯图片请求（无搜索）但 `multimodal_fallback` 没配时，退而走支持图片的 `search_fallback`。
+4. 都不满足：降级走原 route（由上游处理，可能报错）。
+
+**典型配置**（DeepSeek 搜索强但不认图，Kimi 支持图+搜索）：
+
+```json
+"routes": [
+  {"pattern": "claude-opus*", "url": "https://volces.example.com", "api": "sk-volc-xxx", "model": "ark-opus", "text_only": true, "no_search": true}
+],
+"search_fallback":     {"url": "https://api.deepseek.com", "api": "sk-deepseek-xxx", "model": "deepseek-search", "text_only": true},
+"multimodal_fallback": {"url": "https://kimi.example.com", "api": "sk-kimi-xxx", "model": "kimi-vl", "no_search": false}
+```
+
+效果：
+- 纯搜索请求 -> 走 `search_fallback`（DeepSeek，质量高）。
+- 纯图片请求 -> 走 `multimodal_fallback`（Kimi）。
+- 带图搜索请求 -> `search_fallback` 不认图（`text_only:true`），走 `multimodal_fallback`（Kimi，图+搜索都支持）。
+
+> 能力兜底只在 model 路由分支触发，分类器路由、fast 路由不参与。两个兜底都未配时退回原行为。
+
+## 429 重试保活（SSE ping）
+
+代理遇到 429/5xx 自动重试时，重试期间不会向 Claude Code 发任何字节（还没连上成功响应）。Claude Code 流式请求长时间收不到数据会触发客户端超时，报 "API error" 并自带重试 0/10--这时代理还在重试，两边各干各的。
+
+为避免此问题，代理在**首次重试时**向客户端发一个 `200` + SSE 流开头，并在 backoff 等待期间每 `ping_interval_s` 秒发一个 Anthropic 标准 `event: ping` 保活事件。Claude Code 收到 ping 即认为连接活着，不会超时。重试成功后无缝接上上游的正常 SSE 流（`message_start` 等跟在 ping 后，客户端忽略 ping）。
+
+- **backoff 可中断**：重试等待改用 `select` 监听客户端断开，客户端超时/取消时代理立即停止重试（旧版 `time.Sleep` 不可中断，客户端断了还在傻睡 + 白烧上游配额）。
+- **重试用尽兜底**：已发 `200` 保活头后无法再改状态码透传 429，改发一个 SSE `event: error`（`overloaded_error`）让 Claude Code 识别错误。正常 429 暂时代理能重试成功，不触发；只有持续限流用尽才走这里。
+- **正常请求零影响**：无 429 时全程不发 ping，走原透传逻辑，不多发任何字节。
+- 日志：`[保活] #N 重试中(状态码 429)，开启 SSE ping 保活` / `[保活] #N 客户端已断开，停止重试`。
+
+> 该机制假设 Claude Code 超时是"无数据超时"（ping 能重置）。若实测 ping 保活开启后 Claude Code 仍超时，说明是别的超时类型，需进一步排查。
+
+## 网页控制台
+
+代理的**唯一 UI** 是一个浏览器网页控制台，全平台一致（不再有终端分屏 TUI）。挂在代理同端口的 `/__logs` 路径，仅本机访问（`isLocalRequest` 限制 `127.0.0.1`/`::1`/`localhost`，远程请求返回 403，即使代理 `listen` 在 `0.0.0.0` 暴露到内网也不会泄露日志/配置）。三个标签：
 
 ```
-[流式] 活跃1 | 流出 2.3KB (12KB/s) | 缓存命中 0 | 输入 24 | 输出 80 | 重试 0 | 分类器 0
+状态卡片（示例，实际为网页渲染）：
+v c639d56-1606  active 3 | waiting 1 | bytesForward 2.3KB | rate 12KB/s
+cacheRead 0 | input 24 | output 80 | retries 0 | classifiers 0
+avgFirstByte 1.23s | tps 45.6
+
+在途流：
+#  model      阶段        字节    状态
+1  glm-5.2    转发中      4.2KB   200
+2  glm-5.2    等首字      0B      -
+3  glm-5.2    等首字      0B      -
 ```
 
-- **活跃**：当前正在透传的流数量。
-- **流出 / 速率**：累计已转发字节 + 最近 100ms 的字节速率。每转发一段 SSE 就涨，**流过程中实时跳动**，是「正在迸出」的直接体感。
-- **缓存命中 / 输入 / 输出**：从 SSE 的 `usage` 解析的累计 token。ARK 的 `usage` 不含 `cache_creation_input_tokens`，故无「缓存写入」一项。
-- **重试**：启动至今因状态码命中 `retry_status_codes` 而重试的累计次数（每重试一次 +1；预算耗尽放弃的不计）。
-- **分类器**：启动至今命中分类器请求并关掉 thinking 的累计次数。
+- **状态**：状态卡片 + 在途流表格。卡片字段：`active`/`waiting`（进行中/等首字）、`bytesForward`（累计转发字节）、`rate`（每秒字节速率，用两次轮询间增量算）、`cacheRead`/`input`/`output`（从 SSE `usage` 解析的累计 token）、`retries`（累计重试次数）、`classifiers`（累计命中分类器次数）、`avgFirstByte`（最近 `recent_sample_window` 次平均首字延迟）、`tps`（加权 token 吞吐）。在途流表格列：`#`/model/阶段/字节/状态。
+- **日志**：最近 500 行日志（`logRing` 内存环形缓冲），自动滚到底、粘性滚动（手动向上滚时暂停跟随，回到底部恢复）。无翻页键/滚轮冲突，纯浏览器原生滚动。
+- **配置**：配置文件编辑器。载入当前 `config.json` 内容（`GET /__config` 返回 `{path, content, exists}`），保存时 `POST /__config` 先 `json.Unmarshal` 进 `Config` 校验 JSON 合法性，**非法 JSON 直接返回 400 且不写盘**（避免把损坏配置写到磁盘导致下次启动失败），合法才写文件并调 `reloadConfig()` 热生效；另有「仅重载」按钮 `POST /__reload` 只调 `reloadConfig` 不改文件。
 
-> **关于 token 实时性**：ARK（及标准 Anthropic）只在流**末尾**的 `message_delta` 事件里发一次 `usage`，流过程中的 `content_block_delta` / `thinking_delta` 不带 token 计数。所以 token 字段在流过程中保持不变，到流结束才一次性更新为准确值。要看「正在迸出」的实时变化，看「流出」和「速率」——它们随字节转发实时跳。
+页面每 500ms 轮询一次 `/__logs/data`（返回最近日志 + 全量状态计数 + 在途流列表 JSON）。**关闭浏览器标签页即隐藏，代理继续运行不受影响**。
+
+**状态卡片字段含义**：
+- **v版本**：exe 版本号 = git 短 hash + 构建时分（如 `c639d56-1606`），用于确认跑的是哪个 exe。用 `build.sh` 构建才会注入，直接 `go build` 会显示 `dev`。
+- **active / waiting**：当前进行中的请求数（active = 已发上游、转发中或重试等待；waiting = 等首字节阶段）。
+- **bytesForward / rate**：累计已转发字节 + 每秒更新一次的字节速率。每转发一段 SSE 就涨，是「正在迸出」的直接体感。
+- **cacheRead / input / output**：从 SSE 的 `usage` 解析的累计 token。ARK 的 `usage` 不含 `cache_creation_input_tokens`，故无「缓存写入」一项。
+- **retries**：启动至今的累计重试次数（每重试一次 +1；含状态码 429/5xx、首字节超时/网络错误、200 体内错误三种触发；预算耗尽放弃的不计）。
+- **classifiers**：启动至今命中分类器请求并关掉 thinking 的累计次数。
+- **avgFirstByte**：最近 `recent_sample_window` 次请求的**平均首字延迟**（秒）--从请求发出到上游吐出第一个 body 数据字节。只统计正常透传（情况 C）的流；收到第一个字节即入窗更新，不必等整流结束。
+- **tps**：最近 `recent_sample_window` 次请求的**加权 token 吞吐**--Σoutput_tokens / Σ流式时长（第一个字节到最后一个字节）。用加权而非简单平均，避免短请求拉偏整体吞吐。
+
+> **关于 token 实时性**：ARK（及标准 Anthropic）只在流**末尾**的 `message_delta` 事件里发一次 `usage`，流过程中的 `content_block_delta` / `thinking_delta` 不带 token 计数。所以 token 字段在流过程中保持不变，到流结束才一次性更新为准确值。要看「正在迸出」的实时变化，看 `bytesForward`/`rate` 和在途流表格里的字节--它们随转发实时跳。
 
 实现要点：
 
-- 多个并发请求的计数**聚合**到全局，不会互相覆盖；`output_tokens` 是单流累积值，用每流增量累加，所以并发流也不会把彼此的计数冲掉。
-- 状态行用 `\r` 回车 + `\033[K` 清行原地刷新；log 输出前会先清掉状态行，所以日志往上滚、状态行始终停在最后一行，互不干扰。
-- 仅在终端下显示：stderr 重定向到文件（如 `nohup` / 后台运行）时自动关闭，不会把状态行写进日志文件。
-- Windows 上启动时会调用 `SetConsoleMode` 启用控制台 VT 处理，让 ANSI 转义在 cmd / PowerShell 里也生效（见 `vt_windows.go`）。
-- 关闭方式：`config.json` 里设 `"live_stats": false`。
+- 日志统一进内存环形缓冲 `logRing`（500 行），供网页「日志」标签轮询；同时写 stderr（windowsgui 子系统或无终端时 stderr 为空操作，不落盘）。`log_file` 非空时再追加写入文件。
+- `reloadConfig()` 返回 error，网页「配置」标签保存重载失败时能把错误回显给用户；行为不变（重读配置、原子替换、清空累计统计、不重新监听端口）。
+- 端点全走 `isLocalRequest` 守卫：`GET /__config`、`POST /__config`（校验 + 写盘 + 重载）、`POST /__reload`（仅重载）、`GET /__logs`（HTML 页）、`GET /__logs/data`（状态 + 日志 JSON）。
 
-## Windows 托盘（最小化到托盘）
+## 系统托盘 / 菜单栏（跨平台）
 
-仅 Windows。双击 `proxy429.exe` 运行后，控制台点最小化会缩到系统托盘，不再占任务栏：
+启动后状态栏出现状态灯图标：macOS 在菜单栏（`.app` 打包，`LSUIElement=true` 无 Dock 图标）、Windows/Linux 在系统托盘。功能：
 
-- **双击托盘图标**：恢复并前置控制台窗口。
-- **右键托盘图标**：菜单含 `显示窗口` / `打开配置文件` / `刷新重载配置` / `退出代理`。
-- **刷新重载配置**：重新读取 `config.json` 并原子替换运行时配置，同时清空所有累计统计（缓存命中/输入/输出/重试/分类器计数归零），效果等同于"关闭程序重新打开"的配置与统计。注意不会重新监听端口——若改了 `listen` 端口仍需重启程序。
-- **explorer 重启自动恢复**：`explorer.exe` 崩溃重启会清空托盘，代理响应 `TaskbarCreated` 广播自动重建图标，无需重启代理。
-- **状态灯图标**：托盘图标三态变色--**灰色**(空闲，无请求) / **黄色**(已发上游、等首字节) / **绿色**(流式转发中)。并行请求时显示高优先级(绿>黄>灰)。每 200ms 检查一次状态，state/active/waiting 任一变化时更新图标和悬停文字(同一状态不重复刷新)；explorer 重启重建后也会立即恢复当前颜色。
-- **悬停 tooltip**：鼠标移到托盘图标上显示多行文字，带当前数量。空闲时 `Proxy429` / `idle`；有请求时按状态分行：`active N` / `waiting N`，两态并存时都显示(如 `Proxy429` / `active 2` / `waiting 3`)。数量变化也会刷新，所以能实时看到几个流在跑。
+- **右键图标**：菜单仅 `查看日志` + `退出代理` 两项，**全平台一致**（不再有「显示窗口」「打开配置文件」「刷新重载配置」--配置编辑与重载已移入网页控制台）。
+- **查看日志**：用默认浏览器打开网页控制台 `http://<listen>/__logs`（状态/日志/配置三标签，见上节）；**关闭浏览器标签页即隐藏，代理继续运行不受影响**。仅本机可访问（非 `127.0.0.1`/`::1`/`localhost` 请求返回 403）。
+- **状态灯图标**：三态变色--**灰色**(空闲，无请求) / **黄色**(已发上游、等首字节) / **绿色**(流式转发中)。并行请求时显示高优先级(绿>黄>灰)。每 200ms 检查一次状态，state/active/waiting 任一变化时更新图标和悬停文字。
+- **悬停 tooltip**：鼠标移到图标上显示多行文字，带当前数量。空闲时 `Proxy429` / `idle`；有请求时按状态分行：`active N` / `waiting N`，两态并存时都显示。数量变化也会刷新，所以能实时看到几个流在跑。
+
+平台差异：
+
+| 平台 | 托盘位置 | 托盘实现 | cgo |
+|------|----------|----------|-----|
+| Windows | 系统托盘 | `fyne.io/systray`（纯 Go syscall） | 否 |
+| macOS | 菜单栏 | `fyne.io/systray`（Cocoa/AppKit） | 是（需 clang，macOS 自带） |
+| Linux | 状态区 | `fyne.io/systray`（D-Bus StatusNotifier） | 否 |
+
+> 三平台代理功能完全一致（重试、路由、分类器、保活、网页控制台统计）；唯一差异是托盘位置（macOS 菜单栏 vs Windows/Linux 系统托盘）。Windows 用 GUI 子系统（`-H=windowsgui`）构建，启动不弹控制台窗口，纯托盘运行；日志看网页控制台或 `log_file`。
 
 实现要点：
 
-- 平台隔离用构建标签：`tray_windows.go`（`//go:build windows`）含全部实现，`tray_other.go`（`//go:build !windows`）提供空 `setupTray`，非 Windows 不编译、不生效。
-- 纯标准库 `syscall` 直调 `user32`/`shell32`/`kernel32`/`gdi32`（`Shell_NotifyIcon`、`RegisterClassEx`、`CreateWindowEx`、消息循环、`CreateBitmap`+`CreateIconIndirect` 生成图标），无第三方依赖；状态灯图标用 GDI 动态生成 16x16 纯色位图(32bpp BGRA + 单色 AND 掩码)，灰/黄/绿三色切换时 `NIM_MODIFY`(带 `NIF_TIP` 同步更新 `szTip` 多行文字)更新并 `DestroyIcon` 销毁旧图标，避免 GDI 句柄泄漏。
-- 消息循环跑在 `runtime.LockOSThread()` 固定的 goroutine 里，不阻塞代理主循环。
-- 最小化检测用 200ms 轮询 `IsIconic`，避开 subclass 控制台窗口的不稳定。
+- 跨平台托盘用 `fyne.io/systray`：`tray.go` 一套代码管菜单/状态灯/tooltip/状态轮询，`systray.Run` 占主线程（macOS 要求 UI 事件循环在主线程），HTTP 服务在 goroutine 里并发跑。
+- 状态灯图标纯 Go 生成（无 cgo/无 GDI）：画 32x32 抗锯齿实心圆，macOS/Linux 编码成 PNG，Windows 封装成 BMP-entry ICO（`LoadImageW` 必定支持）。
 
 ## 本地测试
 
 `test/` 目录里是可以脱离 ARK 本地复测用的文件：
 
-- `test/mock_429.go`：mock 服务器，用 `?mode=` 切换三种上游行为——`429`（状态码重试）、`bodyerr`（200+体内错误重试）、`ok`（正常透传，带 `usage` 和 `message_delta`，能在状态行看到 token 跳动）。还会打印收到的 `thinking`/`reasoning_effort`/`max_tokens`，验证分类器改写是否生效。
+- `test/mock_429.go`：mock 服务器，用 `?mode=` 切换三种上游行为——`429`（状态码重试）、`bodyerr`（200+体内错误重试）、`ok`（正常透传，带 `usage` 和 `message_delta`，能在网页控制台「状态」标签看到 token 跳动）。还会打印收到的 `thinking`/`reasoning_effort`/`max_tokens`，验证分类器改写是否生效。
 - `test/config_test.json`：测试配置，指向本地 mock，重试间隔小、关掉了 `Retry-After`，方便快速复测。
 
 复测流程（项目根目录执行）：
 
-```powershell
+```bash
 # 终端1：起 mock（监听 9099）
 go run ./test
 
-# 终端2：起代理，指向 mock
-.\proxy429.exe -config test/config_test.json
+# 终端2：起代理，指向 mock（Windows 用 .\proxy429.exe）
+./proxy429 -config test/config_test.json
 
 # 终端3：发请求测三种情况
 curl -i -X POST "http://127.0.0.1:8081/v1/messages?mode=429" -d '{"model":"t","messages":[{"role":"user","content":"hi"}]}'
@@ -218,8 +466,8 @@ curl -i -X POST "http://127.0.0.1:8081/v1/messages?mode=bodyerr" -d '{"model":"t
 curl -i -X POST "http://127.0.0.1:8081/v1/messages?mode=ok" -d '{"model":"t","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-看代理窗口的 `[改写]`/`[重试]`/`[透传]` 日志确认行为。测完 `taskkill /F /IM proxy429.exe` 并关掉 mock。
+看网页控制台「日志」标签的 `[改写]`/`[尝试 N]`/`[完成]` 日志确认行为。测完关掉代理（托盘菜单「退出代理」；或 macOS/Linux `Ctrl+C`、Windows `taskkill /F /IM proxy429.exe`）并关掉 mock。
 
 ## 观察限流
 
-日志会打印每次重试（`[重试 N] 状态码 429, 等待 ...`），跑一段时间就能看出这家提供商到底多爱 429。
+日志会打印每次重试（`[尝试 N] 上游响应状态码: 429` 接着 `→ 状态码 429，等待 ... 后重试`），跑一段时间就能看出这家提供商到底多爱 429。
