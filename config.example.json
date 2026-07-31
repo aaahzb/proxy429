@@ -1,5 +1,6 @@
 {
   "listen": "127.0.0.1:8080",
+  "allow_remote": false,
   "upstream": "https://ark.cn-beijing.volces.com/api/plan",
   "max_retries": 5,
   "base_delay_s": 0.5,
@@ -51,6 +52,10 @@
     "url": "https://api.deepseek.com",
     "api": "sk-deepseek-替换成你的key",
     "model": "deepseek-search",
-    "text_only": true
-  }
+    "text_only": true,
+    "summary_mode": false,
+    "summary_thinking": false,
+    "summary_level": "low"
+  },
+  "search_debug_dir": ""
 }

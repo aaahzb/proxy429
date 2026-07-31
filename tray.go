@@ -5,8 +5,10 @@ import (
 	"encoding/binary"
 	"image"
 	"image/png"
+	"log"
 	"math"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -38,6 +40,47 @@ func onReady() {
 			openLogViewer()
 		}
 	}()
+
+	// 「切换配置」：子菜单列出当前配置目录下所有 .json 文件，点击即时切换并重载。
+	// 当前配置打勾；切换失败（配置坏）则保持旧配置，勾选不变。「刷新列表」用于新增配置文件后重建菜单。
+	mSwitch := systray.AddMenuItem("切换配置", "")
+	var cfgItems []*systray.MenuItem
+	// 先声明再赋值：闭包内部会调用 rebuildCfgMenu 重建菜单，短变量声明的作用域从语句结束才开始，
+	// 直接 rebuildCfgMenu := func(){...rebuildCfgMenu()...} 会因变量尚未在作用域而编译失败。
+	var rebuildCfgMenu func()
+	rebuildCfgMenu = func() {
+		for _, it := range cfgItems {
+			it.Hide()
+		}
+		cfgItems = nil
+		cur := filepath.Base(currentConfigPath())
+		for _, name := range listConfigFiles() {
+			n := name
+			item := mSwitch.AddSubMenuItemCheckbox(n, "", n == cur)
+			cfgItems = append(cfgItems, item)
+			go func(it *systray.MenuItem, fname string) {
+				for range it.ClickedCh {
+					full := filepath.Join(filepath.Dir(currentConfigPath()), fname)
+					if err := switchConfig(full); err != nil {
+						log.Printf("[切换] %s 失败: %v", fname, err)
+						continue
+					}
+					for _, x := range cfgItems {
+						x.Uncheck()
+					}
+					it.Check()
+				}
+			}(item, n)
+		}
+		refreshItem := mSwitch.AddSubMenuItem("刷新列表", "")
+		cfgItems = append(cfgItems, refreshItem)
+		go func() {
+			for range refreshItem.ClickedCh {
+				rebuildCfgMenu()
+			}
+		}()
+	}
+	rebuildCfgMenu()
 
 	systray.AddSeparator()
 

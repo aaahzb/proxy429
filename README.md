@@ -40,6 +40,7 @@ Claude Code 的所有请求先发到本地代理（`127.0.0.1:8080`），代理�
 ```json
 {
   "listen": "127.0.0.1:8080",
+  "allow_remote": false,
   "upstream": "https://ark.cn-beijing.volces.com/api/plan",
   "max_retries": 5,
   "base_delay_s": 0.5,
@@ -58,6 +59,7 @@ Claude Code 的所有请求先发到本地代理（`127.0.0.1:8080`），代理�
 ```
 
 - **listen**：本地监听地址端口，Claude Code 连这里。
+- **allow_remote**：是否允许**非本机**（局域网）设备访问转发通道。默认 `false`：只认 `127.0.0.1`/`::1`，即使误把 `listen` 设成 `0.0.0.0` 暴露到内网，非本机请求也会被 403 挡掉、不会泄露代理能力。需要让同内网其它设备用代理时设 `true`（也可在网页控制台「状态」标签点「开启内网访问」切换，需二次确认，即时生效+落盘）。**注意：管理端点（`/__*`）永远只限本机，不受此开关影响**，远程设备无法通过网页改你配置或开关。
 - **upstream**：上游 ARK 的 Anthropic 兼容 Base URL。已带 `/api/plan` 前缀，Claude Code 自带的 `/v1/messages` 会被拼在后面，最终端点为 `https://ark.cn-beijing.volces.com/api/plan/v1/messages`（已实测返回 401 鉴权错误，证明路径正确）。
 - **max_retries**：最多重试次数。
 - **base_delay_s / max_delay_s**：指数退避的起步等待和上限（秒）。
@@ -168,6 +170,8 @@ bash build.sh
   - `[尝试 N] 上游响应状态码: 200` 接着 `→ 状态码 200 但响应体含错误` → 上游把限流错误塞在 200 响应体里了，代理也在重试（情况 B）。
   - `[尝试 N] 上游响应状态码: 401` → 鉴权方式错了，改用 `ANTHROPIC_AUTH_TOKEN`（见下）。
 - **完全没有 `[请求]` 日志** → **Claude Code 根本没走代理**，它的 429 是直接从 ARK 拿的。这是最常见的"没反应"原因，按下面修。
+
+- **HEAD 探测请求**（Claude Code 启动时发 `HEAD /`、`HEAD /api/hello` 探测连通性）：代理直接返回 200，不建 flight、不转上游、不打 `[请求]` 日志。所以日志和流列表里看不到这类请求是正常的，不代表代理没工作。
 
 ### Claude Code 没走代理的常见原因
 
@@ -336,9 +340,41 @@ Claude Code `/fast` 模式在请求体里加 `"speed":"fast"` 字段、请求头
 - **no_search**（`routes` 条目内）：标记该条目标上游不支持搜索。
 - **url / api / model**（`search_fallback` 内）：兜底支持搜索的上游，含义同 `routes` 里的同名字段。
 - **text_only**（`search_fallback` 内，可选）：标记该搜索兜底**也不支持图片**。若请求同时带图片，会改走 `multimodal_fallback`。不设或 `false` 表示该兜底支持图片。
+- **summary_mode**（`search_fallback` 内，可选，默认 `false`）：`true` 启用搜索摘要模式（见下节）；`false` 走老行为（整请求转走兜底上游）。
+- **summary_thinking**（`search_fallback` 内，可选，默认 `false`）：`summary_mode` 下第2步摘要是否开 thinking。
+- **summary_level**（`search_fallback` 内，可选，默认 `low`）：`summary_mode` 下摘要详细程度。`low`=简短摘要（`max_tokens=2048`）；`mid`=中等详细，含关键事实与数据点（`4096`）；`high`=详尽，含全部数据点/引文/上下文（`8192`）；`max`=在 `high` 基础上，遇到步骤/方法/代码/公式必须完完整整逐字复述（`16384`，`full` 为同义别名）。
 - **触发条件**：请求带搜索工具 **且** 命中的 `routes` 规则 `no_search: true` **且** 配了 `search_fallback`。
 - **改写行为**：同图片兜底，URL/API/model 改写，响应 model 回改成原始 model 名。
 - 命中时打 `[路由] #N 搜索兜底 <原model> -> <兜底url> (model <原> -> <兜底model>)`，带「搜索兜底」标识。同样走网页控制台热重载。
+
+#### 搜索摘要模式（summary_mode）
+
+默认（`summary_mode` 不设或 `false`）：命中 `no_search` 上游时，**整请求转走** `search_fallback` 上游（它自己支持搜索，直接出结果）。回答用的是兜底模型而非主力模型。
+
+`summary_mode: true` 走另一种路径：**主力不换**，用搜索上游当"搜索+摘要服务员"，代理分两步自建 Kimi 格式响应直接返回客户端，不调用主 ark：
+
+1. **step1 搜索**：把原始请求（`web_search` 工具，model 改成 `search_fallback.model`）发给搜索上游，非流式拿回 `server_tool_use` + `web_search_tool_result`（标题/URL）。
+2. **step2 摘要**：把 step1 结果作为上下文回传**同一搜索上游**，流式生成每条结果的明文摘要。详细程度由 `summary_level` 控制（`low`/`mid`/`high`/`max`，默认 `low`），`max_tokens` 随档位递增（2048/4096/8192/16384）；`max` 档遇到步骤/方法/代码/公式会完整逐字复述。可选 `summary_thinking: true` 开 thinking 提升质量。
+3. **组装返回**：按 Kimi 格式拼 `server_tool_use` -> `web_search_tool_result` -> 摘要文本的 SSE 流返回客户端。
+
+这样 Claude Desktop 的下拉搜索列表（读 `web_search_tool_result` 的标题/URL）和模型回答（读摘要文本）都能正常工作，且摘要比上游自带的更详细。step1/step2 任一失败时自动降级为整请求转走 `search_fallback`（老行为），不会报错中断。
+
+适用：搜索上游支持 `web_search` 但自带摘要不够详细，或想让摘要格式可控。注意搜索上游必须能返回标准 `server_tool_use` + `web_search_tool_result` 块（Kimi 可以；DeepSeek 视接口而定）。
+
+```json
+"search_fallback": {
+  "url": "https://api.kimi.com/coding/",
+  "api": "sk-kimi-xxx",
+  "model": "kimi-for-coding",
+  "summary_mode": true,
+  "summary_thinking": false,
+  "summary_level": "low"
+}
+```
+
+- 命中时打 `[路由] #N 搜索摘要模式 <原model> -> <兜底url>` 与 `[搜索摘要] #N ...` 日志。
+
+**搜索调试日志**（`search_debug_dir`，顶层字段，可选）：设为目录路径（相对运行目录或绝对路径，如 `"search_debug"`）后，每次搜索摘要会把 step1 请求/响应、step2 请求/响应、降级时的主力响应原始字节写入该目录（文件名 `#<流ID>_<标签>`），便于排查。留空则不落盘。
 
 ### 图片 + 搜索同时出现（能力兜底组合）
 
@@ -396,7 +432,7 @@ avgFirstByte 1.23s | tps 45.6
 3  glm-5.2    等首字      0B      -
 ```
 
-- **状态**：状态卡片 + 在途流表格。卡片字段：`active`/`waiting`（进行中/等首字）、`bytesForward`（累计转发字节）、`rate`（每秒字节速率，用两次轮询间增量算）、`cacheRead`/`input`/`output`（从 SSE `usage` 解析的累计 token）、`retries`（累计重试次数）、`classifiers`（累计命中分类器次数）、`avgFirstByte`（最近 `recent_sample_window` 次平均首字延迟）、`tps`（加权 token 吞吐）。在途流表格列：`#`/model/阶段/字节/状态。
+- **状态**：状态卡片 + 在途流表格。卡片字段：`active`/`waiting`（进行中/等首字）、`bytesForward`（累计转发字节）、`rate`（每秒字节速率，用两次轮询间增量算）、`cacheRead`/`input`/`output`（从 SSE `usage` 解析的累计 token）、`retries`（累计重试次数）、`classifiers`（累计命中分类器次数）、`avgFirstByte`（最近 `recent_sample_window` 次平均首字延迟）、`tps`（加权 token 吞吐）。在途流表格列：`#`/model/阶段/字节/状态。**顶部「访问控制」区**实时显示转发通道真实暴露状态（结合 `listen`+`allow_remote` 判定 🟢仅本机/🟡已开内网但挡远程/🔴内网可访问），「开启内网访问」按钮需二次确认（首次点击武装 3 秒倒计时，再点才生效），切换即时生效+落盘，详见 `allow_remote` 字段。搜索摘要模式触发时，step1/step2 会作为独立子流显示在在途流表格（model 列标「搜索step1·模型」「搜索step2·模型」），完成后进入「最近完成的流」，可点击查看透传内容。
 - **日志**：最近 500 行日志（`logRing` 内存环形缓冲），自动滚到底、粘性滚动（手动向上滚时暂停跟随，回到底部恢复）。无翻页键/滚轮冲突，纯浏览器原生滚动。
 - **配置**：配置文件编辑器。载入当前 `config.json` 内容（`GET /__config` 返回 `{path, content, exists}`），保存时 `POST /__config` 先 `json.Unmarshal` 进 `Config` 校验 JSON 合法性，**非法 JSON 直接返回 400 且不写盘**（避免把损坏配置写到磁盘导致下次启动失败），合法才写文件并调 `reloadConfig()` 热生效；另有「仅重载」按钮 `POST /__reload` 只调 `reloadConfig` 不改文件。
 

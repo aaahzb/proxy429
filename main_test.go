@@ -44,8 +44,8 @@ func resetStats() {
 
 func TestParseSSEStatsMessageStart(t *testing.T) {
 	resetStats()
-	var last int64
-	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":5,"cache_creation_input_tokens":3,"output_tokens":1}}}`), &last)
+	var last, lastIn, lastCR int64
+	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":5,"cache_creation_input_tokens":3,"output_tokens":1}}}`), &last, &lastIn, &lastCR)
 	if stats.cacheRead != 5 {
 		t.Errorf("cacheRead=%d want 5", stats.cacheRead)
 	}
@@ -62,12 +62,12 @@ func TestParseSSEStatsMessageStart(t *testing.T) {
 
 func TestParseSSEStatsOutputDelta(t *testing.T) {
 	resetStats()
-	var last int64
+	var last, lastIn, lastCR int64
 	// 单流：output_tokens 是累积值 1→10→20→50，全局应只记最终 50（增量之和）。
-	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"output_tokens":1}}}`), &last)
-	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":10}}`), &last)
-	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":20}}`), &last)
-	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":50}}`), &last)
+	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"output_tokens":1}}}`), &last, &lastIn, &lastCR)
+	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":10}}`), &last, &lastIn, &lastCR)
+	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":20}}`), &last, &lastIn, &lastCR)
+	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":50}}`), &last, &lastIn, &lastCR)
 	if stats.outputTokens != 50 {
 		t.Errorf("output=%d want 50", stats.outputTokens)
 	}
@@ -75,10 +75,10 @@ func TestParseSSEStatsOutputDelta(t *testing.T) {
 
 func TestParseSSEStatsMultiStream(t *testing.T) {
 	resetStats()
-	var lastA, lastB int64
+	var lastA, lastB, inA, inB, crA, crB int64
 	// 两个并发流各自独立 lastOutput，全局累加两者当前值：100+30=130。
-	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":100}}`), &lastA)
-	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":30}}`), &lastB)
+	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":100}}`), &lastA, &inA, &crA)
+	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":30}}`), &lastB, &inB, &crB)
 	if stats.outputTokens != 130 {
 		t.Errorf("output=%d want 130", stats.outputTokens)
 	}
@@ -86,13 +86,76 @@ func TestParseSSEStatsMultiStream(t *testing.T) {
 
 func TestParseSSEStatsIgnoresNonData(t *testing.T) {
 	resetStats()
-	var last int64
-	parseSSEStats([]byte(`event: content_block_delta`), &last)
-	parseSSEStats([]byte(`data: [DONE]`), &last)
-	parseSSEStats([]byte(``), &last)
-	parseSSEStats([]byte(`data: {"type":"content_block_delta","delta":{"text":"x"}}`), &last)
+	var last, lastIn, lastCR int64
+	parseSSEStats([]byte(`event: content_block_delta`), &last, &lastIn, &lastCR)
+	parseSSEStats([]byte(`data: [DONE]`), &last, &lastIn, &lastCR)
+	parseSSEStats([]byte(``), &last, &lastIn, &lastCR)
+	parseSSEStats([]byte(`data: {"type":"content_block_delta","delta":{"text":"x"}}`), &last, &lastIn, &lastCR)
 	if stats.outputTokens != 0 || stats.cacheRead != 0 {
 		t.Errorf("非 usage 事件不应计数: output=%d cacheRead=%d", stats.outputTokens, stats.cacheRead)
+	}
+}
+
+// 回归：message_start 与 message_delta 都带 input_tokens / cache_read 时，
+// 取最后出现的值（后值覆盖前值），不累加。Kimi 实测：start=45814, delta=1270。
+func TestParseSSEStatsUsageNoDoubleCount(t *testing.T) {
+	resetStats()
+	var last, lastIn, lastCR int64
+	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":45814,"cache_read_input_tokens":9000,"output_tokens":1}}}`), &last, &lastIn, &lastCR)
+	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"input_tokens":1270,"cache_read_input_tokens":200,"output_tokens":50}}`), &last, &lastIn, &lastCR)
+	if stats.inputTokens != 1270 {
+		t.Errorf("input=%d want 1270 (取最后值，非 max)", stats.inputTokens)
+	}
+	if stats.cacheRead != 200 {
+		t.Errorf("cacheRead=%d want 200 (取最后值)", stats.cacheRead)
+	}
+	if stats.outputTokens != 50 {
+		t.Errorf("output=%d want 50", stats.outputTokens)
+	}
+	// last 也应是最后值
+	if lastIn != 1270 || lastCR != 200 || last != 50 {
+		t.Errorf("last=%d/%d/%d want 1270/200/50", lastIn, lastCR, last)
+	}
+}
+
+// 字段缺失时保持原值：message_delta 不含 input_tokens 时不应覆盖为 0。
+func TestParseSSEStatsUsageMissingField(t *testing.T) {
+	resetStats()
+	var last, lastIn, lastCR int64
+	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":50,"output_tokens":1}}}`), &last, &lastIn, &lastCR)
+	// message_delta 只带 output_tokens，input/cache_read 缺失，应保持 100/50
+	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":80}}`), &last, &lastIn, &lastCR)
+	if stats.inputTokens != 100 {
+		t.Errorf("input=%d want 100 (缺失字段不应覆盖)", stats.inputTokens)
+	}
+	if stats.cacheRead != 50 {
+		t.Errorf("cacheRead=%d want 50 (缺失字段不应覆盖)", stats.cacheRead)
+	}
+	if stats.outputTokens != 80 {
+		t.Errorf("output=%d want 80", stats.outputTokens)
+	}
+}
+
+func TestParseNonStreamUsage(t *testing.T) {
+	// Anthropic 非流式（分类器响应）
+	in, cr, out, ok := parseNonStreamUsage([]byte(`{"type":"message","content":[{"type":"text","text":"x"}],"usage":{"input_tokens":143,"cache_read_input_tokens":61568,"output_tokens":5}}`))
+	if !ok || in != 143 || cr != 61568 || out != 5 {
+		t.Errorf("anthropic: ok=%v in=%d cr=%d out=%d want 143/61568/5", ok, in, cr, out)
+	}
+	// OpenAI 风格（prompt_tokens/completion_tokens，无 cache_read）
+	in, cr, out, ok = parseNonStreamUsage([]byte(`{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}`))
+	if !ok || in != 100 || cr != 0 || out != 50 {
+		t.Errorf("openai: ok=%v in=%d cr=%d out=%d want 100/0/50", ok, in, cr, out)
+	}
+	// 无 usage 字段
+	_, _, _, ok = parseNonStreamUsage([]byte(`{"foo":"bar"}`))
+	if ok {
+		t.Errorf("no usage: should return ok=false")
+	}
+	// 非 JSON
+	_, _, _, ok = parseNonStreamUsage([]byte(`not json`))
+	if ok {
+		t.Errorf("non-json: should return ok=false")
 	}
 }
 
