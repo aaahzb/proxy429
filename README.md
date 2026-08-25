@@ -49,11 +49,12 @@ Claude Code 的所有请求先发到本地代理（`127.0.0.1:8080`），代理�
   "retry_status_codes": [429, 500, 502, 503, 504],
   "respect_retry_after": true,
   "classifier_thinking_disabled": true,
-  "classifier_system_prefix": "You are a security monitor",
   "classifier_max_tokens": 0,
   "upstream_header_timeout_s": 70,
   "log_request_detail": false,
   "recent_sample_window": 20,
+  "convertAlltoStream": false,
+  "responses_listen": "",
   "routes": []
 }
 ```
@@ -67,17 +68,18 @@ Claude Code 的所有请求先发到本地代理（`127.0.0.1:8080`），代理�
 - **retry_status_codes**：触发重试的状态码。
 - **respect_retry_after**：是否优先听上游 `Retry-After` 头。
 - **classifier_thinking_disabled**：是否对安全分类器请求关掉 thinking（见下节）。
-- **classifier_system_prefix**：分类器请求的 system 提示词前缀，用于识别。
 - **classifier_max_tokens**：命中分类器后把 max_tokens 压到这个值（加速）。**注意：值太小（如 512）会让分类器的 thinking 被截断、Claude Code 收不到有效的安全判断，表现为 Bash 被拒且不给原因**。推荐 `0`（不压，用请求原 max_tokens；关 thinking 后输出很短，仍快速返回）。
 - **upstream_header_timeout_s**：等上游首字节的最长时间（秒）。超过则认为请求卡住，**内部自动重发**（不报错给 Claude Code），重试用尽才透传 503 交给 Claude Code 自行重试。默认 `70`（70s）。用首字节超时而非整体超时，只卡"等响应开头"而不砍掉长流式输出。
 - **ping_interval_s**：429 重试时向客户端发 SSE ping 保活的间隔（秒）。代理重试期间客户端收不到上游数据，长时间无数据会触发 Claude Code 超时报 API error；代理定期发 ping 保活避免此问题。默认 `5`；`0` 用默认。详见「429 重试保活」一节。
 - **log_request_detail**：是否打印每个请求的 stream/tools/system 前缀（诊断分类器指纹用，默认关）。
 - **recent_sample_window**：网页控制台「状态」标签「首字」「tok/s」取最近多少次请求的样本做统计（滑动窗口）。默认 `20`；改大更平滑、改小更跟手。仅统计正常透传（情况 C）的流。
+- **convertAlltoStream**：全局流式化开关（默认 `false`）。开启后，所有非流式请求（`stream:false` 或省略）被代理悄悄改为流式发给上游——网页控制台实时可见吐字，首字延迟与 tok/s 统计与普通流式请求一致。请求方无感知：代理把上游流完整收完后，**原样重建**非流式 JSON 一次性返回（所有内容块按流里原样拼回，含搜索结果 `encrypted_content`），调用方拿到的仍是它预期的非流式响应。流中途断开（未见 `message_stop`）时未向客户端写任何内容，代理整体重试。仅作用于 Anthropic Messages 请求（`/v1/messages`）；已是流式的请求与搜索摘要模式不受影响。详见「全局流式化」一节。
+- **responses_listen**：OpenAI Responses API 监听口（默认空，不启用）。设为如 `127.0.0.1:8081` 后，代理在该地址额外开一个 Responses API 端点（`/v1/responses`），把 Responses 协议请求翻译成 Anthropic Messages 走主管线（路由/重试/网页监控全部生效），响应再翻译回 Responses 协议。供 Codex CLI 等只说 Responses 协议的工具接入 Anthropic 上游。改动需重启生效。详见「Responses API 监听口」一节。
 - **routes**：模型路由规则数组，按 `pattern` 通配匹配请求的 model 名，命中则改走指定上游（换 URL/API/model）。未配置或空数组则不路由，所有请求走默认 `upstream`。详见「路由功能」一节。
 - **classifier_route**：分类器请求专用路由（对象，与 `routes` 平级）。命中分类器（安全判断）的请求无视原 model 统一路由到指定 `url`/`api`/`model`；未配置则分类器请求仍按 model 走 `routes`（兼容）。详见「路由功能」一节。
 - **fast_route**：fast 模式请求专用路由（对象，与 `routes` 平级）。检测到 `"speed":"fast"` 的非分类器请求统一路由到指定 `url`/`api`/`model`；未配置则不干预（兼容）。详见「路由功能」一节。
-- **multimodal_fallback**：多模态兜底路由（对象，与 `routes` 平级）。请求带图片却命中 `text_only` 纯文本模型时，自动改走此处指定的 `url`/`api`/`model`；未配置则不兜底（透传给纯文本模型，由上游处理）。也可用 `no_search` 标记该兜底不支持搜索。详见「路由功能」一节。
-- **search_fallback**：搜索兜底路由（对象，与 `routes` 平级）。请求带搜索工具却命中 `no_search` 不支持搜索上游时，自动改走此处指定的 `url`/`api`/`model`；未配置则不兜底。也可用 `text_only` 标记该兜底不支持图片。详见「路由功能」一节。
+- **multimodal_fallback**：多模态兜底路由（对象，与 `routes` 平级）。请求带图片却命中 `text_only` 纯文本模型时，自动改走此处指定的 `url`/`api`/`model`；未配置则不兜底（透传给纯文本模型，由上游处理）。详见「路由功能」一节。
+- **search_fallback**：搜索兜底路由（对象，与 `routes` 平级）。请求带搜索工具却命中 `no_search` 不支持搜索上游时，自动改走此处指定的 `url`/`api`/`model`；未配置则不兜底。详见「路由功能」一节。
 - **log_file**：日志文件路径（可选）。**默认空**：日志只进内存环形缓冲（`logRing`，500 行，供网页控制台「日志」标签轮询）+ stderr；windowsgui 子系统或无终端时 stderr 为空操作，即不落盘。设了非空值才同时追加写入此文件，方便留存排查或 RemoteApp 等无控制台场景复制查看。改了需重启代理生效（网页「配置」标签保存重载不会重开日志文件）。
 
 ## 用法
@@ -198,7 +200,7 @@ Claude Code 跑 Bash 前会用模型做一次"安全分类"。这个分类请求
 ### 怎么确认生效
 
 1. 跑 `claude` 触发一次 Bash 操作，看网页控制台「日志」标签有没有 `[改写] 命中分类器请求` 日志。有 → 分类器走代理了且已改写。
-2. 如果没看到 `[改写]` 但 Bash 还是慢/失败：把 `config.json` 的 `log_request_detail` 改成 `true`，再触发一次，看 `[详情]` 日志里那个非流式请求的 `sys=` 前缀到底是什么，把 `classifier_system_prefix` 改成它。
+2. 如果没看到 `[改写]` 但 Bash 还是慢/失败：把 `config.json` 的 `log_request_detail` 改成 `true`，再触发一次，看 `[详情]` 日志里那个非流式请求的 `sys=` 前缀到底是什么。分类器前缀已硬编码为 `You are a security monitor`（main.go 常量 `classifierSystemPrefix`），若 Claude Code 升级后换了前缀，需改此常量重编译。
 3. 如果 ARK 的 glm-5.2 不认 `thinking:{type:"disabled"}`（改写了但分类还是慢），目前没有完美办法——三字段已经一起塞了，多余的会被上游忽略。可以先观察 `[改写]` 之后 Bash 是否还报 unavailable。
 
 > 注意：这只治"分类器因 thinking 太慢撞超时"。如果分类器返回的是 429/503（限流），那走的是上面的重试逻辑，两套各管各的。
@@ -225,12 +227,13 @@ ARK 的 Base URL 带 `/api/plan` 前缀，但因为 Claude Code 自带 `/v1/mess
 ]
 ```
 
-- **pattern**：模型名通配符，仅支持 `*`（匹配任意长度任意字符，含空）。`claude-opus*` 命中 `claude-opus-4-8`/`claude-opus`；`*opus` 匹配后缀；`claude-*` 匹配前缀；`a*b*c` 要求中间出现 b。无 `*` 则精确匹配。多条规则按数组顺序匹配，**第一个命中的生效**。
+- **pattern**：模型名通配符，仅支持 `*`（匹配任意长度任意字符，含空）。`claude-opus*` 命中 `claude-opus-4-8`/`claude-opus`；`*opus` 匹配后缀；`claude-*` 匹配前缀；`a*b*c` 要求中间出现 b。无 `*` 则精确匹配。多条规则按数组顺序匹配，**第一个命中的生效**，没有"更具体优先"的排序--宽通配会截胡窄通配：`*opus*` 写在 `*opus-4*` 前面时，`claude-opus-4-8` 会先命中 `*opus*`，`*opus-4*` 永不触发；要让更具体的 pattern 生效，把它写在前面。
 - **url**：目标上游 Base URL（覆盖默认 `upstream`）。Claude Code 的 `/v1/messages` 会拼在后面，拼接规则和默认 upstream 一致。
 - **api**：目标 API key，设为 `Authorization: Bearer` 头。命中后会**删掉客户端原带的 `Authorization` 与 `x-api-key`**（避免把 ARK 的 token 透传到 DeepSeek 之类），再设新 key。留空则透传客户端原 token。
 - **model**：替换成的目标模型名（改写请求体 `"model"` 字段的值，长度变化自动重算 Content-Length）。留空则不改 model。
 - **text_only**：布尔，标记目标模型**仅支持纯文本**。设为 `true` 后，若该请求带图片，会自动改走 `multimodal_fallback` 兜底（详见「图片路由」一节）。不设或 `false` 则不兜底。
 - **no_search**：布尔，标记目标上游**不支持搜索**。设为 `true` 后，若该请求带搜索工具，会自动改走 `search_fallback` 兜底（详见「搜索路由」一节）。不设或 `false` 则不兜底。
+- **enhance_search**（可选对象，省略即不启用）：配成 `{}` 或填子字段即启用**增强搜索**——主力支持搜索（`no_search` 不为 `true`）时，带搜索工具的请求不调主力，改用本 route 的 `url`/`api`/`model` 走 kimi 摘要模式（详见「增强搜索」一节）。子字段：`summary_thinking`（默认 `false`）第2步摘要是否开 thinking；`summary_level`（默认 `low`）摘要详细程度 `low`/`mid`/`high`/`max`，档位与 `search_fallback.summary_level` 一致。
 
 命中时打 `[路由]` 日志，如 `[路由] #1 claude-opus-4-8 -> https://api.deepseek.com (model claude-opus-4-8 -> deepseek-V4-pro)`；`[请求]` 行仍显示路由前的原始 model 名。路由命中后的重试仍走同一目标上游（URL/API/model 不变）。网页控制台「配置」标签保存重载会重新读 `routes`，热生效。
 
@@ -305,10 +308,9 @@ Claude Code `/fast` 模式在请求体里加 `"speed":"fast"` 字段、请求头
 
 - **text_only**（`routes` 条目内）：标记该条目标模型仅支持纯文本。
 - **url / api / model**（`multimodal_fallback` 内）：兜底多模态上游，含义同 `routes` 里的同名字段。
-- **no_search**（`multimodal_fallback` 内，可选）：标记该图片兜底**也不支持搜索**。若请求同时带搜索工具，会改走 `search_fallback`（见下节）。不设或 `false` 表示该兜底支持搜索。
-- **触发条件**：请求体含 Anthropic 图片内容块（`{"type":"image",...}`） **且** 命中的 `routes` 规则 `text_only: true` **且** 配了 `multimodal_fallback`。三者同时满足才兜底。
+- **触发条件**：请求体含 Anthropic 图片内容块（`{"type":"image",...}`） **且** 命中的 `routes` 规则 `text_only: true` **且** 配了 `multimodal_fallback` **且** 请求不带搜索工具（带搜索时走 `search_fallback`）。四者同时满足才兜底。
 - **改写行为**：命中兜底后，URL/API 改用 `multimodal_fallback` 的值，请求体 `"model"` 改写成兜底 model 名。响应里的 `"model"` 仍会**回改成原始 model 名**（和普通路由一样，见上文「响应 model 回改」），Claude Code 看到的还是它发出的原始 model。
-- **不兜底的情况**：请求无图片；命中的规则 `text_only` 为 `false`/未设（目标模型自己支持多模态）；配了 `text_only: true` 但没配 `multimodal_fallback`（降级透传给纯文本模型，由上游处理）。分类器路由、fast 路由不参与图片兜底。
+- **不兜底的情况**：请求无图片；命中的规则 `text_only` 为 `false`/未设（目标模型自己支持多模态）；配了 `text_only: true` 但没配 `multimodal_fallback`（降级透传给纯文本模型，由上游处理）；请求带搜索工具（改走 `search_fallback`）。分类器路由、fast 路由不参与图片兜底。
 - 命中时打 `[路由] #N 图片兜底 <原model> -> <兜底url> (model <原> -> <兜底model>)`，带「图片兜底」标识。同样走网页控制台热重载。
 
 ### 搜索路由（search_fallback）
@@ -339,7 +341,6 @@ Claude Code `/fast` 模式在请求体里加 `"speed":"fast"` 字段、请求头
 
 - **no_search**（`routes` 条目内）：标记该条目标上游不支持搜索。
 - **url / api / model**（`search_fallback` 内）：兜底支持搜索的上游，含义同 `routes` 里的同名字段。
-- **text_only**（`search_fallback` 内，可选）：标记该搜索兜底**也不支持图片**。若请求同时带图片，会改走 `multimodal_fallback`。不设或 `false` 表示该兜底支持图片。
 - **summary_mode**（`search_fallback` 内，可选，默认 `false`）：`true` 启用搜索摘要模式（见下节）；`false` 走老行为（整请求转走兜底上游）。
 - **summary_thinking**（`search_fallback` 内，可选，默认 `false`）：`summary_mode` 下第2步摘要是否开 thinking。
 - **summary_level**（`search_fallback` 内，可选，默认 `low`）：`summary_mode` 下摘要详细程度。`low`=简短摘要（`max_tokens=2048`）；`mid`=中等详细，含关键事实与数据点（`4096`）；`high`=详尽，含全部数据点/引文/上下文（`8192`）；`max`=在 `high` 基础上，遇到步骤/方法/代码/公式必须完完整整逐字复述（`16384`，`full` 为同义别名）。
@@ -374,33 +375,72 @@ Claude Code `/fast` 模式在请求体里加 `"speed":"fast"` 字段、请求头
 
 - 命中时打 `[路由] #N 搜索摘要模式 <原model> -> <兜底url>` 与 `[搜索摘要] #N ...` 日志。
 
-**搜索调试日志**（`search_debug_dir`，顶层字段，可选）：设为目录路径（相对运行目录或绝对路径，如 `"search_debug"`）后，每次搜索摘要会把 step1 请求/响应、step2 请求/响应、降级时的主力响应原始字节写入该目录（文件名 `#<流ID>_<标签>`），便于排查。留空则不落盘。
+### 增强搜索（routes 内 enhance_search）
 
-### 图片 + 搜索同时出现（能力兜底组合）
+上面 `search_fallback.summary_mode` 处理的是「主力不支持搜索」的兜底场景。**增强搜索**处理反过来：主力本身**支持搜索**，但你不想用主力自带搜索，想让代理用 kimi 摘要模式（step1 搜索 + step2 摘要）来回答。
 
-请求可能**同时带图片和搜索工具**（例如上传一张图让它"搜一下图里的东西"）。这时目标模型若两个能力都缺（`text_only: true` + `no_search: true`），需要走到一个**两个能力都满足**的兜底。代理按以下顺序选兜底：
+在 `routes` 条目内加 `enhance_search` 对象（省略即不启用）：
 
-1. `search_fallback`：若它两个能力都满足（即 `text_only` 不为 `true`，能认图），走它。
-2. `multimodal_fallback`：若它两个能力都满足（即 `no_search` 不为 `true`，能搜索），走它。
-3. 纯图片请求（无搜索）但 `multimodal_fallback` 没配时，退而走支持图片的 `search_fallback`。
-4. 都不满足：降级走原 route（由上游处理，可能报错）。
-
-**典型配置**（DeepSeek 搜索强但不认图，Kimi 支持图+搜索）：
+- **触发条件**：请求带搜索工具 **且** 命中的 `routes` 规则 `no_search` 不为 `true`（即支持搜索）**且** 该规则配了 `enhance_search`。
+- **行为**：不调主力，用**该 route 自己的 `url`/`api`/`model`** 走 kimi 摘要模式（同上 step1+step2+自构响应），摘要参数用该 route 的 `enhance_search.summary_level`/`enhance_search.summary_thinking`。
+- **与 `search_fallback.summary_mode` 区别**：后者是 `no_search:true` 时的兜底，搜索上游用 `search_fallback` 配的；前者是 `no_search:false` 的主力主动改走摘要，搜索上游用 `routes` 条目自己配的。两者互斥：`no_search:true` 走 `search_fallback`，`no_search:false` + `enhance_search` 走增强搜索。
+- **降级**：step1/step2 失败时降级为整请求转走该 route 上游（主力正常透传）。
 
 ```json
 "routes": [
-  {"pattern": "claude-opus*", "url": "https://volces.example.com", "api": "sk-volc-xxx", "model": "ark-opus", "text_only": true, "no_search": true}
-],
-"search_fallback":     {"url": "https://api.deepseek.com", "api": "sk-deepseek-xxx", "model": "deepseek-search", "text_only": true},
-"multimodal_fallback": {"url": "https://kimi.example.com", "api": "sk-kimi-xxx", "model": "kimi-vl", "no_search": false}
+  {
+    "pattern": "claude-haiku*",
+    "url": "https://api.deepseek.com",
+    "api": "sk-deepseek-xxx",
+    "model": "deepseek-V4-pro",
+    "enhance_search": {
+      "summary_thinking": false,
+      "summary_level": "mid"
+    }
+  }
+]
 ```
 
-效果：
-- 纯搜索请求 -> 走 `search_fallback`（DeepSeek，质量高）。
-- 纯图片请求 -> 走 `multimodal_fallback`（Kimi）。
-- 带图搜索请求 -> `search_fallback` 不认图（`text_only:true`），走 `multimodal_fallback`（Kimi，图+搜索都支持）。
+- 命中时打 `[路由] #N 增强搜索 <原model> -> <route url> (model <原> -> <route model>)`。
+
+### 图片 + 搜索同时出现
+
+请求若同时带图片和搜索工具，代理**按搜索处理**：整个请求走 `search_fallback`（`summary_mode` 则两步摘要），不管请求体里是否含图片。没有证据表明实际会出现"多模态+搜索"的组合，所以不为它单独找"既认图又能搜"的兜底；若搜索上游不支持图片，带图过去可能被上游报错，代理原样透传。
+
+- 搜索请求 -> 一律 `search_fallback`（不管含不含图片）。
+- 纯图片请求（无搜索）-> `multimodal_fallback`；没配则透传原 route（上游不支持图片则报错，代理透传）。
 
 > 能力兜底只在 model 路由分支触发，分类器路由、fast 路由不参与。两个兜底都未配时退回原行为。
+
+## 全局流式化（convertAlltoStream）
+
+分类器、搜索 step1 等**非流式请求**在网页控制台上看不到吐字、没有首字/tok/s 统计——上游按非流式直接返回整段 JSON，代理原样透传，页面只能看到"一次性到达"。
+
+`convertAlltoStream`（顶层配置，默认 `false`）开启后，代理把**所有**非流式请求悄悄改为流式发给上游：
+
+- **请求侧**：`stream:false`（或省略）的 `/v1/messages` 请求，body 里 `stream` 字段被改写为 `true` 再发上游（流式定位 + 文本替换，不改动其它字段）。
+- **网页监控**：上游按流式回 SSE 时，代理边收边 tee 到在途流页面——实时可见吐字，首字延迟、流式时长、tok/s 统计与普通流式请求完全一致。
+- **回传侧（客户端无感知）**：代理把整个流收完（直到 `message_stop`），**原样重建**非流式 message JSON--所有内容块（文本、thinking、`server_tool_use`、`web_search_tool_result` 含 `encrypted_content`、`tool_use` 参数等）按流里原样保留拼回，一次性以 `application/json` 返回。调用方不知道自己的非流式请求被改成过流式。
+- **model 回写**：路由改写过 model 的请求，重建时 model 字段回写客户端原始 model（与流式透传一致）。
+- **可靠性**：流中途断开（未见 `message_stop`）时**未向客户端写任何字节**，代理按重试节奏整体重发（重发流式请求、重收一次流）；重试等待期间**不发 SSE ping 保活**（会污染非流式响应，静默等待）。重试用尽透传 502。
+- **影响范围**：只作用于 Anthropic Messages 请求（`/v1/messages`）；已是流式的请求、搜索摘要模式（自构响应）不受影响。上游没按流式回（返回普通 JSON）则直接透传。
+
+## Responses API 监听口（responses_listen）
+
+`responses_listen`（顶层配置，默认空 = 不启用）让代理在指定地址额外开一个 **OpenAI Responses API** 端点，把只说 Responses 协议的工具（Codex CLI 等）接到任意 Anthropic 上游：
+
+```json
+"responses_listen": "127.0.0.1:8081"
+```
+
+- **接入方式**：工具指向 `http://127.0.0.1:8081/v1`，按 Responses 协议 POST `/v1/responses`（`/responses` 也认）。请求里的 model 名照常参与主管线路由匹配——在 `routes` 里加一条对应 pattern（如 `gpt-5*`）即可指定走哪个 Anthropic 上游、改写成什么模型。
+- **翻译**：`instructions`/system 消息 → `system`；扁平 `input[]` 重新嵌套成 Anthropic messages（`function_call` 并入 assistant 的 tool_use、连续 `function_call_output` 合并进一条 user 的 tool_result，不完整工具轮自动丢弃、首条非 user 自动补前导）；`max_output_tokens` → `max_tokens`（缺省 32000）。
+- **thinking 映射**（与 cc-switch 3.20.0 的 thinking_optimizer 完全一致）：`reasoning.effort` 按模型分类走两条路径——adaptive 模型（fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6，子串匹配）翻成 `thinking:{"type":"adaptive"}` + `output_config.effort`（low/medium/high/max），其中 fable-5/mythos-5/mythos-preview/sonnet-5 不带 effort 也默认开；fable-5/mythos-5 关不掉 thinking，显式 `effort:"none"` 翻成 adaptive + `effort:"low"`。其余模型翻成 `thinking:{"type":"enabled","budget_tokens":N}`（low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576，上限压到 max_tokens 一半、不足 1024 不开）。工具续轮缺签名 thinking 回放、或 thinking 与强制 tool_choice 冲突时按 cc-switch 同款规则降级/报错。查表用客户端发来的 model 名（路由改写之前）。完整映射表见 `使用说明.md`「Responses 翻译映射表」。
+- **工具体系**（与 cc-switch 3.20.0 对齐）：function 工具与 `web_search` 托管工具 → Anthropic tools（web_search 映射 `web_search_20250305`，cc-switch 反而是丢弃的）；`custom` freeform 工具（如 Codex 的 apply_patch）→ 包装成 `{"input": string}` 的 JSON Schema，原始工具定义内嵌 description，响应拆包回 `custom_tool_call`（流式走 `custom_tool_call_input.done` 事件）；`namespace`（MCP）工具 → 子工具拍平成 `ns__name`（超 64 字节截断加 sha256 后缀），响应还原成带 `namespace` 字段的 function_call；`tool_search` → 固定代理工具。工具结果里的图片媒体（MCP image 块、JSON 字符串嵌套、整串 data URL）自动剥离成 Anthropic image 块而非字符串化；`input_file` → document 块；`tool_choice` 全形状映射（required/auto/none/function/custom/tool_search，未知形状降级 auto）；Anthropic 模型 Read 工具调用的 `pages:""` 怪癖自动清理。
+- **响应**：Anthropic 内容块实时翻回 Responses 事件/对象——text → message 项（`output_text.delta`）、thinking → reasoning 项（摘要文本 + `encrypted_content`）、tool_use → function_call/custom_tool_call/tool_search_call 项（按工具注册表还原身份）、搜索结果 → `web_search_call` 项；usage 合并（缓存读计入 `input_tokens_details.cached_tokens`，缓存写计入 `cache_write_tokens`）。客户端 `stream:true` 拿 SSE 事件流，`stream:false` 拿一次性 JSON。
+- **思考块信封**：Anthropic 签名 thinking 块被 base64 自封装进 reasoning 项的 `encrypted_content`（前缀 `p429-ant-thinking-v1:`），客户端下轮回放历史时还原成 thinking 块发给上游——多轮工具调用的思考链不丢，且自包含、不依赖上游解密。
+- **管线复用**：翻译层把请求内部转交给主 `/v1/messages` handler，上游永远走流式——路由（pattern/分类器/fast/多模态/搜索兜底）、429 重试保活、网页控制台在途流监控与统计全部照常生效。
+- **限制**：与主 `listen` 一样改动需重启生效；访问控制与主端口同规则（`allow_remote=false` 时仅本机）；端口被占用只告警禁用、不影响主代理。不支持 computer use 类计算机操作工具（无对应客户端与上游，cc-switch 同样不支持）、`store:true` 服务端状态与 `/v1/models` 列举。
 
 ## 429 重试保活（SSE ping）
 

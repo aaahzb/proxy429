@@ -18,7 +18,7 @@
 - `routes[].api`: 各路由模型对应上游的 key
 - `classifier_route.api`、`fast_route.api`、`multimodal_fallback.api`、`search_fallback.api`: 各兜底路由的 key
 - `search_fallback` 支持搜索摘要模式（`summary_mode: true`）:代理分两步自建响应(step1 搜索 + step2 摘要),不调用主力;摘要详细程度用 `summary_level`(`low`/`mid`/`high`/`max`,默认 `low`)控制,详见 README.md「搜索摘要模式」。
-- `search_debug_dir`: 非空时把搜索摘要各步原始请求/响应写入该目录,便于排查;留空不落盘。
+- `routes[]` 内也可配 `"enhance_search": {...}` 启用**增强搜索**:主力支持搜索时,带搜索工具的请求不调主力,改用该 route 自己的上游走 kimi 摘要模式。详见 README.md「增强搜索」。
 
 常用字段速查:
 

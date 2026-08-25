@@ -159,6 +159,34 @@ func TestParseNonStreamUsage(t *testing.T) {
 	}
 }
 
+func TestAddModelUsage(t *testing.T) {
+	stats.mu.Lock()
+	stats.modelStats = nil
+	stats.mu.Unlock()
+	stats.addModelUsage("deepseek-v4", 100, 200, 50)
+	stats.addModelUsage("kimi", 10, 500, 5)
+	stats.addModelUsage("deepseek-v4", 50, 100, 30)
+	// 空模型名 / 全零应被忽略
+	stats.addModelUsage("", 1, 2, 3)
+	stats.addModelUsage("zero", 0, 0, 0)
+	got := stats.snapshotModelStats()
+	if len(got) != 2 {
+		t.Fatalf("want 2 models, got %d: %+v", len(got), got)
+	}
+	// 按 total 降序：deepseek-v4=150+300+80=530, kimi=10+500+5=515
+	if got[0].Model != "deepseek-v4" {
+		t.Errorf("first should be deepseek-v4 (total 530), got %s", got[0].Model)
+	}
+	ds := got[0]
+	if ds.Input != 150 || ds.CacheRead != 300 || ds.Output != 80 {
+		t.Errorf("deepseek-v4累加错: in=%d cr=%d out=%d want 150/300/80", ds.Input, ds.CacheRead, ds.Output)
+	}
+	// 清理
+	stats.mu.Lock()
+	stats.modelStats = nil
+	stats.mu.Unlock()
+}
+
 func TestHumanNum(t *testing.T) {
 	cases := []struct {
 		in   int64
@@ -294,7 +322,6 @@ func TestHandlerLatencySampling(t *testing.T) {
 func setCfg(thinkingDisabled bool, maxTokens int) {
 	cfg.Store(&Config{
 		ClassifierThinkingDisabled: thinkingDisabled,
-		ClassifierSystemPrefix:     "You are a security monitor",
 		ClassifierMaxTokens:        maxTokens,
 	})
 }
@@ -651,11 +678,10 @@ func TestClassifierRouteHit(t *testing.T) {
 	defer defaultMock.Close()
 
 	cfg.Store(&Config{
-		Upstream:               defaultMock.URL,
-		MaxRetries:             0,
-		TotalBudgetSec:         10,
-		RecentSampleWindow:     5,
-		ClassifierSystemPrefix: "You are a security monitor",
+		Upstream:           defaultMock.URL,
+		MaxRetries:         0,
+		TotalBudgetSec:     10,
+		RecentSampleWindow: 5,
 		ClassifierRoute: &ClassifierRoute{
 			URL:   clfMock.URL,
 			API:   "sk-clf-xxx",
@@ -728,11 +754,10 @@ func TestClassifierRouteFallback(t *testing.T) {
 	defer defaultMock.Close()
 
 	cfg.Store(&Config{
-		Upstream:               defaultMock.URL,
-		MaxRetries:             0,
-		TotalBudgetSec:         10,
-		RecentSampleWindow:     5,
-		ClassifierSystemPrefix: "You are a security monitor",
+		Upstream:           defaultMock.URL,
+		MaxRetries:         0,
+		TotalBudgetSec:     10,
+		RecentSampleWindow: 5,
 		// ClassifierRoute 故意不设：分类器请求应回退到 model 路由
 		Routes: []RouteRule{
 			{Pattern: "claude-opus*", URL: modelMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
@@ -802,11 +827,10 @@ func TestClassifierRouteNotClassifier(t *testing.T) {
 	defer defaultMock.Close()
 
 	cfg.Store(&Config{
-		Upstream:               defaultMock.URL,
-		MaxRetries:             0,
-		TotalBudgetSec:         10,
-		RecentSampleWindow:     5,
-		ClassifierSystemPrefix: "You are a security monitor",
+		Upstream:           defaultMock.URL,
+		MaxRetries:         0,
+		TotalBudgetSec:     10,
+		RecentSampleWindow: 5,
 		ClassifierRoute: &ClassifierRoute{
 			URL:   clfMock.URL,
 			API:   "sk-clf-xxx",
@@ -890,11 +914,10 @@ func TestFastRouteHit(t *testing.T) {
 	defer defaultMock.Close()
 
 	cfg.Store(&Config{
-		Upstream:               defaultMock.URL,
-		MaxRetries:             0,
-		TotalBudgetSec:         10,
-		RecentSampleWindow:     5,
-		ClassifierSystemPrefix: "You are a security monitor",
+		Upstream:           defaultMock.URL,
+		MaxRetries:         0,
+		TotalBudgetSec:     10,
+		RecentSampleWindow: 5,
 		FastRoute: &FastRoute{
 			URL:   fastMock.URL,
 			API:   "sk-fast-xxx",
@@ -972,11 +995,10 @@ func TestFastRouteNotConfigured(t *testing.T) {
 	defer modelRouteMock.Close()
 
 	cfg.Store(&Config{
-		Upstream:               "http://no-default-should-not-hit.example.com",
-		MaxRetries:             0,
-		TotalBudgetSec:         10,
-		RecentSampleWindow:     5,
-		ClassifierSystemPrefix: "You are a security monitor",
+		Upstream:           "http://no-default-should-not-hit.example.com",
+		MaxRetries:         0,
+		TotalBudgetSec:     10,
+		RecentSampleWindow: 5,
 		Routes: []RouteRule{
 			{Pattern: "claude-opus*", URL: modelRouteMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
@@ -1029,11 +1051,10 @@ func TestFastRouteClassifierPriority(t *testing.T) {
 	defer fastMock.Close()
 
 	cfg.Store(&Config{
-		Upstream:               "http://no-default-should-not-hit.example.com",
-		MaxRetries:             0,
-		TotalBudgetSec:         10,
-		RecentSampleWindow:     5,
-		ClassifierSystemPrefix: "You are a security monitor",
+		Upstream:           "http://no-default-should-not-hit.example.com",
+		MaxRetries:         0,
+		TotalBudgetSec:     10,
+		RecentSampleWindow: 5,
 		ClassifierRoute: &ClassifierRoute{
 			URL:   clfMock.URL,
 			API:   "sk-clf-xxx",
@@ -1664,8 +1685,95 @@ func TestSearchFallbackNotNoSearch(t *testing.T) {
 	}
 }
 
-// TestSearchFallbackWithImage 端到端：带图搜索 + text_only+no_search 模型 + sf.TextOnly（搜索强但不认图）+ mf 配（支持图+搜索），
-// 应走 multimodal_fallback（kimi），不认图的 search_fallback 不应被命中。
+// TestEnhanceSearchRoute 端到端：route.EnhanceSearch 非 nil + 带搜索工具 + no_search:false，
+// 应走增强搜索（searchAndRespond 用 route 的 url/api/model），不调主力默认 upstream。
+func TestEnhanceSearchRoute(t *testing.T) {
+	resetStats()
+	var rg struct {
+		mu     sync.Mutex
+		called bool
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		rg.mu.Lock()
+		rg.called = true
+		rg.mu.Unlock()
+		var m map[string]any
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &m)
+		stream, _ := m["stream"].(bool)
+		if !stream {
+			// step1：非流式 JSON，返回 server_tool_use + web_search_tool_result。
+			resp := map[string]any{
+				"id":          "msg_step1",
+				"model":       "deepseek-V4-pro",
+				"stop_reason": "end_turn",
+				"content": []map[string]any{
+					{"type": "server_tool_use", "id": "srvtoolu_enh", "name": "web_search", "input": map[string]any{}},
+					{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_enh", "content": []map[string]any{
+						{"type": "web_search_tool_result_content", "url": "https://example.com/1", "title": "Enh Result"},
+					}},
+				},
+			}
+			b, _ := json.Marshal(resp)
+			w.Header().Set("content-type", "application/json")
+			w.Write(b)
+			return
+		}
+		// step2：流式摘要。
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", `{"type":"message_start","message":{"model":"deepseek-V4-pro"}}`)
+		fmt.Fprintf(w, "event: content_block_start\ndata: %s\n\n", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
+		fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Enh Result: summary"}}`)
+		fmt.Fprintf(w, "event: content_block_stop\ndata: %s\n\n", `{"type":"content_block_stop","index":0}`)
+		fmt.Fprintf(w, "event: message_delta\ndata: %s\n\n", `{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`)
+		fmt.Fprintf(w, "event: message_stop\ndata: %s\n\n", `{"type":"message_stop"}`)
+	})
+	routeMock := httptest.NewServer(mux)
+	defer routeMock.Close()
+
+	cfg.Store(&Config{
+		Upstream:           "http://no-default.example.com",
+		MaxRetries:         0,
+		TotalBudgetSec:     10,
+		RecentSampleWindow: 5,
+		Routes: []RouteRule{
+			{Pattern: "claude-haiku*", URL: routeMock.URL, API: "sk-route-xxx", Model: "deepseek-V4-pro", EnhanceSearch: &EnhanceSearchConfig{SummaryLevel: "mid"}},
+		},
+	})
+	defer cfg.Store(&Config{})
+	stats.resetSampleCap(5)
+
+	proxy := httptest.NewServer(http.HandlerFunc(handler))
+	defer proxy.Close()
+
+	resp, err := http.Post(proxy.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"claude-haiku-4-5","stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"搜一下"}]}`))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	rg.mu.Lock()
+	defer rg.mu.Unlock()
+	if !rg.called {
+		t.Fatalf("应命中 route 上游做 step1/step2（增强搜索）")
+	}
+	s := string(out)
+	if !strings.Contains(s, "server_tool_use") {
+		t.Errorf("响应缺 server_tool_use 块")
+	}
+	if !strings.Contains(s, "web_search_tool_result") {
+		t.Errorf("响应缺 web_search_tool_result 块")
+	}
+	if !strings.Contains(s, "Enh Result: summary") {
+		t.Errorf("响应缺摘要文本")
+	}
+}
+
+// TestSearchFallbackWithImage 端到端：带图搜索请求一律走 search_fallback（不管是否含图片），multimodal_fallback 不应被命中。
 func TestSearchFallbackWithImage(t *testing.T) {
 	resetStats()
 	var mg struct {
@@ -1709,7 +1817,7 @@ func TestSearchFallbackWithImage(t *testing.T) {
 		Routes: []RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "ark-opus", TextOnly: true, NoSearch: true},
 		},
-		SearchFallback:     &SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search", TextOnly: true},
+		SearchFallback:     &SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
 		MultimodalFallback: &MultimodalRoute{URL: mfMock.URL, API: "sk-mf-xxx", Model: "kimi-vl"}, // NoSearch 默认 false，支持搜索
 	})
 	stats.resetSampleCap(5)
@@ -1726,24 +1834,20 @@ func TestSearchFallbackWithImage(t *testing.T) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	if sfCalled {
-		t.Errorf("不应命中 search_fallback（它 TextOnly 不认图）")
+	if !sfCalled {
+		t.Fatalf("应命中 search_fallback（带图搜索一律走 sf）")
 	}
 	if routeCalled {
 		t.Errorf("不应命中原 route 上游")
 	}
 	mg.mu.Lock()
 	defer mg.mu.Unlock()
-	if !mg.called {
-		t.Fatalf("应命中 multimodal_fallback（支持图+搜索）")
-	}
-	if mg.model != "kimi-vl" {
-		t.Errorf("multimodal_fallback 收到的 model = %q, want kimi-vl", mg.model)
+	if mg.called {
+		t.Errorf("不应命中 multimodal_fallback（搜索请求不走 mf）")
 	}
 }
 
-// TestSearchFallbackWithImageSfSupports 端到端：带图搜索 + sf 非 TextOnly（支持图+搜索），
-// 应走 search_fallback（它两个能力都满足）。
+// TestSearchFallbackWithImageSfSupports 端到端：带图搜索走 search_fallback（mf 不命中）。
 func TestSearchFallbackWithImageSfSupports(t *testing.T) {
 	resetStats()
 	var fg struct {
@@ -1779,7 +1883,7 @@ func TestSearchFallbackWithImageSfSupports(t *testing.T) {
 		Routes: []RouteRule{
 			{Pattern: "claude-opus*", URL: "http://no-route.example.com", API: "sk-route-xxx", Model: "ark-opus", TextOnly: true, NoSearch: true},
 		},
-		SearchFallback:     &SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "kimi-vl", TextOnly: false}, // 支持图+搜索
+		SearchFallback:     &SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "kimi-vl"},
 		MultimodalFallback: &MultimodalRoute{URL: mfMock.URL, API: "sk-mf-xxx", Model: "kimi-vl"},
 	})
 	stats.resetSampleCap(5)

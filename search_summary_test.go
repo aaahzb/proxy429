@@ -22,9 +22,9 @@ func TestSearchAndRespond(t *testing.T) {
 		if !stream {
 			// step1：非流式 JSON，返回 server_tool_use + web_search_tool_result。
 			resp := map[string]any{
-				"id":           "msg_step1",
-				"model":        "kimi-for-coding",
-				"stop_reason":  "end_turn",
+				"id":          "msg_step1",
+				"model":       "kimi-for-coding",
+				"stop_reason": "end_turn",
 				"content": []map[string]any{
 					{"type": "server_tool_use", "id": "srvtoolu_test1", "name": "web_search", "input": map[string]any{}},
 					{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_test1", "content": []map[string]any{
@@ -253,7 +253,7 @@ func TestSummaryLevelConfig(t *testing.T) {
 		wantKey string // 指令中应包含的关键词
 	}{
 		{"low", 2048, "short"},
-		{"", 2048, "short"},      // 空默认 low
+		{"", 2048, "short"}, // 空默认 low
 		{"mid", 4096, "medium-detail"},
 		{"high", 8192, "detailed comprehensive"},
 		{"HIGH", 8192, "detailed comprehensive"}, // 大小写不敏感
@@ -262,7 +262,7 @@ func TestSummaryLevelConfig(t *testing.T) {
 		{"unknown", 2048, "short"},               // 未知回退 low
 	}
 	for _, c := range cases {
-		instr, max := summaryLevelConfig(c.level)
+		instr, max := summaryLevelConfig(c.level, "test query")
 		if max != c.wantMax {
 			t.Errorf("level=%q max_tokens=%d 期望 %d", c.level, max, c.wantMax)
 		}
@@ -271,10 +271,10 @@ func TestSummaryLevelConfig(t *testing.T) {
 		}
 	}
 	// 四档指令应互不相同
-	low, _ := summaryLevelConfig("low")
-	mid, _ := summaryLevelConfig("mid")
-	high, _ := summaryLevelConfig("high")
-	mx, _ := summaryLevelConfig("max")
+	low, _ := summaryLevelConfig("low", "test query")
+	mid, _ := summaryLevelConfig("mid", "test query")
+	high, _ := summaryLevelConfig("high", "test query")
+	mx, _ := summaryLevelConfig("max", "test query")
 	if low == mid || mid == high || low == high {
 		t.Error("三档指令不应相同")
 	}
@@ -282,4 +282,3 @@ func TestSummaryLevelConfig(t *testing.T) {
 		t.Error("max 指令应与 high 不同（须含完整复述要求）")
 	}
 }
-

@@ -39,7 +39,6 @@ type Config struct {
 	RetryStatusCodes           []int            `json:"retry_status_codes"`
 	RespectRetryAfter          bool             `json:"respect_retry_after"`
 	ClassifierThinkingDisabled bool             `json:"classifier_thinking_disabled"`
-	ClassifierSystemPrefix     string           `json:"classifier_system_prefix"`
 	ClassifierMaxTokens        int              `json:"classifier_max_tokens"`     // 命中分类器后压 max_tokens 到此值；0 不压（推荐，避免 thinking 截断导致 Claude Code 收不到安全判断）
 	UpstreamHeaderTimeoutSec   float64          `json:"upstream_header_timeout_s"` // 等上游首字节的最长时间（秒）；超时认为请求卡住、内部重发。0 用默认 70s
 	PingIntervalSec            float64          `json:"ping_interval_s"`           // 429 重试时向客户端发 SSE ping 保活的间隔（秒）；0 用默认 5s
@@ -52,17 +51,29 @@ type Config struct {
 	MultimodalFallback         *MultimodalRoute `json:"multimodal_fallback,omitempty"` // 多模态兜底路由；请求含图片却命中 text_only 纯文本模型时改走此处；空则不启用
 	SearchFallback             *SearchRoute     `json:"search_fallback,omitempty"`     // 搜索兜底路由；请求带搜索工具却命中 no_search 上游时改走此处；空则不启用
 	SearchDebugDir             string           `json:"search_debug_dir,omitempty"`    // 搜索调试目录；非空时把搜索摘要各步请求/响应 raw 写入该目录，便于排查
+	ConvertAllToStream         bool             `json:"convertAlltoStream"`            // 全局流式化：开启后所有非流式请求改为流式发上游，收集完整流后重建非流式 JSON 一次性返回（客户端无感知，网页可监控吐字/首字/tok/s）
+	ResponsesListen            string           `json:"responses_listen"`              // OpenAI Responses API 监听口（如 127.0.0.1:8081）；空不启用。把 Responses 协议请求翻译成 Anthropic 走主管线，供 Codex CLI 等工具接入。改动需重启生效
 }
 
 // RouteRule 定义一条模型路由：命中的请求改走指定上游，并替换 model 名与 API key。
 // Pattern 用 * 通配模型名；命中后 URL 覆盖默认 upstream，API 覆盖客户端 token，Model 替换请求体 model 字段。
 type RouteRule struct {
-	Pattern  string `json:"pattern"`   // 模型名通配符，仅支持 *（匹配任意长度任意字符），如 "claude-opus*"
-	URL      string `json:"url"`       // 目标上游 Base URL，如 https://api.deepseek.com
-	API      string `json:"api"`       // 目标 API key，设为 Authorization: Bearer；空则透传客户端原 token
-	Model    string `json:"model"`     // 替换成的目标模型名；空则不改 model 字段
-	TextOnly bool   `json:"text_only"` // 目标模型仅支持纯文本；请求含图片时改走 multimodal_fallback 兜底
-	NoSearch bool   `json:"no_search"` // 目标上游不支持搜索；请求带搜索工具时改走 search_fallback 兜底
+	Pattern       string               `json:"pattern"`                  // 模型名通配符，仅支持 *（匹配任意长度任意字符），如 "claude-opus*"
+	URL           string               `json:"url"`                      // 目标上游 Base URL，如 https://api.deepseek.com
+	API           string               `json:"api"`                      // 目标 API key，设为 Authorization: Bearer；空则透传客户端原 token
+	Model         string               `json:"model"`                    // 替换成的目标模型名；空则不改 model 字段
+	TextOnly      bool                 `json:"text_only"`                // 目标模型仅支持纯文本；请求含图片时改走 multimodal_fallback 兜底
+	NoSearch      bool                 `json:"no_search"`                // 目标上游不支持搜索；请求带搜索工具时改走 search_fallback 兜底
+	EnhanceSearch *EnhanceSearchConfig `json:"enhance_search,omitempty"` // 增强搜索：非 nil 启用。请求带搜索工具时不调主力，改用本 route 上游走 kimi 摘要模式
+}
+
+// EnhanceSearchConfig 是 routes 条目内可选的增强搜索参数。route 命中且请求带搜索工具时，
+// 若 EnhanceSearch 非 nil，则不调主力，改用该 route 自己的 url/api/model 走 kimi 摘要模式
+// （step1 搜索 + step2 摘要 + 自构响应）。等价于 no_search 走 search_fallback.summary_mode，
+// 只是搜索上游换成 route 自己的。SummaryMode 字段仅用于内部转成 SearchRoute 时标记。
+type EnhanceSearchConfig struct {
+	SummaryThinking bool   `json:"summary_thinking"` // step2 摘要是否开 thinking（默认关，加快摘要）
+	SummaryLevel    string `json:"summary_level"`    // 摘要详细程度：low（默认）/ mid / high / max
 }
 
 // ClassifierRoute 定义分类器请求的专用路由：命中分类器（安全判断）的请求无视原 model，
@@ -84,10 +95,9 @@ type FastRoute struct {
 // MultimodalRoute 定义多模态兜底路由：当请求含图片却命中 text_only 的纯文本模型时，
 // 自动改走此处指定的多模态上游。NoSearch 标记该兜底也不支持搜索，带搜索的图片请求会改走 search_fallback。
 type MultimodalRoute struct {
-	URL      string `json:"url"`       // 目标上游 Base URL
-	API      string `json:"api"`       // 目标 API key；空则透传客户端原 token
-	Model    string `json:"model"`     // 替换成的目标模型名；空则不改 model 字段
-	NoSearch bool   `json:"no_search"` // 该图片兜底不支持搜索；带搜索的图片请求改走 search_fallback
+	URL   string `json:"url"`   // 目标上游 Base URL
+	API   string `json:"api"`   // 目标 API key；空则透传客户端原 token
+	Model string `json:"model"` // 替换成的目标模型名；空则不改 model 字段
 }
 
 // SearchRoute 定义搜索兜底路由：当请求带搜索工具却命中 no_search 的不支持搜索上游时，
@@ -96,7 +106,6 @@ type SearchRoute struct {
 	URL             string `json:"url"`              // 目标上游 Base URL
 	API             string `json:"api"`              // 目标 API key；空则透传客户端原 token
 	Model           string `json:"model"`            // 替换成的目标模型名；空则不改 model 字段
-	TextOnly        bool   `json:"text_only"`        // 该搜索兜底也不支持图片；带图片的搜索请求改走 multimodal_fallback
 	SummaryMode     bool   `json:"summary_mode"`     // 搜索子代理请求：step1搜索+step2生成详细摘要，构造标准 web_search 响应返回客户端（不整请求转、不调主力）
 	SummaryThinking bool   `json:"summary_thinking"` // summary_mode 下 step2 摘要请求是否开启 thinking（默认关，加快摘要）
 	SummaryLevel    string `json:"summary_level"`    // summary_mode 下摘要详细程度：low（默认，简短）/ mid（中等）/ high（详尽）
@@ -127,8 +136,7 @@ func currentConfigPath() string {
 
 // listConfigFiles 扫描当前配置所在目录的所有 .json 文件（排除 config.example.json），
 // 返回排序后的文件名列表（不含目录）。供托盘「切换配置」子菜单与网页下拉列出。
-func listConfigFiles() []string {
-	dir := filepath.Dir(currentConfigPath())
+func listConfigFilesIn(dir string) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -148,6 +156,11 @@ func listConfigFiles() []string {
 	return files
 }
 
+// listConfigFiles 列出当前配置目录下所有 .json 配置（供网页「切换配置」菜单）。
+func listConfigFiles() []string {
+	return listConfigFilesIn(filepath.Dir(currentConfigPath()))
+}
+
 // loadConfig 读取并解析配置文件并应用默认值。main 启动与托盘 reload 共用。
 func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -157,9 +170,6 @@ func loadConfig(path string) (*Config, error) {
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, err
-	}
-	if c.ClassifierSystemPrefix == "" {
-		c.ClassifierSystemPrefix = "You are a security monitor"
 	}
 	if c.UpstreamHeaderTimeoutSec <= 0 {
 		c.UpstreamHeaderTimeoutSec = 70 // 默认 70s：等上游首字节超时则内部重发
@@ -178,37 +188,91 @@ func loadConfig(path string) (*Config, error) {
 //go:embed config.example.json
 var configExampleBytes []byte
 
+// activeConfigStateFile 记录上次选中的路由配置文件名（basename），放在路由配置同目录。
+// 用 .txt 扩展名而非 .json：既不会被 listConfigFiles 当作路由配置列出，也避免与用户创建的 .json 重名。
+const activeConfigStateFile = "active-config.txt"
+
+// classifierSystemPrefix 是 Claude Code 分类器（安全判断）请求 system 字段的固定前缀。
+// 代理据此识别分类器请求并路由到便宜模型、关闭 thinking。硬编码：客户端实现细节，不应由用户配置。
+const classifierSystemPrefix = "You are a security monitor"
+
+// readActiveConfigState 读取配置目录下的状态文件，返回它记录的上次选中配置的完整路径。
+// 状态文件不存在、为空、或指向的文件已不存在时返回空串，调用方回退到默认 config.json。
+func readActiveConfigState(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, activeConfigStateFile))
+	if err != nil {
+		return ""
+	}
+	name := strings.TrimSpace(string(data))
+	if name == "" {
+		return ""
+	}
+	full := filepath.Join(dir, name)
+	if _, err := os.Stat(full); err != nil {
+		return ""
+	}
+	return full
+}
+
+// writeActiveConfigState 把给定配置的文件名（basename）写入其所在目录的状态文件，供下次启动恢复。
+// 写失败仅记日志，不影响切换本身。
+func writeActiveConfigState(path string) {
+	statePath := filepath.Join(filepath.Dir(path), activeConfigStateFile)
+	if err := os.WriteFile(statePath, []byte(filepath.Base(path)), 0644); err != nil {
+		log.Printf("[配置] 写状态文件失败: %v", err)
+	}
+}
+
 // resolveConfigPath 决定配置文件路径，优先级：
 //  1. -config 显式指定（最高，直接用）
 //  2. 当前目录 config.json 存在（终端在项目目录运行）
-//  3. 用户配置目录 proxy429/config.json（.app 双击、安装后运行；首次运行自动生成）
+//  3. 用户配置目录 proxy429/（.app 双击、安装后运行）
 //
 // 第 3 条让 macOS .app 双击启动也能找到配置：.app 的 cwd 是 /，没有 ./config.json，
-// 故落到 ~/Library/Application Support/proxy429/config.json（macOS）、
-// ~/.config/proxy429/config.json（Linux）、%AppData%/proxy429/config.json（Windows）。
+// 故落到 ~/Library/Application Support/proxy429/（macOS）、
+// ~/.config/proxy429/（Linux）、%AppData%/proxy429/（Windows）。
+//
+// 确定目录后，恢复顺序：
+//   - active-config.txt 记录的上次选中配置仍存在 → 恢复它；
+//   - 否则目录里已有任意 .json 配置 → 用第一个（按字母序），不自动生成 config.json；
+//   - 否则首次运行：目录无任何配置，才写入内嵌默认模板 config.json。
+//
+// 这样用户即使从未用过 config.json 这个名字（只用自己的配置文件名），重启也不会凭空多出标准模板。
 func resolveConfigPath(flagPath string) string {
 	if flagPath != "" {
 		return flagPath
 	}
+	var dir, defaultPath string
 	if _, err := os.Stat("config.json"); err == nil {
-		return "config.json"
+		dir = "."
+		defaultPath = "config.json"
+	} else {
+		ud, err := os.UserConfigDir()
+		if err != nil || ud == "" {
+			return "config.json"
+		}
+		dir = filepath.Join(ud, "proxy429")
+		defaultPath = filepath.Join(dir, "config.json")
 	}
-	dir, err := os.UserConfigDir()
-	if err != nil || dir == "" {
-		return "config.json"
+	// 恢复上次选中的配置（若文件仍存在），使重启回到关闭前在用的配置。
+	if active := readActiveConfigState(dir); active != "" {
+		return active
 	}
-	appDir := filepath.Join(dir, "proxy429")
-	p := filepath.Join(appDir, "config.json")
-	if _, err := os.Stat(p); err != nil {
-		// 首次运行：建目录并写入内嵌的默认配置模板，避免双击 .app 后无配置启动失败。
-		// 用户随后在网页「配置」标签里改成自己的上游/key 即可。
-		if mkErr := os.MkdirAll(appDir, 0755); mkErr == nil {
-			if wErr := os.WriteFile(p, configExampleBytes, 0644); wErr == nil {
-				log.Printf("[配置] 首次运行，已生成默认配置: %s", p)
+	// 目录里已有其他配置文件（用户在用非 config.json 的名字），不自动生成 config.json，
+	// 回到目录里第一个配置（按字母序）。
+	if files := listConfigFilesIn(dir); len(files) > 0 {
+		return filepath.Join(dir, files[0])
+	}
+	// 首次运行：目录无任何配置，建目录并写入内嵌的默认模板，避免双击 .app 后无配置启动失败。
+	// 用户随后在网页「配置」标签里改成自己的上游/key 即可。
+	if dir != "." {
+		if mkErr := os.MkdirAll(dir, 0755); mkErr == nil {
+			if wErr := os.WriteFile(defaultPath, configExampleBytes, 0644); wErr == nil {
+				log.Printf("[配置] 首次运行，已生成默认配置: %s", defaultPath)
 			}
 		}
 	}
-	return p
+	return defaultPath
 }
 
 // clearStats 清空累计统计与延迟/吞吐样本，按给定配置的 RecentSampleWindow 重建样本容量。
@@ -218,6 +282,7 @@ func clearStats(c *Config) {
 	stats.cacheRead = 0
 	stats.inputTokens = 0
 	stats.outputTokens = 0
+	stats.modelStats = nil
 	stats.mu.Unlock()
 	stats.bytesForward.Store(0)
 	stats.statusRetries.Store(0)
@@ -250,6 +315,7 @@ func switchConfig(newPath string) error {
 	configMu.Lock()
 	configFilePath = newPath
 	configMu.Unlock()
+	writeActiveConfigState(newPath)
 	cfg.Store(c)
 	log.Printf("[切换] 已切换到 %s：http://%s -> %s (最多重试 %d 次)",
 		filepath.Base(newPath), c.Listen, c.Upstream, c.MaxRetries)
@@ -274,17 +340,26 @@ type throughputSample struct {
 	outputTokens int64 // 本流 output_tokens
 }
 
+// modelUsage 是单个真实上游模型的累计 token 用量，按模型名聚合供状态页明细展示。
+type modelUsage struct {
+	cacheRead int64 // 命中 token（cache_read_input_tokens）
+	input     int64 // 未命中 token（input_tokens）
+	output    int64 // 输出 token
+	retries   int64 // 该模型触发的重试次数（网络错误/状态码/体内错误）
+}
+
 // liveStats 是所有流的聚合计数器，网页控制台与托盘状态灯用它展示实时状态。
 type liveStats struct {
 	mu                 sync.Mutex
-	active             int          // 当前透传中的流数量
-	waiting            int          // 已发上游、等首字节的请求数（状态灯黄）
-	cacheRead          int64        // 累计缓存命中 token（cache_read_input_tokens）
-	inputTokens        int64        // 累计输入 token
-	outputTokens       int64        // 累计输出 token（各流当前累积值之和，随流增长）
-	bytesForward       atomic.Int64 // 累计已转发字节，流过程中实时增长（ARK 不在流中发 token，用它体现实时迸出）
-	statusRetries      atomic.Int64 // 启动至今的重试次数（含状态码/超时/网络错误/体内错误，每重试一次 +1）
-	classifierRewrites atomic.Int64 // 启动至今命中分类器请求并关 thinking 的次数
+	active             int                    // 当前透传中的流数量
+	waiting            int                    // 已发上游、等首字节的请求数（状态灯黄）
+	cacheRead          int64                  // 累计缓存命中 token（cache_read_input_tokens）
+	inputTokens        int64                  // 累计输入 token
+	outputTokens       int64                  // 累计输出 token（各流当前累积值之和，随流增长）
+	modelStats         map[string]*modelUsage // 按真实上游模型名聚合的 token 用量
+	bytesForward       atomic.Int64           // 累计已转发字节，流过程中实时增长（ARK 不在流中发 token，用它体现实时迸出）
+	statusRetries      atomic.Int64           // 启动至今的重试次数（含状态码/超时/网络错误/体内错误，每重试一次 +1）
+	classifierRewrites atomic.Int64           // 启动至今命中分类器请求并关 thinking 的次数
 
 	sampleMu  sync.Mutex         // 保护下面的滑动窗口（独立于 mu，避免长流持锁）
 	fbSamples []int64            // 首字延迟环形缓冲（收到首字节即 push，状态行“首字”实时更新）
@@ -306,6 +381,72 @@ func (s *liveStats) resetSampleCap(cap int) {
 	s.tpSamples = nil
 	s.tpHead = 0
 	s.sampleCap = cap
+}
+
+// addModelUsage 按真实上游模型名累加一次流的 token 用量（流结束时调用一次）。
+func (s *liveStats) addModelUsage(model string, in, cr, out int64) {
+	if model == "" || (in == 0 && cr == 0 && out == 0) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.modelStats == nil {
+		s.modelStats = make(map[string]*modelUsage)
+	}
+	m := s.modelStats[model]
+	if m == nil {
+		m = &modelUsage{}
+		s.modelStats[model] = m
+	}
+	m.input += in
+	m.cacheRead += cr
+	m.output += out
+}
+
+// addModelRetry 按真实上游模型名累加一次重试（网络错误/状态码/体内错误触发时调用）。
+func (s *liveStats) addModelRetry(model string) {
+	if model == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.modelStats == nil {
+		s.modelStats = make(map[string]*modelUsage)
+	}
+	m := s.modelStats[model]
+	if m == nil {
+		m = &modelUsage{}
+		s.modelStats[model] = m
+	}
+	m.retries++
+}
+
+// modelUsageEntry 是 modelStats 的 JSON 快照条目，供网页按模型展示缓存命中明细。
+type modelUsageEntry struct {
+	Model     string `json:"model"`
+	CacheRead int64  `json:"cacheRead"` // 命中 token
+	Input     int64  `json:"input"`     // 未命中 token
+	Output    int64  `json:"output"`    // 输出 token
+	Retries   int64  `json:"retries"`   // 重试次数
+}
+
+// snapshotModelStats 返回按模型聚合的用量快照，按总 token（input+cacheRead+output）降序。
+func (s *liveStats) snapshotModelStats() []modelUsageEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.modelStats) == 0 {
+		return nil
+	}
+	out := make([]modelUsageEntry, 0, len(s.modelStats))
+	for name, m := range s.modelStats {
+		out = append(out, modelUsageEntry{Model: name, CacheRead: m.cacheRead, Input: m.input, Output: m.output, Retries: m.retries})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ti := out[i].Input + out[i].CacheRead + out[i].Output
+		tj := out[j].Input + out[j].CacheRead + out[j].Output
+		return ti > tj
+	})
+	return out
 }
 
 // pushFirstByte 把首字延迟写入环形缓冲。收到第一个 body 字节即调用，
@@ -442,25 +583,40 @@ const maxLogBuf = 500
 
 // flight 跟踪单个进行中的请求，供网页控制台展示在途流（#id + 耗时/字节）。
 type flight struct {
-	id          uint64       // 递增编号
-	start       time.Time    // 请求发出时间
-	phase       atomic.Int32 // 0=等待响应, 1=已收到响应（开始转发）
-	status      int          // HTTP 状态码（phase=1 时有效）
-	bytes       atomic.Int64 // 已转发字节数
-	origModel   string       // 客户端原始 model；路由改写后用于响应流回改
-	targetModel string       // 路由改写后的目标 model；非空且≠origModel 时 forward 会回改
-	modelLogged atomic.Bool  // 是否已打 [改写] 日志，只打一次
-	stage       atomic.Int32 // 当前阶段（stage*），供网页在途流「状态」列展示
-	attempt     atomic.Int32 // 当前尝试序号（1 起），stage=stageAttempt 时显示「尝试N」
-	routeReason atomic.Int32 // 本次路由原因（route*），供网页「状态」列附加显示
-	contentMu   sync.Mutex
-	content     []byte // 最近 flightContentCap 字节透传内容（SSE 原文），供网页点击在途流查看
-	searchDebug bool   // 搜索摘要模式：forward 时把主力响应 SSE 追加写入 cfg.SearchDebugDir
-	inTokens    int64  // 本流 input_tokens 累积值（forward 结束时由 lastInput 存入）
-	cacheRead   int64  // 本流 cache_read 累积值
-	outTokens   int64  // 本流 output_tokens 累积值
-	firstByteMs int64  // 本流首字延迟（毫秒），仅正常响应路径记录
-	tps         float64 // 本流流式 tok/s，仅正常响应路径记录
+	id            uint64       // 递增编号
+	start         time.Time    // 请求发出时间
+	phase         atomic.Int32 // 0=等待响应, 1=已收到响应（开始转发）
+	status        int          // HTTP 状态码（phase=1 时有效）
+	bytes         atomic.Int64 // 已转发字节数
+	origModel     string       // 客户端原始 model；路由改写后用于响应流回改
+	targetModel   string       // 路由改写后的目标 model；非空且≠origModel 时 forward 会回改
+	upstreamModel string       // 上游响应里实际返回的 model（由 rewriteResponseModel 捕获）；空则未知
+	modelLogged   atomic.Bool  // 是否已打 [改写] 日志，只打一次
+	stage         atomic.Int32 // 当前阶段（stage*），供网页在途流「状态」列展示
+	attempt       atomic.Int32 // 当前尝试序号（1 起），stage=stageAttempt 时显示「尝试N」
+	routeReason   atomic.Int32 // 本次路由原因（route*），供网页「状态」列附加显示
+	contentMu     sync.Mutex
+	content       []byte  // 最近 flightContentCap 字节透传内容（SSE 原文），供网页点击在途流查看
+	searchDebug   bool    // 搜索摘要模式：forward 时把主力响应 SSE 追加写入 cfg.SearchDebugDir
+	inTokens      int64   // 本流 input_tokens 累积值（forward 结束时由 lastInput 存入）
+	cacheRead     int64   // 本流 cache_read 累积值
+	outTokens     int64   // 本流 output_tokens 累积值
+	firstByteMs   int64   // 本流首字延迟（毫秒），仅正常响应路径记录
+	tps           float64 // 本流流式 tok/s，仅正常响应路径记录
+	searchPrompt  string  // step2 摘要指令文本（仅搜索摘要子流非空），供状态页在途流/完成流最前端显示
+	translated    string  // 翻译口来源标记（"responses"=OpenAI Responses API 监听口翻译进来的流），网页 model 列显示 [translate] 前缀
+}
+
+// realModel 返回本流的真实上游模型名：优先响应实际返回的，退路由目标，退原始 model。
+// 供按模型统计 token/重试用，与 forward 里 addModelUsage 的取值逻辑一致。
+func (f *flight) realModel() string {
+	if f.upstreamModel != "" {
+		return f.upstreamModel
+	}
+	if f.targetModel != "" {
+		return f.targetModel
+	}
+	return f.origModel
 }
 
 // flight 阶段枚举：对应网页在途流「状态」列展示的进度。
@@ -548,18 +704,22 @@ func (f *flight) snapshotContent() []byte {
 // finishedFlight 是一个已结束 flight 的存档快照，供网页回看最近完成的流式输出。
 // 只在 flight 结束且 content 非空（有流式推送）时存档；content 是 snapshotContent 的副本。
 type finishedFlight struct {
-	id      uint64
-	model   string // origModel -> targetModel（同在途流展示）
-	status  int    // HTTP 状态码
-	bytes   int64
-	stage   int32 // 结束时阶段
-	ended   time.Time
-	content   []byte // ≤ flightContentCap 的透传内容副本
-	inTokens  int64  // 本流 input_tokens 累积值
-	cacheRead int64  // 本流 cache_read 累积值
-	outTokens int64  // 本流 output_tokens 累积值
-	firstByteMs int64   // 本流首字延迟（毫秒）
-	tps       float64 // 本流流式 tok/s
+	id            uint64
+	model         string // origModel -> targetModel（-> upstreamModel 若上游返回且不同）
+	upstreamModel string // 上游响应实际返回的 model 名（空则未返回/同 targetModel）
+	routeReason   int32  // 路由原因（route*），网页 model 列显示 [标签] 前缀用
+	status        int    // HTTP 状态码
+	bytes         int64
+	stage         int32 // 结束时阶段
+	ended         time.Time
+	content       []byte  // ≤ flightContentCap 的透传内容副本
+	inTokens      int64   // 本流 input_tokens 累积值
+	cacheRead     int64   // 本流 cache_read 累积值
+	outTokens     int64   // 本流 output_tokens 累积值
+	firstByteMs   int64   // 本流首字延迟（毫秒）
+	tps           float64 // 本流流式 tok/s
+	searchPrompt  string  // step2 摘要指令文本（仅搜索摘要子流非空）
+	translated    string  // 翻译口来源标记（"responses"），网页 model 列 [translate] 前缀
 }
 
 var (
@@ -581,19 +741,27 @@ func addFinished(f *flight) {
 	if f.targetModel != "" && f.targetModel != f.origModel {
 		model = f.origModel + " -> " + f.targetModel
 	}
+	// 上游响应里实际返回的 model 名与路由目标不同时，追加第三段，让用户看到真实落点。
+	if f.upstreamModel != "" && f.upstreamModel != f.targetModel && f.upstreamModel != f.origModel {
+		model = model + " -> " + f.upstreamModel
+	}
 	ff := finishedFlight{
-		id:      f.id,
-		model:   model,
-		status:  f.status,
-		bytes:   f.bytes.Load(),
-		stage:   f.stage.Load(),
-		ended:     time.Now(),
-		content:   content,
-		inTokens:  f.inTokens,
-		cacheRead: f.cacheRead,
-		outTokens: f.outTokens,
-		firstByteMs: f.firstByteMs,
-		tps:       f.tps,
+		id:            f.id,
+		model:         model,
+		upstreamModel: f.upstreamModel,
+		routeReason:   f.routeReason.Load(),
+		status:        f.status,
+		bytes:         f.bytes.Load(),
+		stage:         f.stage.Load(),
+		ended:         time.Now(),
+		content:       content,
+		inTokens:      f.inTokens,
+		cacheRead:     f.cacheRead,
+		outTokens:     f.outTokens,
+		firstByteMs:   f.firstByteMs,
+		tps:           f.tps,
+		searchPrompt:  f.searchPrompt,
+		translated:    f.translated,
 	}
 	finishedMu.Lock()
 	finished = append(finished, ff)
@@ -1140,6 +1308,62 @@ func getStringField(body []byte, key string) string {
 	return ""
 }
 
+// getBoolField 从 body 的顶层 JSON object 中读取指定字段的布尔值；未找到或非布尔返回 ok=false。
+func getBoolField(body []byte, key string) (val bool, ok bool) {
+	spans, ok2 := locateTopFields(body)
+	if !ok2 {
+		return false, false
+	}
+	for _, s := range spans {
+		if s.name != key {
+			continue
+		}
+		var b bool
+		if err := json.Unmarshal(body[s.valStart:s.valEnd], &b); err != nil {
+			return false, false
+		}
+		return b, true
+	}
+	return false, false
+}
+
+// forceStreamTrue 把请求体顶层 "stream" 字段改写为 true；字段缺失则在对象末尾追加。
+// 采用流式字段定位 + 文本替换，不整体重序列化，未改字段原样保留字节（含 key 顺序与格式），
+// 避免影响上游缓存命中。参数 body：原请求体；返回改写后的新 body。
+func forceStreamTrue(body []byte) []byte {
+	spans, ok := locateTopFields(body)
+	if !ok {
+		return body
+	}
+	for _, s := range spans {
+		if s.name != "stream" {
+			continue
+		}
+		// 已是 true 直接返回原 body，避免无谓改写。
+		if bytes.Equal(bytes.TrimSpace(body[s.valStart:s.valEnd]), []byte("true")) {
+			return body
+		}
+		out := make([]byte, 0, len(body))
+		out = append(out, body[:s.valStart]...)
+		out = append(out, "true"...)
+		out = append(out, body[s.valEnd:]...)
+		return out
+	}
+	// stream 字段不存在：在对象末尾 } 前追加 ,"stream":true（空对象不加逗号）。
+	if len(body) == 0 || body[len(body)-1] != '}' {
+		return body
+	}
+	sep := ","
+	if len(spans) == 0 {
+		sep = ""
+	}
+	out := make([]byte, 0, len(body)+len(sep)+len(`"stream":true}`))
+	out = append(out, body[:len(body)-1]...)
+	out = append(out, sep...)
+	out = append(out, `"stream":true}`...)
+	return out
+}
+
 // deleteFieldSpan 从顶层 JSON object 中删除第 idx 个字段，保持其余字段顺序与格式。
 func deleteFieldSpan(body []byte, spans []fieldSpan, idx int) []byte {
 	if len(spans) == 0 || idx < 0 || idx >= len(spans) {
@@ -1171,17 +1395,14 @@ func deleteFieldSpan(body []byte, spans []fieldSpan, idx int) []byte {
 // 与 maybeRewriteClassifier 共用同一判定，但只判定不改写；供路由决策使用。
 // 独立于 ClassifierThinkingDisabled：即使未开 thinking 改写，分类器路由仍可生效。
 func isClassifierRequest(c *Config, body []byte) bool {
-	if c.ClassifierSystemPrefix == "" {
-		return false
-	}
-	if !bytes.Contains(body, []byte(c.ClassifierSystemPrefix)) {
+	if !bytes.Contains(body, []byte(classifierSystemPrefix)) {
 		return false
 	}
 	spans, ok := locateTopFields(body)
 	if !ok {
 		return false
 	}
-	return classifierSystemMatches(body, spans, c.ClassifierSystemPrefix)
+	return classifierSystemMatches(body, spans, classifierSystemPrefix)
 }
 
 // maybeRewriteClassifier 命中分类器请求时关掉 thinking，让分类快速返回。
@@ -1190,17 +1411,17 @@ func isClassifierRequest(c *Config, body []byte) bool {
 // 未改字段原样保留字节（含 key 顺序与格式），避免影响上游缓存命中。
 func maybeRewriteClassifier(body []byte) []byte {
 	c := cfg.Load()
-	if !c.ClassifierThinkingDisabled || c.ClassifierSystemPrefix == "" {
+	if !c.ClassifierThinkingDisabled {
 		return body
 	}
-	if !bytes.Contains(body, []byte(c.ClassifierSystemPrefix)) {
+	if !bytes.Contains(body, []byte(classifierSystemPrefix)) {
 		return body
 	}
 	spans, ok := locateTopFields(body)
 	if !ok {
 		return body
 	}
-	if !classifierSystemMatches(body, spans, c.ClassifierSystemPrefix) {
+	if !classifierSystemMatches(body, spans, classifierSystemPrefix) {
 		return body
 	}
 	newBody := applyClassifierEdits(body, spans, c.ClassifierMaxTokens)
@@ -1345,33 +1566,44 @@ func searchStep1Body(body []byte, sf *SearchRoute) ([]byte, error) {
 // searchStep2Body 构造第2步摘要请求：messages=[user(原最后user), assistant(r1.content), user(摘要指令)]。
 // summaryLevelConfig 按详细程度返回 step2 摘要指令与 max_tokens。
 // low=简短摘要（默认），mid=中等详细（含关键事实），high=详尽（含全部数据点/引文/上下文）。
-// 参数 level：配置里的 summary_level 值；返回 (指令文本, max_tokens)。
-func summaryLevelConfig(level string) (string, int) {
-	base := "Based on the web_search_tool_result above, %s IN ORDER. " +
+// 参数 level：配置里的 summary_level 值；query：用户原始问题（搜索意图），带进指令让总结重点关注相关内容；返回 (指令文本, max_tokens)。
+func summaryLevelConfig(level, query string) (string, int) {
+	// 指令带上用户原始问题（搜索意图）：总结时重点关照与问题相关的内容，但仍覆盖每条结果的关键信息，
+	// 避免无脑通用摘要。query 为空时退化为通用总结。
+	q := strings.TrimSpace(query)
+	if q == "" {
+		q = "search"
+	}
+	// 搜索结果常含多个日期/时间（如"今天/最新/近期/现在"），带上当前日期时间让模型能正确侧重时间相关内容。
+	now := time.Now().In(time.FixedZone("UTC+8", 8*60*60)).Format("2006-01-02 15:04")
+	base := "Current date and time is " + now + " (UTC+8, Beijing time).\n" +
+		"The user's original question (the search intent) is: \"%s\".\n" +
+		"Based on the web_search_tool_result above, %s IN ORDER. " +
+		"While summarizing each result, pay special attention to and explicitly call out information that addresses or relates to the user's question above, but still cover the other key content of each result. " +
 		"Format each as 'Result N: <summary>' where N starts at 1 and goes in order across all web_search_tool_result blocks. " +
 		"Do not answer the original question, just summarize each result."
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "mid", "medium":
-		return fmt.Sprintf(base, "write a medium-detail plaintext summary for EACH search result, including key facts and relevant data points"), 4096
+		return fmt.Sprintf(base, q, "write a medium-detail plaintext summary for EACH search result, including key facts and relevant data points"), 4096
 	case "max", "full":
 		// max：在 high 基础上，遇到步骤/方法/代码/公式必须完完整整逐字复述，max_tokens 加大以容纳完整代码与公式。
-		return fmt.Sprintf(base, "write a detailed comprehensive plaintext summary for EACH search result, including all key facts, data points, direct quotes, dates, numbers, and relevant context; be thorough. When you encounter any steps, methods, code, or formulas, you MUST reproduce them completely and verbatim in full detail"), 16384
+		return fmt.Sprintf(base, q, "write a detailed comprehensive plaintext summary for EACH search result, including all key facts, data points, direct quotes, dates, numbers, and relevant context; be thorough. When you encounter any steps, methods, code, or formulas, you MUST reproduce them completely and verbatim in full detail"), 16384
 	case "high":
-		return fmt.Sprintf(base, "write a detailed comprehensive plaintext summary for EACH search result, including all key facts, data points, direct quotes, dates, numbers, and relevant context; be thorough"), 8192
+		return fmt.Sprintf(base, q, "write a detailed comprehensive plaintext summary for EACH search result, including all key facts, data points, direct quotes, dates, numbers, and relevant context; be thorough"), 8192
 	default: // low / 空 / 未知
-		return fmt.Sprintf(base, "write a short plaintext summary for EACH search result"), 2048
+		return fmt.Sprintf(base, q, "write a short plaintext summary for EACH search result"), 2048
 	}
 }
 
 // searchStep2Body 构造第2步摘要请求：messages=[user(原最后user), assistant(r1.content), user(摘要指令)]。
 // 参数 r1：第1步响应 map；origBody：原请求体（取最后一条 user 文本）；sf：搜索路由配置；返回新请求体或错误。
-func searchStep2Body(r1 map[string]any, origBody []byte, sf *SearchRoute, level string, thinking bool) ([]byte, error) {
+func searchStep2Body(r1 map[string]any, origBody []byte, sf *SearchRoute, level string, thinking bool) ([]byte, string, error) {
 	lastUser, ok := searchLastUserText(origBody)
 	if !ok {
 		lastUser = "search"
 	}
 	content, _ := r1["content"].([]any)
-	instr, maxTokens := summaryLevelConfig(level)
+	instr, maxTokens := summaryLevelConfig(level, lastUser)
 	m := map[string]any{
 		"model":      sf.Model,
 		"max_tokens": maxTokens,
@@ -1385,7 +1617,8 @@ func searchStep2Body(r1 map[string]any, origBody []byte, sf *SearchRoute, level 
 	if thinking {
 		m["thinking"] = map[string]any{"type": "enabled", "budget_tokens": 2048}
 	}
-	return json.Marshal(m)
+	body, err := json.Marshal(m)
+	return body, instr, err
 }
 
 // searchLastUserText 从请求体取最后一条 user 消息的文本内容。
@@ -1427,7 +1660,7 @@ func searchLastUserText(body []byte) (string, bool) {
 // 流式模式累积最小 response map（model/stop_reason/content[text]）。
 // 参数 url/api：上游地址与密钥；reqBody：请求体；f：关联 flight；stream：是否流式；
 // 返回：(最小 response map, 原始字节, error)。
-func searchPostFlight(url, api string, reqBody []byte, f *flight, stream bool) (map[string]any, []byte, error) {
+func searchPostFlight(url, api string, reqBody []byte, f *flight, stream bool, modelHint string) (map[string]any, []byte, error) {
 	req, err := http.NewRequest("POST", url+"/v1/messages", bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, nil, err
@@ -1435,7 +1668,15 @@ func searchPostFlight(url, api string, reqBody []byte, f *flight, stream bool) (
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Authorization", "Bearer "+api)
+	tSend := time.Now()
+	// 计入托盘状态灯：等上游首字节期间黄灯（waiting++），与主转发路径一致。
+	stats.mu.Lock()
+	stats.waiting++
+	stats.mu.Unlock()
 	resp, err := client.Do(req)
+	stats.mu.Lock()
+	stats.waiting--
+	stats.mu.Unlock()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1453,7 +1694,18 @@ func searchPostFlight(url, api string, reqBody []byte, f *flight, stream bool) (
 		}
 		return nil, data, fmt.Errorf("upstream %d: %s", resp.StatusCode, string(data))
 	}
+	// 开始读响应（step1 全量 / step2 流式）：状态灯转绿，读完/出错恢复空闲。
+	// 修复搜索摘要模式全程灰灯（此前未计 active/waiting，即便摘要模型在吐字也显示空闲）。
+	stats.mu.Lock()
+	stats.active++
+	stats.mu.Unlock()
+	defer func() {
+		stats.mu.Lock()
+		stats.active--
+		stats.mu.Unlock()
+	}()
 	if !stream {
+		tFirstByte := time.Now()
 		data, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return nil, nil, err
@@ -1466,20 +1718,46 @@ func searchPostFlight(url, api string, reqBody []byte, f *flight, stream bool) (
 		if err := json.Unmarshal(data, &m); err != nil {
 			return nil, data, fmt.Errorf("parse response: %w (body=%s)", err, string(data))
 		}
+		if f != nil {
+			if in, cr, out, ok := parseNonStreamUsage(data); ok {
+				f.inTokens = in
+				f.cacheRead = cr
+				f.outTokens = out
+				stats.mu.Lock()
+				stats.inputTokens += in
+				stats.cacheRead += cr
+				stats.outputTokens += out
+				stats.mu.Unlock()
+			}
+			realModel := modelHint
+			if mm, ok := m["model"].(string); ok && mm != "" {
+				realModel = mm
+			}
+			stats.addModelUsage(realModel, f.inTokens, f.cacheRead, f.outTokens)
+			f.firstByteMs = tFirstByte.Sub(tSend).Milliseconds()
+			log.Printf("[单流] #%d 搜索step1 首字 %.2fs %d+%d/%d tok",
+				f.id, float64(f.firstByteMs)/1000, f.inTokens, f.cacheRead, f.outTokens)
+		}
 		return m, data, nil
 	}
 	// 流式：边读 SSE 边 tee 到 flight，同时累积最小 response map。
 	var raw bytes.Buffer
 	var model, stopReason string
 	var textBuf strings.Builder
+	var lastOutput, lastInput, lastCacheRead int64
+	var tFirstByte time.Time
 	br := bufio.NewReader(resp.Body)
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
+			if tFirstByte.IsZero() {
+				tFirstByte = time.Now()
+			}
 			raw.Write(line)
 			if f != nil {
 				f.appendContent(line)
 				f.bytes.Add(int64(len(line)))
+				parseSSEStats(line, &lastOutput, &lastInput, &lastCacheRead)
 			}
 			t := bytes.TrimSpace(line)
 			if bytes.HasPrefix(t, []byte("data:")) {
@@ -1516,6 +1794,26 @@ func searchPostFlight(url, api string, reqBody []byte, f *flight, stream bool) (
 		if err != nil {
 			break
 		}
+	}
+	if f != nil {
+		f.inTokens = lastInput
+		f.cacheRead = lastCacheRead
+		f.outTokens = lastOutput
+		tEnd := time.Now()
+		if !tFirstByte.IsZero() {
+			f.firstByteMs = tFirstByte.Sub(tSend).Milliseconds()
+			streamMs := tEnd.Sub(tFirstByte).Milliseconds()
+			if streamMs > 0 {
+				f.tps = float64(lastOutput) / (float64(streamMs) / 1000.0)
+			}
+			log.Printf("[单流] #%d 搜索step2 首字 %.2fs 流式 %.2fs %d tok %.1f tok/s",
+				f.id, float64(f.firstByteMs)/1000, float64(streamMs)/1000, lastOutput, f.tps)
+		}
+		realModel := model
+		if realModel == "" {
+			realModel = modelHint
+		}
+		stats.addModelUsage(realModel, f.inTokens, f.cacheRead, f.outTokens)
 	}
 	m := map[string]any{
 		"model":       model,
@@ -1770,6 +2068,8 @@ func startSSEKeepalive(w http.ResponseWriter, f *flight, reason string) http.Flu
 // sleepWithPing 在 backoff 等待期间定期发 ping 保活，且可被客户端断开（ctx 取消）中断。
 // 替换原 time.Sleep(wait)：后者不可中断，客户端超时断开后代理仍傻睡+重试、白烧上游配额。
 // 参数 ctx：客户端连接 context；w/flusher：发 ping 用；wait：backoff 时长；interval：ping 间隔；f：flight。
+// flusher 为 nil 时静默等待不发 ping：convertAlltoStream 下客户端期待非流式响应，
+// 提前写任何 SSE 字节都会污染响应，只能干等（客户端连接保持，只是无数据）。
 // 返回 false 表示 ctx 已取消（客户端断开），应停止重试直接结束。
 func sleepWithPing(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, wait, interval time.Duration, f *flight) bool {
 	timer := time.NewTimer(wait)
@@ -1782,7 +2082,9 @@ func sleepWithPing(ctx context.Context, w http.ResponseWriter, flusher http.Flus
 			log.Printf("[保活] #%d 客户端已断开，停止重试", f.id)
 			return false
 		case <-ticker.C:
-			writeSSEPing(w, flusher)
+			if flusher != nil {
+				writeSSEPing(w, flusher)
+			}
 		case <-timer.C:
 			return true
 		}
@@ -1821,7 +2123,7 @@ func searchAndRespond(w http.ResponseWriter, body []byte, sf *SearchRoute, f *fl
 	}
 	searchDebugWrite(fid, "step1_req.json", step1Body)
 	step1F := newSearchSubFlight("搜索step1·" + sf.Model)
-	r1, r1Raw, err := searchPostFlight(sf.URL, sf.API, step1Body, step1F, false)
+	r1, r1Raw, err := searchPostFlight(sf.URL, sf.API, step1Body, step1F, false, sf.Model)
 	flights.unregister(step1F.id)
 	addFinished(step1F)
 	if err != nil {
@@ -1884,17 +2186,18 @@ func searchAndRespond(w http.ResponseWriter, body []byte, sf *SearchRoute, f *fl
 		thinking bool
 		label    string
 	}{
-		{sf.SummaryLevel, sf.SummaryThinking, "step2"},
-		{"mid", false, "step2降级mid"},
+		{sf.SummaryLevel, sf.SummaryThinking, "总结step2"},
+		{"mid", false, "总结step2降级mid"},
 	} {
-		step2Body, err := searchStep2Body(r1, body, sf, att.level, att.thinking)
+		step2Body, instr, err := searchStep2Body(r1, body, sf, att.level, att.thinking)
 		if err != nil {
 			log.Printf("[搜索摘要] #%d %s 构造失败: %v", fid, att.label, err)
 			continue
 		}
 		searchDebugWrite(fid, att.label+"_req.json", step2Body)
 		step2F := newSearchSubFlight(att.label + "·" + sf.Model)
-		r2, r2Raw, err := searchPostFlight(sf.URL, sf.API, step2Body, step2F, true)
+		step2F.searchPrompt = instr
+		r2, r2Raw, err := searchPostFlight(sf.URL, sf.API, step2Body, step2F, true, sf.Model)
 		flights.unregister(step2F.id)
 		addFinished(step2F)
 		if err != nil {
@@ -2079,6 +2382,16 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 				stats.mu.Unlock()
 			}
 		}
+		// 真实上游模型：优先用上游响应实际返回的 model 名（上游可能再把请求路由到别的模型）；
+		// 上游未返回 model 时退回路由目标 targetModel，透传则用 origModel。
+		realModel := f.upstreamModel
+		if realModel == "" {
+			realModel = f.targetModel
+		}
+		if realModel == "" {
+			realModel = f.origModel
+		}
+		stats.addModelUsage(realModel, f.inTokens, f.cacheRead, f.outTokens)
 		log.Printf("[完成] #%d response状态 %d 大小 %s 缓存命中 %s", f.id, f.status, humanBytes(f.bytes.Load()), cacheHitRate(f.cacheRead, f.inTokens))
 		stats.mu.Lock()
 		stats.active--
@@ -2105,6 +2418,9 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 			}
 			if modified {
 				data = bytes.Join(lines, []byte("\n"))
+				if f.upstreamModel == "" && actualModel != "" {
+					f.upstreamModel = actualModel
+				}
 				if !f.modelLogged.Swap(true) {
 					log.Printf("[改写] #%d 响应流 model 回改 %s → %s", f.id, actualModel, f.origModel)
 				}
@@ -2137,6 +2453,207 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 		}
 	}
 	return lastOutput
+}
+
+// collectStreamToJSON 把上游返回的 SSE 流完整收完，原样重建 Anthropic 非流式 message JSON，
+// 收完后一次性写给客户端。convertAlltoStream 下请求已被改为流式发上游，但客户端仍期待
+// 非流式 JSON，故必须先把流缓存完整（网页在途流仍实时可见：每段字节 tee 到 flight）。
+// 重建规则（流式是事件流、非流式是完整块，结构不同需重拼）：
+//   - message_start 的 message 对象作为骨架原样保留（id/type/role/model 等）；
+//   - 每个 content_block_start 的块骨架按 index 保留--web_search_tool_result（含
+//     encrypted_content）、server_tool_use 等整块内联的字段原样不动；
+//   - delta 事件只往已知字段追加：text_delta->text、thinking_delta->thinking、
+//     signature_delta->signature、input_json_delta->input（tool_use 参数，收完解析成对象）；
+//   - usage 合并：message_start 打底、message_delta 覆盖（后值语义，与统计逻辑一致）。
+// 参数 w：客户端响应写入器；resp/head/br：上游响应（head 为 peekHead 已读的字节，需先处理）；
+// f：本次 flight。返回 (是否完整收到 message_stop, 输出 token 数)。
+// 流不完整时未向客户端写任何字节，调用方可安全整体重试（重发流式请求、重收一次流）。
+func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.Reader, f *flight) (bool, int64) {
+	defer resp.Body.Close()
+	f.phase.Store(1)
+	f.status = resp.StatusCode
+	f.stage.Store(stageForward)
+	stats.mu.Lock()
+	stats.active++
+	stats.mu.Unlock()
+	defer func() {
+		stats.mu.Lock()
+		stats.active--
+		stats.mu.Unlock()
+	}()
+
+	var msgObj map[string]interface{}          // message_start 的 message 骨架
+	var usageObj map[string]interface{}        // usage 合并结果：start 打底，delta 覆盖
+	blocks := map[int]map[string]interface{}{} // index -> 内容块（start 骨架 + delta 累积）
+	var lastOutput, lastInput, lastCacheRead int64
+	complete := false
+
+	// strVal 取 map 里的字符串字段（不存在或非字符串返回空串）。
+	strVal := func(m map[string]interface{}, k string) string {
+		if m == nil {
+			return ""
+		}
+		if v, ok := m[k].(string); ok {
+			return v
+		}
+		return ""
+	}
+
+	// handleChunk 处理一段原始 SSE 字节（可能含多行）：逐行 tee 到网页与统计，并解析事件结构。
+	handleChunk := func(chunk []byte) {
+		for _, line := range bytes.SplitAfter(chunk, []byte("\n")) {
+			if len(line) == 0 {
+				continue
+			}
+			stats.bytesForward.Add(int64(len(line)))
+			f.bytes.Add(int64(len(line)))
+			f.appendContent(line)
+			if f.searchDebug {
+				searchDebugAppend(f.id, "main_resp.sse", line)
+			}
+			parseSSEStats(line, &lastOutput, &lastInput, &lastCacheRead)
+
+			s := bytes.TrimRight(line, "\r\n")
+			if !bytes.HasPrefix(s, []byte("data:")) {
+				continue
+			}
+			payload := bytes.TrimSpace(bytes.TrimPrefix(s, []byte("data:")))
+			if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+				continue
+			}
+			var ev map[string]interface{}
+			if json.Unmarshal(payload, &ev) != nil {
+				continue
+			}
+			switch ev["type"] {
+			case "message_start":
+				if msg, ok := ev["message"].(map[string]interface{}); ok {
+					msgObj = msg
+					if u, ok := msg["usage"].(map[string]interface{}); ok {
+						usageObj = make(map[string]interface{}, len(u))
+						for k, v := range u {
+							usageObj[k] = v
+						}
+					}
+					if m, ok := msg["model"].(string); ok && m != "" && f.upstreamModel == "" {
+						f.upstreamModel = m
+					}
+				}
+			case "content_block_start":
+				if cb, ok := ev["content_block"].(map[string]interface{}); ok {
+					blocks[int(toInt64(ev["index"]))] = cb
+				}
+			case "content_block_delta":
+				b := blocks[int(toInt64(ev["index"]))]
+				d, _ := ev["delta"].(map[string]interface{})
+				if b == nil || d == nil {
+					continue
+				}
+				switch d["type"] {
+				case "text_delta":
+					b["text"] = strVal(b, "text") + strVal(d, "text")
+				case "thinking_delta":
+					b["thinking"] = strVal(b, "thinking") + strVal(d, "thinking")
+				case "signature_delta":
+					b["signature"] = strVal(b, "signature") + strVal(d, "signature")
+				case "input_json_delta":
+					b["input"] = strVal(b, "input") + strVal(d, "partial_json")
+				}
+			case "message_delta":
+				if d, ok := ev["delta"].(map[string]interface{}); ok && msgObj != nil {
+					if sr, ok := d["stop_reason"].(string); ok {
+						msgObj["stop_reason"] = sr
+					}
+					if ss, ok := d["stop_sequence"]; ok {
+						msgObj["stop_sequence"] = ss
+					}
+				}
+				if u, ok := ev["usage"].(map[string]interface{}); ok {
+					if usageObj == nil {
+						usageObj = make(map[string]interface{}, len(u))
+					}
+					for k, v := range u {
+						usageObj[k] = v
+					}
+				}
+			case "message_stop":
+				complete = true
+			}
+		}
+	}
+
+	handleChunk(head)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			handleChunk(line)
+		}
+		if err != nil {
+			break
+		}
+	}
+	if !complete {
+		log.Printf("[流式化] #%d 上游流未完整收完（未见 message_stop），不写客户端，供整体重试", f.id)
+		return false, lastOutput
+	}
+
+	// 重建非流式 message JSON。model 回写客户端原始 model（路由改写对客户端无感）。
+	if msgObj == nil {
+		// 缺 message_start 的异常流：搭最小骨架，保证回传结构完整。
+		msgObj = map[string]interface{}{"type": "message", "role": "assistant"}
+	}
+
+	// 块按 index 排序回填 content；input 为字符串（input_json_delta 拼出的）尝试解析成对象。
+	indexes := make([]int, 0, len(blocks))
+	for i := range blocks {
+		indexes = append(indexes, i)
+	}
+	sort.Ints(indexes)
+	content := make([]interface{}, 0, len(indexes))
+	for _, i := range indexes {
+		b := blocks[i]
+		if s, ok := b["input"].(string); ok && s != "" {
+			var obj interface{}
+			if json.Unmarshal([]byte(s), &obj) == nil {
+				b["input"] = obj
+			}
+		}
+		content = append(content, b)
+	}
+	msgObj["content"] = content
+	if usageObj != nil {
+		msgObj["usage"] = usageObj
+	}
+	// model 回写客户端原始 model（路由改写对客户端无感）。
+	if f.targetModel != "" && f.targetModel != f.origModel {
+		msgObj["model"] = f.origModel
+		if f.upstreamModel != "" && !f.modelLogged.Swap(true) {
+			log.Printf("[改写] #%d 响应流 model 回改 %s -> %s", f.id, f.upstreamModel, f.origModel)
+		}
+	}
+	out, err := json.Marshal(msgObj)
+	if err != nil {
+		return false, lastOutput
+	}
+
+	// 一次性写完整响应（客户端期待非流式 JSON，收完前绝不能写任何字节）。
+	f.inTokens = lastInput
+	f.cacheRead = lastCacheRead
+	f.outTokens = lastOutput
+	stats.addModelUsage(f.realModel(), f.inTokens, f.cacheRead, f.outTokens)
+	log.Printf("[完成] #%d response状态 %d 大小 %s 缓存命中 %s", f.id, f.status, humanBytes(f.bytes.Load()), cacheHitRate(f.cacheRead, f.inTokens))
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(out)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	stats.bytesForward.Add(int64(len(out)))
+	f.bytes.Add(int64(len(out)))
+	f.appendContent(out) // tee 重建后的非流式 JSON，供网页对照回传形态
+	log.Printf("[流式化] #%d 流已收完，非流式 JSON 一次性返回客户端 (%d 输出 tokens)", f.id, lastOutput)
+	return true, lastOutput
 }
 
 // handler 是所有请求的入口：缓冲请求体 → 命中分类器则关 thinking →
@@ -2180,6 +2697,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		start: time.Now(),
 	}
 	flights.register(f)
+	// Responses 翻译口进来的内部请求带 context 标记，给 flight 打上来源，
+	// 网页 model 列显示 [translate] 前缀（与路由原因标签并列）。
+	if v, ok := r.Context().Value(ctxKeyTranslated).(string); ok {
+		f.translated = v
+	}
 	// 兜底清理：所有 return 路径统一由 defer 注销，避免遗漏导致在途流残留。
 	// 注销后存档其透传内容（若有），供网页回看最近完成的流。
 	defer func() {
@@ -2205,6 +2727,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if origModel != "" {
 		modelPart = " model=" + origModel
 	}
+	if f.translated != "" {
+		modelPart += " [翻译:" + f.translated + "]"
+	}
 	log.Printf("[请求] #%d %s %s%s (body=%d字节) 来自 %s", f.id, r.Method, r.URL.Path, modelPart, len(body), r.RemoteAddr)
 
 	// 1.5 命中分类器请求就关掉 thinking，让分类快速返回。
@@ -2221,6 +2746,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	var targetModel string
 	fastRouteHit := false
 	searchSummaryMode := false // 搜索摘要模式：step1+step2 自构响应，不走主 ark。
+	var summarySF *SearchRoute // 增强搜索触发时由命中的 RouteRule 构造；空则用 c.SearchFallback
 	if isClassifier && c.ClassifierRoute != nil {
 		// 分类器路由：把安全判断请求统一甩到指定上游，省主模型额度。
 		cr := c.ClassifierRoute
@@ -2266,30 +2792,24 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					}
 					sf := c.SearchFallback
 					mf := c.MultimodalFallback
-					// 0) 搜索摘要模式：sf 配了 summary_mode 时，不走整请求转走，
-					//    改由 searchAndRespond 做 step1 搜索 + step2 摘要 + 自构 Kimi 格式响应。
-					if needSearch && sf != nil && sf.SummaryMode && (!needImage || !sf.TextOnly) {
-						searchSummaryMode = true
-						f.routeReason.Store(routeSearch)
-						log.Printf("[路由] #%d 搜索摘要模式 %s -> %s (model %s -> %s)", f.id, origModel, sf.URL, origModel, sf.Model)
-						break
-					}
-					// 1) 需要搜索且 search_fallback 可走（不带图，或带图但兜底支持图）。
-					if needSearch && sf != nil && (!needImage || !sf.TextOnly) {
+					// 搜索：整个请求交给 search_fallback，不管是否含图片（无证据表明会同时多模态+搜索）。
+					//    summary_mode 优先（step1 搜索 + step2 摘要）；否则整请求转发。
+					if needSearch && sf != nil {
+						if sf.SummaryMode {
+							searchSummaryMode = true
+							f.routeReason.Store(routeSearch)
+							log.Printf("[路由] #%d 搜索摘要模式 %s -> %s (model %s -> %s)", f.id, origModel, sf.URL, origModel, sf.Model)
+							break
+						}
 						applyFB(sf.URL, sf.API, sf.Model, "搜索兜底", routeSearch)
 						break
 					}
-					// 2) 需要图片（或上面搜索没走成）且 multimodal_fallback 可走（不带搜索，或带搜索但兜底支持搜索）。
-					if (needImage || needSearch) && mf != nil && (!needSearch || !mf.NoSearch) {
+					// 纯图片（无搜索）：有 multimodal_fallback 走 mf；搜索请求不落 mf（没 sf 则降级透传）。
+					if needImage && mf != nil && !needSearch {
 						applyFB(mf.URL, mf.API, mf.Model, "图片兜底", routeMultimodal)
 						break
 					}
-					// 3) 纯图片但 multimodal_fallback 没配，退而走支持图片的 search_fallback。
-					if needImage && !needSearch && sf != nil && !sf.TextOnly {
-						applyFB(sf.URL, sf.API, sf.Model, "搜索兜底", routeSearch)
-						break
-					}
-					// 4) 都不满足：降级走原 route（由上游处理，可能报错）。
+					// 降级：搜索无 sf、或纯图片无 mf，透传原 route（由上游处理，可能报错）。
 				}
 				upstream = rr.URL
 				authToken = rr.API
@@ -2299,6 +2819,21 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("[路由] #%d %s -> %s (model %s -> %s)", f.id, origModel, rr.URL, origModel, rr.Model)
 				f.routeReason.Store(routePattern)
+				// 增强搜索：route 支持搜索（no_search:false）且配了 enhance_search，请求带搜索工具时，
+				// 不调主力，改用本 route 上游走 kimi 摘要模式（等价于 no_search 走 search_fallback.summary_mode，
+				// 只是搜索上游用 route 自己的 url/api/model，摘要参数用 route 的 enhance_search）。
+				if rr.EnhanceSearch != nil && hasWebSearch(body) && !rr.NoSearch && !(rr.TextOnly && hasImage(body)) {
+					searchSummaryMode = true
+					summarySF = &SearchRoute{
+						URL:             rr.URL,
+						API:             rr.API,
+						Model:           rr.Model,
+						SummaryMode:     true,
+						SummaryLevel:    rr.EnhanceSearch.SummaryLevel,
+						SummaryThinking: rr.EnhanceSearch.SummaryThinking,
+					}
+					log.Printf("[路由] #%d 增强搜索 %s -> %s (model %s)", f.id, origModel, rr.URL, rr.Model)
+				}
 				break // 有序：第一个命中即止
 			}
 		}
@@ -2310,7 +2845,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// 搜索摘要模式：step1 搜索 + step2 摘要 + 自构 Kimi 格式响应，不走主 ark。
 	// 成功则直接 return；失败降级走 search_fallback 整请求转走（Kimi 模式）。
 	if searchSummaryMode {
-		sf := c.SearchFallback
+		sf := summarySF
+		if sf == nil {
+			sf = c.SearchFallback
+		}
 		if sf != nil && searchAndRespond(w, body, sf, f, origModel) {
 			return
 		}
@@ -2328,6 +2866,19 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				targetModel = sf.Model
 			}
 			f.searchDebug = true // 降级走 Kimi 整请求转走时，记录主力响应 raw 便于对照
+		}
+	}
+
+	// 1.7 全局流式化（convertAlltoStream）：开启时把所有非流式请求改为流式发上游，
+	// 收集完整 SSE 流后重建非流式 JSON 一次性返回客户端（客户端无感知，网页可监控吐字/首字/tok/s）。
+	// 只改 Anthropic Messages API（/v1/messages）：OpenAI 兼容路径的 SSE 格式不同，无法重建。
+	// 搜索摘要模式自构响应不走主上游；已是流式的请求本就流式返回，均不受影响。
+	convertToStream := false
+	if c.ConvertAllToStream && !searchSummaryMode && r.URL.Path == "/v1/messages" {
+		if stream, ok := getBoolField(body, "stream"); !ok || !stream {
+			body = forceStreamTrue(body)
+			convertToStream = true
+			log.Printf("[流式化] #%d 非流式请求已改为流式发上游 (stream:%v → true)", f.id, stream)
 		}
 	}
 
@@ -2390,9 +2941,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				wait := computeBackoff(nil, attempt)
 				if !time.Now().Add(wait).After(deadline) {
 					log.Printf("[重试] 等待 %v 后重试 (剩余预算 %v)", wait, time.Until(deadline).Round(time.Millisecond))
-					stats.statusRetries.Add(1)          // 实时状态行计数：重试次数（网络错误/超时）
+					stats.statusRetries.Add(1) // 实时状态行计数：重试次数（网络错误/超时）
+					stats.addModelRetry(f.realModel())
 					f.attempt.Store(int32(attempt + 2)) // 退避期间把尝试序号推进到下一次
-					if !headersSent {
+					if !headersSent && !convertToStream {
+						// convertToStream 的客户端期待非流式响应，不能发 SSE 保活（会污染），静默等待。
 						flusher = startSSEKeepalive(w, f, "网络错误")
 						headersSent = true
 					}
@@ -2421,10 +2974,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				wait := computeBackoff(resp, attempt)
 				if !time.Now().Add(wait).After(deadline) {
 					log.Printf("[重试] 状态码 %d，等待 %v 后重试 (剩余预算 %v)", resp.StatusCode, wait, time.Until(deadline).Round(time.Millisecond))
-					stats.statusRetries.Add(1)          // 实时状态行计数：重试次数（状态码）
+					stats.statusRetries.Add(1) // 实时状态行计数：重试次数（状态码）
+					stats.addModelRetry(f.realModel())
 					f.attempt.Store(int32(attempt + 2)) // 退避期间把尝试序号推进到下一次
 					resp.Body.Close()
-					if !headersSent {
+					if !headersSent && !convertToStream {
+						// convertToStream 的客户端期待非流式响应，不能发 SSE 保活（会污染），静默等待。
 						flusher = startSSEKeepalive(w, f, fmt.Sprintf("状态码 %d", resp.StatusCode))
 						headersSent = true
 					}
@@ -2455,10 +3010,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				wait := computeBackoff(resp, attempt)
 				if !time.Now().Add(wait).After(deadline) {
 					log.Printf("[重试] 等待 %v 后重试 (剩余预算 %v)", wait, time.Until(deadline).Round(time.Millisecond))
-					stats.statusRetries.Add(1)          // 实时状态行计数：重试次数（200 体内错误）
+					stats.statusRetries.Add(1) // 实时状态行计数：重试次数（200 体内错误）
+					stats.addModelRetry(f.realModel())
 					f.attempt.Store(int32(attempt + 2)) // 退避期间把尝试序号推进到下一次
 					resp.Body.Close()
-					if !headersSent {
+					if !headersSent && !convertToStream {
+						// convertToStream 的客户端期待非流式响应，不能发 SSE 保活（会污染），静默等待。
 						flusher = startSSEKeepalive(w, f, "体内错误")
 						headersSent = true
 					}
@@ -2488,6 +3045,46 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			resp.Header.Set("anthropic-fast-input-tokens-remaining", "999999")
 			resp.Header.Set("anthropic-fast-output-tokens-reset", now)
 			resp.Header.Set("anthropic-fast-input-tokens-reset", now)
+		}
+		// convertToStream 的请求：上游按流式回 SSE，收集完整流重建非流式 JSON 后一次性返回
+		// （网页在途流仍实时可见，统计与普通流式请求一致）。上游没按流式回（JSON）则走下面透传。
+		if convertToStream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+			ok, out := collectStreamToJSON(w, resp, head, br, f)
+			if ok {
+				// 统计与普通流式透传一致：首字延迟 / 流式时长 / tok/s。
+				tEnd := time.Now()
+				stats.pushFirstByte(int64(tFirstByte.Sub(tSend).Milliseconds()))
+				stats.pushThroughput(int64(tEnd.Sub(tFirstByte).Milliseconds()), out)
+				firstByteMs := tFirstByte.Sub(tSend).Milliseconds()
+				streamMs := tEnd.Sub(tFirstByte).Milliseconds()
+				var tps float64
+				if streamMs > 0 {
+					tps = float64(out) / (float64(streamMs) / 1000.0)
+				}
+				f.firstByteMs = firstByteMs
+				f.tps = tps
+				log.Printf("[单流] #%d 首字 %.2fs 流式 %.2fs %d tok %.1f tok/s",
+					f.id, float64(firstByteMs)/1000, float64(streamMs)/1000, out, tps)
+				return
+			}
+			// 流中途断开：客户端尚未收到任何内容，退避后整体重试（重发流式请求、重收一次流）。
+			log.Printf("[流式化] #%d 上游流未收完，重试", f.id)
+			stats.statusRetries.Add(1)
+			stats.addModelRetry(f.realModel())
+			if attempt < c.MaxRetries && time.Now().Before(deadline) {
+				wait := computeBackoff(resp, attempt)
+				if !time.Now().Add(wait).After(deadline) {
+					f.attempt.Store(int32(attempt + 2))
+					if !sleepWithPing(ctx, w, flusher, wait, pingInterval, f) {
+						return // 客户端已断开，停止重试
+					}
+					continue
+				}
+			}
+			// 重试用尽：客户端期待非流式 JSON，透传 502 让其自行处理。
+			log.Printf("[透传] 次数或预算用尽，非流式化流未收完，透传 502")
+			http.Error(w, "upstream stream interrupted after retries", http.StatusBadGateway)
+			return
 		}
 		stats.pushFirstByte(int64(tFirstByte.Sub(tSend).Milliseconds()))
 		out := forward(w, resp, head, br, f, headersSent)
@@ -2552,6 +3149,10 @@ func main() {
 	// HTTP 服务放 goroutine：托盘事件循环（systray.Run）必须占主线程（macOS 要求 UI 在主线程），
 	// 故主线程阻塞点留给托盘，HTTP 在后台跑。
 	go runServer(c)
+	// 可选：OpenAI Responses API 监听口（翻译成 Anthropic 走主管线），独立于主端口。
+	if c.ResponsesListen != "" {
+		go runResponsesServer(c.ResponsesListen)
+	}
 	// Ctrl+C -> 优雅退出托盘：systray.Quit 触发 onExit 停状态轮询，Run 返回后 main 随即退出。
 	go func() {
 		sigCh := make(chan os.Signal, 1)

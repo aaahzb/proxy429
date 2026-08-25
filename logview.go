@@ -17,19 +17,19 @@ import (
 // 网页控制台挂载路径（与代理同端口，仅本机访问）。
 // 选 /__ 前缀：Anthropic API 走 /v1/...，不冲突；Go DefaultServeMux 精确匹配优先于 / 通配。
 const (
-	logViewerPath = "/__logs"
-	logDataPath   = "/__logs/data"
-	configPath    = "/__config" // GET 取配置内容、POST 保存并重载
-	reloadPath    = "/__reload" // POST 仅重载（不改动文件）
-	remotePath    = "/__remote" // POST 切换 allow_remote（开/关内网访问），仅本机可操作
-	configsPath   = "/__configs" // GET 列出当前配置目录下所有 .json（供切换）
-	switchPath    = "/__switch"  // POST 切换到指定配置文件并即时生效
-	newConfigPath    = "/__newconfig"    // POST 新建配置文件（空白模板）并切换
-	renameConfigPath = "/__renameconfig" // POST 重命名配置文件
-	delConfigPath    = "/__delconfig"    // POST 删除配置文件（不允许删当前在用的）
-	resetStatsPath   = "/__resetstats"   // POST 清空累计统计（切换配置不再自动清）
-	clearLogsPath    = "/__clearlogs"    // POST 清空内存日志缓冲
-	flightPath       = "/__flight"       // GET 在途流透传内容（?id=N，已完成流也查此）
+	logViewerPath     = "/__logs"
+	logDataPath       = "/__logs/data"
+	configPath        = "/__config"        // GET 取配置内容、POST 保存并重载
+	reloadPath        = "/__reload"        // POST 仅重载（不改动文件）
+	remotePath        = "/__remote"        // POST 切换 allow_remote（开/关内网访问），仅本机可操作
+	configsPath       = "/__configs"       // GET 列出当前配置目录下所有 .json（供切换）
+	switchPath        = "/__switch"        // POST 切换到指定配置文件并即时生效
+	newConfigPath     = "/__newconfig"     // POST 新建配置文件（空白模板）并切换
+	renameConfigPath  = "/__renameconfig"  // POST 重命名配置文件
+	delConfigPath     = "/__delconfig"     // POST 删除配置文件（不允许删当前在用的）
+	resetStatsPath    = "/__resetstats"    // POST 清空累计统计（切换配置不再自动清）
+	clearLogsPath     = "/__clearlogs"     // POST 清空内存日志缓冲
+	flightPath        = "/__flight"        // GET 在途流透传内容（?id=N，已完成流也查此）
 	recentFlightsPath = "/__recentflights" // GET 最近完成的流列表（摘要）
 	finishedCapPath   = "/__finishedcap"   // POST 设置保留完成流个数 N
 )
@@ -92,29 +92,32 @@ type flightInfo struct {
 	Status      int    `json:"status"`      // HTTP 状态码（stage=stageForward 时显示）
 	Stage       int32  `json:"stage"`       // 当前阶段：0=请求 1=路由 2=尝试N 3=转发(显示状态码)
 	Attempt     int32  `json:"attempt"`     // 当前尝试序号（1 起），stage=2 时显示「尝试N」
-	RouteReason int32  `json:"routeReason"` // 路由原因：0=透传 1=pattern 2=分类器 3=fast 4=多模态 5=搜索
+	RouteReason  int32  `json:"routeReason"` // 路由原因：0=透传 1=pattern 2=分类器 3=fast 4=多模态 5=搜索
+	Translated   string `json:"translated"`  // 翻译口来源（"responses"），model 列显示 [translate] 前缀
+	SearchPrompt string `json:"searchPrompt,omitempty"`
 }
 
 // logData 是 /__logs/data 返回的 JSON：最近日志 + 全量状态计数 + 在途流列表。
 type logData struct {
-	Lines        []string     `json:"lines"`
-	Active       int          `json:"active"`
-	Waiting      int          `json:"waiting"`
-	Version      string       `json:"version"`
-	CacheRead    int64        `json:"cacheRead"`
-	InputTokens  int64        `json:"inputTokens"`
-	OutputTokens int64        `json:"outputTokens"`
-	BytesForward int64        `json:"bytesForward"`
-	Rate         int64        `json:"rate"` // bytes/s
-	Retries      int64        `json:"retries"`
-	Classifiers  int64        `json:"classifiers"`
-	AvgFirstByte float64      `json:"avgFirstByte"` // ms
-	Tps          float64      `json:"tps"`          // tok/s
-	Flights      []flightInfo `json:"flights"`
-	Listen       string       `json:"listen"`      // 当前监听地址
-	AllowRemote  bool         `json:"allowRemote"` // 是否允许内网访问
-	CurrentCfg   string       `json:"currentCfg"`  // 当前生效的配置文件名
-	FinishedCap  int32        `json:"finishedCap"` // 保留完成流个数 N（状态页可改）
+	Lines        []string          `json:"lines"`
+	Active       int               `json:"active"`
+	Waiting      int               `json:"waiting"`
+	Version      string            `json:"version"`
+	CacheRead    int64             `json:"cacheRead"`
+	InputTokens  int64             `json:"inputTokens"`
+	OutputTokens int64             `json:"outputTokens"`
+	ModelStats   []modelUsageEntry `json:"modelStats"`
+	BytesForward int64             `json:"bytesForward"`
+	Rate         int64             `json:"rate"` // bytes/s
+	Retries      int64             `json:"retries"`
+	Classifiers  int64             `json:"classifiers"`
+	AvgFirstByte float64           `json:"avgFirstByte"` // ms
+	Tps          float64           `json:"tps"`          // tok/s
+	Flights      []flightInfo      `json:"flights"`
+	Listen       string            `json:"listen"`      // 当前监听地址
+	AllowRemote  bool              `json:"allowRemote"` // 是否允许内网访问
+	CurrentCfg   string            `json:"currentCfg"`  // 当前生效的配置文件名
+	FinishedCap  int32             `json:"finishedCap"` // 保留完成流个数 N（状态页可改）
 }
 
 // logDataHandler 返回最近 maxLogBuf 行日志和全量状态（JSON），供页面每 500ms 轮询。
@@ -132,6 +135,7 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 	d.InputTokens = stats.inputTokens
 	d.OutputTokens = stats.outputTokens
 	stats.mu.Unlock()
+	d.ModelStats = stats.snapshotModelStats()
 	d.BytesForward = stats.bytesForward.Load()
 	d.Rate = computeRate(d.BytesForward)
 	d.Retries = stats.statusRetries.Load()
@@ -145,14 +149,16 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 			model = f.origModel + " -> " + f.targetModel
 		}
 		d.Flights = append(d.Flights, flightInfo{
-			ID:          f.id,
-			Model:       model,
-			Phase:       int(f.phase.Load()),
-			Bytes:       f.bytes.Load(),
-			Status:      f.status,
-			Stage:       f.stage.Load(),
-			Attempt:     f.attempt.Load(),
-			RouteReason: f.routeReason.Load(),
+			ID:           f.id,
+			Model:        model,
+			Phase:        int(f.phase.Load()),
+			Bytes:        f.bytes.Load(),
+			Status:       f.status,
+			Stage:        f.stage.Load(),
+			Attempt:      f.attempt.Load(),
+			RouteReason:  f.routeReason.Load(),
+			Translated:   f.translated,
+			SearchPrompt: f.searchPrompt,
 		})
 	}
 	if d.Flights == nil {
@@ -337,20 +343,12 @@ func validConfigName(name string) (string, bool) {
 	return name, true
 }
 
-// readConfigTemplate 读取空白配置模板：依次尝试当前配置目录、可执行文件目录、工作目录的
-// config.example.json，都找不到则返回 "{}"。供「新建配置」作为初始内容。
+// readConfigTemplate 返回新建配置用的空白模板。
+// 直接用编译期内嵌的 config.example.json（configExampleBytes），保证始终与 exe 同版本最新，
+// 不读磁盘副本--磁盘上的 config.example.json 可能是旧版未随 exe 更新，会导致新建出旧模板。
+// 想看/改参考模板，看 release 目录里的 config.example.json 即可。
 func readConfigTemplate() []byte {
-	candidates := []string{filepath.Join(filepath.Dir(currentConfigPath()), "config.example.json")}
-	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "config.example.json"))
-	}
-	candidates = append(candidates, "config.example.json")
-	for _, p := range candidates {
-		if data, err := os.ReadFile(p); err == nil {
-			return data
-		}
-	}
-	return []byte("{}\n")
+	return configExampleBytes
 }
 
 // newConfigHandler 新建配置文件：用 config.example.json 作为空白模板写入指定文件名，
@@ -440,10 +438,14 @@ func renameConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// 若重命名的是当前配置，更新 configFilePath，使后续读写指向新文件
 	configMu.Lock()
-	if configFilePath == oldFull {
+	renamed := configFilePath == oldFull
+	if renamed {
 		configFilePath = newFull
 	}
 	configMu.Unlock()
+	if renamed {
+		writeActiveConfigState(newFull)
+	}
 	log.Printf("[重命名] %s -> %s", oldName, newName)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "current": filepath.Base(currentConfigPath())})
@@ -571,17 +573,20 @@ func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 	for i := len(finished) - 1; i >= 0; i-- {
 		ff := finished[i]
 		out = append(out, map[string]any{
-			"id":     ff.id,
-			"model":  ff.model,
-			"status": ff.status,
-			"bytes":  ff.bytes,
-			"stage":  ff.stage,
-			"ended":     ff.ended.Format("15:04:05"),
+			"id":          ff.id,
+			"model":       ff.model,
+			"routeReason": ff.routeReason,
+			"translated":  ff.translated,
+			"status":      ff.status,
+			"bytes":       ff.bytes,
+			"stage":       ff.stage,
+			"ended":       ff.ended.Format("15:04:05"),
 			"hitRate":     cacheHitRate(ff.cacheRead, ff.inTokens),
 			"cacheRead":   ff.cacheRead,
 			"inTokens":    ff.inTokens,
 			"firstByte":   fmtFirstByte(ff.firstByteMs),
 			"tps":         fmtTps(ff.tps),
+			"searchPrompt": ff.searchPrompt,
 		})
 	}
 	finishedMu.Unlock()
@@ -674,6 +679,20 @@ const logViewerHTML = `<!DOCTYPE html>
   .ss-search .ss-url { color:#569cd6; }
   .ss-empty { color:#9a9a9a; }
   .ss-error { margin:4px 0; padding:4px 6px; background:#3a1a1a; border-left:3px solid #f48771; color:#f48771; white-space:pre-wrap; word-break:break-all; }
+  /* 使用文档弹窗 */
+  .doc h3 { color:#4ec9b0; margin:14px 0 4px; font-size:13px; }
+  .doc p { margin:4px 0; color:#c0c0c0; }
+  .doc ul { margin:4px 0 4px 18px; color:#c0c0c0; }
+  .doc li { margin:2px 0; }
+  .doc code { background:#2a2a2a; padding:1px 5px; border-radius:3px; color:#9cdcfe; }
+  .doc b { color:#d4d4d4; }
+  /* 删除配置弹窗 */
+  #cfgDelModal { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:100; display:none; align-items:center; justify-content:center; }
+  #cfgDelModal .box { background:#252526; border:1px solid #444; border-radius:6px; padding:16px; min-width:320px; }
+  #cfgDelModal .t { margin-bottom:10px; color:#d4d4d4; }
+  #cfgDelModal select { width:100%; background:#1e1e1e; color:#d4d4d4; border:1px solid #444; border-radius:3px; padding:5px; font:inherit; }
+  #cfgDelModal .err { color:#c75; margin-top:8px; min-height:16px; }
+  #cfgDelModal .btns { margin-top:14px; display:flex; gap:8px; justify-content:flex-end; }
 </style>
 </head>
 <body>
@@ -682,6 +701,7 @@ const logViewerHTML = `<!DOCTYPE html>
   <div class="tab" data-tab="logs">日志</div>
   <div class="tab" data-tab="config">配置</div>
   <span id="hint">关闭此标签页即隐藏 · 代理继续运行</span>
+  <button id="docBtn" class="ghost" style="align-self:center;margin:0 12px" onclick="document.getElementById('docModal').style.display='flex'">文档</button>
 </div>
 
 <div class="pane active" id="pane-status">
@@ -709,10 +729,122 @@ const logViewerHTML = `<!DOCTYPE html>
 </div>
 
 <div class="pane" id="pane-logs">
-  <div style="margin-bottom:6px"><span id="count">0</span> 行 · 滚轮翻历史，自动滚到底</div>
+  <div style="margin-bottom:6px"><span id="count">0</span> 行 · 滚轮翻历史，自动滚到底 <span style="color:#9a9a9a">（内存仅留最近 500 行，新的覆盖旧的；不会随时间堆积。落盘日志另看 log_file）</span></div>
   <pre id="log"></pre>
 </div>
 <button id="clearLogsBtn" class="ghost" style="position:fixed;right:16px;bottom:16px;z-index:20;display:none">清空日志</button>
+
+<div id="cacheTip" style="display:none;position:fixed;z-index:35;background:#1a1a1a;border:1px solid #555;border-radius:6px;padding:8px 10px;max-width:540px;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-size:12px"></div>
+<div id="cacheModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:40;align-items:center;justify-content:center" onclick="if(event.target===this)this.style.display='none'">
+  <div style="background:#1a1a1a;border:1px solid #555;border-radius:8px;padding:20px 24px;max-width:720px;max-height:80vh;overflow:auto;position:relative">
+    <button class="ghost" style="position:absolute;top:10px;right:12px" onclick="document.getElementById('cacheModal').style.display='none'">关闭</button>
+    <div style="font-size:15px;margin-bottom:12px;color:#d4d4d4">缓存命中明细（按真实上游模型） <span id="cacheModalTotal" style="color:#888;font-size:12px;margin-left:8px"></span></div>
+    <div id="cacheModalBody"></div>
+  </div>
+</div>
+<div id="retryTip" style="display:none;position:fixed;z-index:35;background:#1a1a1a;border:1px solid #555;border-radius:6px;padding:8px 10px;max-width:540px;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-size:12px"></div>
+<div id="retryModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:40;align-items:center;justify-content:center" onclick="if(event.target===this)this.style.display='none'">
+  <div style="background:#1a1a1a;border:1px solid #555;border-radius:8px;padding:20px 24px;max-width:720px;max-height:80vh;overflow:auto;position:relative">
+    <button class="ghost" style="position:absolute;top:10px;right:12px" onclick="document.getElementById('retryModal').style.display='none'">关闭</button>
+    <div style="font-size:15px;margin-bottom:12px;color:#d4d4d4">重试明细（按路由目标模型） <span id="retryModalTotal" style="color:#888;font-size:12px;margin-left:8px"></span></div>
+    <div id="retryModalBody"></div>
+  </div>
+</div>
+
+<div id="docModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:40;align-items:center;justify-content:center" onclick="if(event.target===this)this.style.display='none'">
+  <div style="background:#1a1a1a;border:1px solid #555;border-radius:8px;padding:20px 24px;max-width:780px;max-height:85vh;overflow:auto;position:relative">
+    <button class="ghost" style="position:absolute;top:10px;right:12px" onclick="document.getElementById('docModal').style.display='none'">关闭</button>
+    <div style="font-size:15px;margin-bottom:14px;color:#d4d4d4;font-weight:bold">使用文档</div>
+    <div class="doc">
+      <h3>全局流式化 convertAlltoStream</h3>
+      <p>顶层配置 <code>convertAlltoStream</code>（默认 false）开启后，所有非流式请求（<code>stream:false</code> 或省略）都被代理悄悄改为流式发给上游：在途流页面实时可见吐字、统计首字与 tok/s。请求方无感知——代理把上游流完整收完后，<b>原样重建</b>非流式 JSON（所有内容块按流里原样拼回，含搜索结果 encrypted_content）一次性返回，调用方拿到的仍是它预期的非流式响应。流中途断开（未见 message_stop）时未向客户端写任何内容，代理整体重试。</p>
+      <p>仅作用于 Anthropic Messages 请求（/v1/messages）；已是流式的请求、搜索摘要模式不受影响。重试等待期间不发 SSE 保活 ping（会污染非流式响应），静默等待。</p>
+      <h3>Responses API 监听口 responses_listen</h3>
+      <p>顶层配置 <code>responses_listen</code>（默认空，不启用）设为如 <code>127.0.0.1:8081</code> 后，代理在该地址额外开一个 OpenAI Responses API 端点（<code>/v1/responses</code>）：把 Codex CLI 等只说 Responses 协议的工具接到 Anthropic 上游。请求被翻译成 Anthropic Messages 走主管线（路由/重试/本控制台监控照常生效），响应翻译回 Responses（客户端 stream:true 拿 SSE 事件流，false 拿一次性 JSON）。</p>
+      <p>工具里的 model 名照常参与路由匹配：在 routes 加一条如 <code>gpt-5*</code> 即可指定上游与改写模型。改动需重启；访问控制与主端口同规则（allow_remote=false 时仅本机）。</p>
+      <p>翻译规则与 cc-switch 3.20.0 一致：<code>reasoning.effort</code> 按模型分类映射——adaptive 模型（fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6）翻成 <code>thinking:adaptive</code> + <code>output_config.effort</code>（fable-5/mythos-5 关不掉 thinking，显式 none 翻成 effort:low）；其余模型翻成 budget_tokens（low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576）。查表用客户端发来的 model 名（路由改写之前），想让表生效就把客户端 model 直接填目标模型名。工具映射（function/custom/namespace/tool_search/web_search/input_file）与完整映射表见使用说明.md「Responses 翻译映射表」。</p>
+      <h3>路由与能力兜底</h3>
+      <p>请求按顺序匹配上游：classifier_route（分类器分流）→ fast_route（快速直连）→ routes（按 model pattern 匹配）。命中 route 后，若该上游能力不足（text_only 缺图片 / no_search 缺搜索）按以下处理：</p>
+      <ul>
+      <li>搜索请求（带 web_search）→ 走 search_fallback：开了 summary_mode 则代理做 step1 搜索 + step2 摘要两步自构响应，否则整请求转发给 search_fallback 上游自己搜索回答。两种都是同一个 search_fallback 配置，不是独立路由。</li>
+      <li>纯图片请求（无搜索）→ 走 multimodal_fallback；没配则透传原 route。</li>
+      <li>搜索没配 search_fallback、或纯图片没配 multimodal_fallback → 降级透传原 route（上游可能报错）。</li>
+      </ul>
+      <h3>参数速查</h3>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;color:#d4d4d4;margin:8px 0">
+      <tr style="border-bottom:1px solid #555">
+      <th style="text-align:left;padding:6px 8px">参数</th>
+      <th style="text-align:left;padding:6px 8px">配在哪儿</th>
+      <th style="text-align:left;padding:6px 8px">作用</th>
+      <th style="text-align:left;padding:6px 8px">搭配 / 互斥</th>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>text_only</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] 条目</td>
+      <td style="padding:6px 8px;vertical-align:top">标记上游不支持图片</td>
+      <td style="padding:6px 8px;vertical-align:top">含图请求改走 multimodal_fallback；没配则透传原 route</td>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>no_search</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] 条目</td>
+      <td style="padding:6px 8px;vertical-align:top">标记上游不支持搜索</td>
+      <td style="padding:6px 8px;vertical-align:top">搜索请求改走 search_fallback；与 enhance_search 互斥（标了 no_search 则 enhance_search 不生效）</td>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>enhance_search</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] 条目</td>
+      <td style="padding:6px 8px;vertical-align:top">支持搜索时主动改走 kimi 摘要模式</td>
+      <td style="padding:6px 8px;vertical-align:top">仅该 route 未标 no_search 时生效；与 search_fallback 互斥</td>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>multimodal_fallback</code></td>
+      <td style="padding:6px 8px;vertical-align:top">顶层</td>
+      <td style="padding:6px 8px;vertical-align:top">图片兜底上游</td>
+      <td style="padding:6px 8px;vertical-align:top">route 标 text_only 且请求含图时走它；纯图片无搜索才落这里</td>
+      </tr>
+      <tr>
+      <td style="padding:6px 8px;vertical-align:top"><code>search_fallback</code></td>
+      <td style="padding:6px 8px;vertical-align:top">顶层</td>
+      <td style="padding:6px 8px;vertical-align:top">搜索兜底上游</td>
+      <td style="padding:6px 8px;vertical-align:top">route 标 no_search 且请求含搜索时走它；summary_mode=true 代理做 step1+step2 自构响应，=false 整请求转发给上游自己搜索回答</td>
+      </tr>
+      </table>
+      <h3>pattern 顺序</h3>
+      <p>routes 按数组顺序匹配，第一个命中的生效，无"更具体优先"排序。宽通配会截胡窄通配--<code>*opus*</code> 写在 <code>*opus-4*</code> 前面时，<code>claude-opus-4-8</code> 先命中 <code>*opus*</code>，<code>*opus-4*</code> 永不触发；要让更具体的 pattern 生效，写在前面。</p>
+      <h3>图片多模态</h3>
+      <p>route 标了 <code>text_only</code> 且请求含图片时触发兜底。route 本身支持图片（未标 text_only）则直接走，不触发。</p>
+      <ul>
+      <li>配了 multimodal_fallback：改走 mf（正常多模态兜底）。</li>
+      <li>没配 multimodal_fallback：透传给原 route 模型（上游不支持图片会报错，代理原样透传）。</li>
+      </ul>
+      <p>搜索请求（带 web_search）一律走 search_fallback，不管请求体是否含图片--没有证据表明会同时出现多模态+搜索。</p>
+      <h3>增强搜索 enhance_search</h3>
+      <p>route 配 <code>enhance_search</code> 后，<b>仅当该 route 支持搜索（未标 <code>no_search</code>）</b>时生效：收到带 web_search 的请求不调主力，改走两步：</p>
+      <ul>
+      <li>step1：用本 route 上游做非流式搜索，拿到 web_search_tool_result。</li>
+      <li>step2：搜索结果 + 用户原始问题（搜索意图）组合成指令，流式生成逐条摘要（Result N: ...）。</li>
+      </ul>
+      <p>与 <code>search_fallback</code> 互斥：route 支持搜索（未标 <code>no_search</code>）走 enhance_search；route 标 <code>no_search</code> 缺搜索才走 <code>search_fallback</code>。</p>
+      <p><code>summary_level</code>：low（简短）/ mid（中等）/ high（详尽）/ max（含代码公式逐字复述），控制详细度与 max_tokens。<code>summary_thinking</code>：step2 是否开 thinking。</p>
+      <h3>缓存命中</h3>
+      <p>命中率 = cache_read / (input + cache_read)。高命中率（90%+）主要来自上游模型（DeepSeek/Kimi）的原生 context caching，代理只透传 cache_read_input_tokens，不做额外缓存优化。点击状态页「缓存命中」卡片可看按真实上游模型分组的明细。</p>
+      <h3>统计字段</h3>
+      <ul>
+      <li><b>首字</b>：从发出请求到收到首个输出字节耗时（ms）。</li>
+      <li><b>tok/s</b>：流式输出速率 = 输出 token 数 / 流式耗时。</li>
+      <li><b>缓存命中</b>：见上。</li>
+      </ul>
+      <h3>配置管理</h3>
+      <ul>
+      <li>配置页可新建 / 重命名 / 删除 / 切换配置文件。</li>
+      <li>切到配置页后自动每 3 秒刷新文件列表，增删配置文件无需手动按「刷新列表」。</li>
+      <li>当前生效的配置不可删除。</li>
+      </ul>
+      <h3>访问控制</h3>
+      <p>默认仅本机访问。点「开启内网访问」放开到局域网（需二次确认，按钮变红再点一次生效）。</p>
+    </div>
+  </div>
+</div>
 
 <div class="pane" id="pane-config">
   <div id="cfgPath"></div>
@@ -732,6 +864,18 @@ const logViewerHTML = `<!DOCTYPE html>
   </div>
 </div>
 
+<div id="cfgDelModal">
+  <div class="box">
+    <div class="t">选择要删除的配置（当前生效的配置不可删除）：</div>
+    <select id="cfgDelSelect"></select>
+    <div class="err" id="cfgDelMsg"></div>
+    <div class="btns">
+      <button id="cfgDelCancelBtn" class="ghost">取消</button>
+      <button id="cfgDelConfirmBtn" class="danger">确认删除</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const logEl = document.getElementById('log');
 const stEl  = document.getElementById('status');
@@ -739,6 +883,8 @@ const cardsEl = document.getElementById('cards');
 const flightsBody = document.querySelector('#flights tbody');
 let stick = true;
 let cfgLoaded = false;
+let cfgPollTimer = null; // 配置页激活时定时轮询配置文件列表，切走清掉
+let lastCfgFiles = null; // 上次配置列表签名，未变化跳过重绘避免下拉闪烁
 let selectedFlight = 0; // 当前查看的在途流 id（0=未查看）
 let autoTrack = true; // 勾选时 poll 自动跟踪最新在途流（id 最大=最新），不勾选则用户手选
 let maxFlights = 3; // 自动跟踪多流模式下最多并排显示多少个在途流（最新 N 个），防止太多太细
@@ -756,7 +902,11 @@ document.querySelectorAll('.tab').forEach(t => {
     document.getElementById('pane-' + t.dataset.tab).classList.add('active');
     document.getElementById('clearLogsBtn').style.display = (t.dataset.tab === 'logs') ? 'block' : 'none';
     if (t.dataset.tab === 'logs') stick = true, window.scrollTo(0, document.body.scrollHeight);
-    if (t.dataset.tab === 'config' && !cfgLoaded) loadConfig();
+    if (cfgPollTimer){ clearInterval(cfgPollTimer); cfgPollTimer=null; }
+    if (t.dataset.tab === 'config'){
+      if(!cfgLoaded) loadConfig(); else loadConfigList();
+      cfgPollTimer = setInterval(loadConfigList, 3000);
+    }
   };
 });
 
@@ -768,6 +918,24 @@ function fmtBytes(n){
   if(n<1024) return n+'B';
   if(n<1048576) return (n/1024).toFixed(1)+'KB';
   return (n/1048576).toFixed(2)+'MB';
+}
+// model 列单元格：有 searchPrompt 时整个 td 加 title，hover 显示系统原生提示词（宽度自适应、无滚动条）。
+// routeReason 非 0（透传）时前置 [标签]，一眼看出是什么原因路由的（如 [Fast]claude-sonnet-5 -> glm-5.2）。
+// translated 非空（Responses 监听口翻译进来的流）时最前面再加 [translate]。
+function modelCell(model, prompt, routeReason, translated){
+  var tag = routeTag(routeReason);
+  if(tag) model = tag + model;
+  if(translated) model = '<span style="color:#c586c0">[translate]</span>' + model;
+  if(!prompt) return '<td>'+model+'</td>';
+  var esc = String(prompt).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return '<td title="'+esc+'">'+model+'</td>';
+}
+// 路由原因 -> model 列前缀标签（与 main.go route* 枚举对齐：0透传 1pattern 2分类器 3fast 4多模态 5搜索）。
+// 透传不加前缀；标签淡蓝色与 model 链区分。
+function routeTag(r){
+  var tags = ['','[Pattern]','[分类器]','[Fast]','[多模态]','[搜索]'];
+  if(!tags[r]) return '';
+  return '<span style="color:#7ec8e3">'+tags[r]+'</span>';
 }
 // 在途流状态灯：转发中(绿)/等待首字节(黄)/请求阶段(白)，用 emoji 与「仅本机访问」状态灯同等大小。
 function flightDot(f){
@@ -823,7 +991,11 @@ function parseSSEHTML(raw){
       if(d.type === 'text_delta' && d.text){ textBlock().text += d.text; }
       else if(d.type === 'thinking_delta' && d.thinking){ thinkBlock().text += d.thinking; }
       else if(d.type === 'input_json_delta' && d.partial_json != null){
-        if(idx[j.index]) idx[j.index].input += d.partial_json;
+        // idx[index] 可能不存在：content_block_start 丢失/类型非 tool_use/在途流被截断
+        var tb = idx[j.index];
+        if(!tb){ for(var k = blocks.length-1; k >= 0; k--){ if(blocks[k].type === 'tool'){ tb = blocks[k]; break; } } }
+        if(!tb){ tb = {type:'tool', name:'tool_use', input:''}; blocks.push(tb); curText = null; curThink = null; }
+        tb.input += d.partial_json;
       }
       return;
     }
@@ -942,14 +1114,20 @@ async function poll(){
     cardsEl.innerHTML =
       card('活跃', d.active) + card('等待', d.waiting) +
       card('流出', fmtBytes(d.bytesForward)) + card('速率', fmtBytes(d.rate)+'/s') +
-      card('缓存命中', fmtNum(d.cacheRead)) + card('输入', fmtNum(d.inputTokens)) +
-      card('输出', fmtNum(d.outputTokens)) + card('重试', d.retries) +
+      '<div class="card" id="cacheCard" style="cursor:pointer"><div class="k">缓存命中</div><div class="v">'+cacheHitPct(d.cacheRead, d.inputTokens)+'</div></div>' + card('输入', fmtNum(d.inputTokens)) +
+      card('输出', fmtNum(d.outputTokens)) + '<div class="card" id="retryCard" style="cursor:pointer"><div class="k">重试</div><div class="v">'+d.retries+'</div></div>' +
       card('分类器', d.classifiers) + card('首字', (d.avgFirstByte/1000).toFixed(2)+'s') +
       card('tok/s', d.tps.toFixed(1));
+    // 缓存命中明细：缓存最新 modelStats，tooltip/modal 打开时实时刷新
+    latestModelStats = d.modelStats || [];
+    if(document.getElementById('cacheTip').style.display !== 'none') refreshCacheTip();
+    if(document.getElementById('cacheModal').style.display !== 'none') refreshCacheModal();
+    if(document.getElementById('retryTip').style.display !== 'none') refreshRetryTip();
+    if(document.getElementById('retryModal').style.display !== 'none') refreshRetryModal();
     // 在途流
     const fs = d.flights || [];
     flightsBody.innerHTML = fs.map(f =>
-      '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>'+flightDot(f)+'</td><td>#'+f.id+'</td><td>'+f.model+'</td><td>'+fmtBytes(f.bytes)+'</td><td>'+flightStatus(f)+'</td></tr>'
+      '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>'+flightDot(f)+'</td><td>#'+f.id+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.translated)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+flightStatus(f)+'</td></tr>'
     ).join('');
     // 在途流输出查看：手选单流优先，否则自动跟踪 grid，否则隐藏
     var fv = document.getElementById('flightView');
@@ -1011,6 +1189,11 @@ async function poll(){
             cell.dataset.id = f.id;
             cell.innerHTML = '<div style="color:#9a9a9a;margin-bottom:2px">流 #'+f.id+' '+(f.model||'')+'</div><pre class="cellPre" style="max-height:240px;overflow:auto;background:#1a1a1a;border:1px solid #333;padding:6px;white-space:pre-wrap;word-break:break-all;margin:0;font:inherit">加载中…</pre>';
             fv.appendChild(cell);
+            var np = cell.querySelector('.cellPre');
+            np.dataset.stick = '1'; // 默认跟踪底部；用户手动上滚后才停止跟随
+            np.addEventListener('scroll', function(){
+              np.dataset.stick = (np.scrollTop + np.clientHeight >= np.scrollHeight - 2) ? '1' : '0';
+            });
           }
         });
         // 拉取每个在途流内容（独立更新各自 cell）
@@ -1020,9 +1203,8 @@ async function poll(){
             autoRaws[f.id] = raw;
             var pre = fv.querySelector('[data-id="'+f.id+'"] .cellPre');
             if(pre){
-              var atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 2;
               if(flightViewRaw){ pre.textContent = raw; } else { var h = parseSSEHTML(raw); pre.innerHTML = h || '<span class="ss-empty">（未解析出内容，点「显示原始」查看）</span>'; }
-              if(atBottom) pre.scrollTop = pre.scrollHeight;
+              if(pre.dataset.stick === '1') pre.scrollTop = pre.scrollHeight;
             }
           }).catch(function(){});
         });
@@ -1041,7 +1223,7 @@ async function poll(){
       if(rf.ok){
         const rfd = await rf.json();
         document.querySelector('#finishedFlights tbody').innerHTML = (rfd.list||[]).map(function(f){
-          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+'</td><td>'+f.model+'</td><td>'+fmtBytes(f.bytes)+'</td><td>'+(f.status||'-')+'</td><td>'+(f.hitRate||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
+          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.translated)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+(f.status||'-')+'</td><td>'+(f.hitRate||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
         }).join('');
       }
     }catch(e){}
@@ -1062,6 +1244,12 @@ poll();
 setInterval(poll, 500);
 
 // 配置标签
+// fillCfgLists 用 /__configs 的结果填充切换下拉 cfgSelect（全部，当前打勾）。
+function fillCfgLists(dc){
+  const sel = document.getElementById('cfgSelect');
+  sel.innerHTML = (dc.files||[]).map(f => '<option value="'+f+'"'+(f===dc.current?' selected':'')+'>'+f+'</option>').join('');
+}
+
 async function loadConfig(){
   try{
     const [r, rc] = await Promise.all([
@@ -1073,11 +1261,20 @@ async function loadConfig(){
     document.getElementById('cfg').value = d.content || '';
     cfgLoaded = true;
     const dc = await rc.json();
-    const sel = document.getElementById('cfgSelect');
-    sel.innerHTML = (dc.files||[]).map(f => '<option value="'+f+'"'+(f===dc.current?' selected':'')+'>'+f+'</option>').join('');
+    fillCfgLists(dc);
+    lastCfgFiles = JSON.stringify(dc.files);
   }catch(e){
     document.getElementById('cfgMsg').innerHTML = '<span class="err">加载失败: '+e+'</span>';
   }
+}
+
+// loadConfigList 只刷新配置文件下拉列表（不覆盖编辑器未保存内容），供配置页轮询/切回时用。
+// 列表未变化时跳过重绘，避免下拉闪烁。
+function loadConfigList(){
+  fetch('/__configs',{cache:'no-store'}).then(r=>r.json()).then(d=>{
+    const sig = JSON.stringify(d.files);
+    if(sig !== lastCfgFiles){ fillCfgLists(d); lastCfgFiles = sig; }
+  }).catch(()=>{});
 }
 
 function setMsg(cls, txt){ document.getElementById('cfgMsg').innerHTML = '<span class="'+cls+'">'+txt+'</span>'; }
@@ -1121,8 +1318,7 @@ document.getElementById('cfgRefreshBtn').onclick = async () => {
   try{
     const r = await fetch('/__configs',{cache:'no-store'});
     const d = await r.json();
-    const sel = document.getElementById('cfgSelect');
-    sel.innerHTML = (d.files||[]).map(f => '<option value="'+f+'"'+(f===d.current?' selected':'')+'>'+f+'</option>').join('');
+    fillCfgLists(d);
     document.getElementById('cfgSwitchMsg').innerHTML = '<span class="ok">列表已刷新</span>';
   }catch(e){
     document.getElementById('cfgSwitchMsg').innerHTML = '<span class="err">刷新失败: '+e+'</span>';
@@ -1158,19 +1354,38 @@ document.getElementById('cfgRenameBtn').onclick = async () => {
   }catch(e){ setSwitchMsg('err', '失败: '+e); }
 };
 
+// 删除配置：点「删除」弹出窗口选要删的（排除当前生效的，当前删不掉），
+// 与切换下拉 cfgSelect 解耦：下拉切换会即时生效，不能把删除目标绑在它上面。
+const delModal = document.getElementById('cfgDelModal');
+const delSel = document.getElementById('cfgDelSelect');
+const delMsg = document.getElementById('cfgDelMsg');
+function delModalShow(){ delModal.style.display = 'flex'; }
+function delModalHide(){ delModal.style.display = 'none'; }
+
 document.getElementById('cfgDelBtn').onclick = async () => {
-  const sel = document.getElementById('cfgSelect');
-  // 用 prompt 输入要删的文件名（默认下拉当前值，可改成任意配置）：
-  // 下拉切换会即时生效，选中项=当前生效配置删不掉，故删除目标不能绑死在下拉选中上。
-  const name = prompt('输入要删除的配置文件名（不可删除当前生效的配置）：', sel.value);
-  if(!name) return;
+  try{
+    const r = await fetch('/__configs',{cache:'no-store'});
+    const d = await r.json();
+    const deletable = (d.files||[]).filter(f => f !== d.current);
+    delSel.innerHTML = deletable.map(f => '<option value="'+f+'">'+f+'</option>').join('');
+    delSel.disabled = deletable.length === 0;
+    delMsg.textContent = deletable.length === 0 ? '当前目录下没有可删除的配置' : '';
+    delModalShow();
+  }catch(e){ setSwitchMsg('err', '加载配置列表失败: '+e); }
+};
+delModal.onclick = (ev) => { if(ev.target === delModal) delModalHide(); }; // 点遮罩关闭
+document.getElementById('cfgDelCancelBtn').onclick = delModalHide;
+document.getElementById('cfgDelConfirmBtn').onclick = async () => {
+  const name = delSel.value;
+  if(!name){ delMsg.textContent = '请先选择要删除的配置'; return; }
   if(!confirm('确定删除「'+name+'」？此操作不可恢复。')) return;
-  setSwitchMsg('', '删除中…');
+  if(!confirm('再次确认：真的要删除「'+name+'」吗？')) return;
+  delMsg.textContent = '删除中…';
   try{
     const r = await fetch('/__delconfig',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:name})});
-    if(r.ok){ setSwitchMsg('ok', '已删除 '+name); loadConfig(); }
-    else { setSwitchMsg('err', '失败: '+await r.text()); }
-  }catch(e){ setSwitchMsg('err', '失败: '+e); }
+    if(r.ok){ delModalHide(); setSwitchMsg('ok', '已删除 '+name); loadConfig(); }
+    else { delMsg.textContent = '失败: '+await r.text(); }
+  }catch(e){ delMsg.textContent = '失败: '+e; }
 };
 
 // ---- 清空统计（切换配置不再自动清，独立按钮）----
@@ -1323,6 +1538,67 @@ remoteBtn.onclick = () => {
   disarmRemote();
   postRemote(true);
 };
+
+// ---- 缓存命中明细：hover tooltip + 点击放大弹窗 ----
+var latestModelStats = [];
+function cacheHitPct(cr, input){ return (input+cr)>0 ? (cr*100/(input+cr)).toFixed(1)+'%' : '-'; }
+// cacheRowsHTML 生成明细表格；big=true 用大字号（弹窗用）
+function cacheRowsHTML(big){
+  if(!latestModelStats.length) return '<div style="color:#888">暂无数据</div>';
+  var fs = big ? '14px' : '12px';
+  var h = '<table style="border-collapse:collapse;width:100%;font-size:'+fs+'"><thead><tr style="color:#9a9a9a;text-align:left">'+
+    '<th style="padding:3px 12px 3px 0">模型</th><th style="padding:3px 12px 3px 0;text-align:right">命中率</th>'+
+    '<th style="padding:3px 12px 3px 0;text-align:right">命中token</th><th style="padding:3px 12px 3px 0;text-align:right">未命中token</th>'+
+    '<th style="padding:3px 0;text-align:right">输出token</th></tr></thead><tbody>';
+  latestModelStats.forEach(function(m){
+    h += '<tr style="color:#d4d4d4"><td style="padding:3px 12px 3px 0">'+esc(m.model)+'</td>'+
+      '<td style="padding:3px 12px 3px 0;text-align:right">'+cacheHitPct(m.cacheRead, m.input)+'</td>'+
+      '<td style="padding:3px 12px 3px 0;text-align:right">'+fmtNum(m.cacheRead)+'</td>'+
+      '<td style="padding:3px 12px 3px 0;text-align:right">'+fmtNum(m.input)+'</td>'+
+      '<td style="padding:3px 0;text-align:right">'+fmtNum(m.output)+'</td></tr>';
+  });
+  return h + '</tbody></table>';
+}
+function refreshCacheTip(){ document.getElementById('cacheTip').innerHTML = '<div style="color:#9a9a9a;margin-bottom:4px">缓存命中明细（按上游模型）</div>' + cacheRowsHTML(false); }
+function refreshCacheModal(){
+  var tCr=0, tIn=0;
+  latestModelStats.forEach(function(m){ tCr+=m.cacheRead; tIn+=m.input; });
+  document.getElementById('cacheModalTotal').textContent = '总计 '+cacheHitPct(tCr, tIn);
+  document.getElementById('cacheModalBody').innerHTML = cacheRowsHTML(true);
+}
+// 事件委托到卡片容器：hover 显示 tooltip，click 打开放大弹窗
+cardsEl.addEventListener('mouseover', function(e){ if(e.target.closest('#cacheCard')){ refreshCacheTip(); document.getElementById('cacheTip').style.display='block'; } });
+cardsEl.addEventListener('mouseout', function(e){ if(e.target.closest('#cacheCard')){ document.getElementById('cacheTip').style.display='none'; } });
+cardsEl.addEventListener('click', function(e){ if(e.target.closest('#cacheCard')){ refreshCacheModal(); document.getElementById('cacheModal').style.display='flex'; } });
+// tooltip 跟随鼠标定位
+document.addEventListener('mousemove', function(e){
+  var tip = document.getElementById('cacheTip');
+  if(tip.style.display !== 'none'){ tip.style.left = Math.min(e.clientX+12, window.innerWidth-560)+'px'; tip.style.top = (e.clientY+12)+'px'; }
+  var rt = document.getElementById('retryTip');
+  if(rt.style.display !== 'none'){ rt.style.left = Math.min(e.clientX+12, window.innerWidth-300)+'px'; rt.style.top = (e.clientY+12)+'px'; }
+});
+// ---- 重试明细：hover tooltip + 点击放大弹窗（仿缓存命中）----
+function retryRowsHTML(big){
+  var rows = latestModelStats.filter(function(m){ return m.retries>0; });
+  if(!rows.length) return '<div style="color:#888">暂无重试</div>';
+  var fs = big ? '14px' : '12px';
+  var h = '<table style="border-collapse:collapse;width:100%;font-size:'+fs+'"><thead><tr style="color:#9a9a9a;text-align:left">'+
+    '<th style="padding:3px 12px 3px 0">模型</th><th style="padding:3px 0;text-align:right">重试次数</th></tr></thead><tbody>';
+  rows.forEach(function(m){
+    h += '<tr style="color:#d4d4d4"><td style="padding:3px 12px 3px 0">'+esc(m.model)+'</td><td style="padding:3px 0;text-align:right">'+m.retries+'</td></tr>';
+  });
+  return h + '</tbody></table>';
+}
+function refreshRetryTip(){ document.getElementById('retryTip').innerHTML = '<div style="color:#9a9a9a;margin-bottom:4px">重试明细（按路由目标模型）</div>' + retryRowsHTML(false); }
+function refreshRetryModal(){
+  var t=0;
+  latestModelStats.forEach(function(m){ t+=m.retries; });
+  document.getElementById('retryModalTotal').textContent = '总计 '+t;
+  document.getElementById('retryModalBody').innerHTML = retryRowsHTML(true);
+}
+cardsEl.addEventListener('mouseover', function(e){ if(e.target.closest('#retryCard')){ refreshRetryTip(); document.getElementById('retryTip').style.display='block'; } });
+cardsEl.addEventListener('mouseout', function(e){ if(e.target.closest('#retryCard')){ document.getElementById('retryTip').style.display='none'; } });
+cardsEl.addEventListener('click', function(e){ if(e.target.closest('#retryCard')){ refreshRetryModal(); document.getElementById('retryModal').style.display='flex'; } });
 </script>
 </body>
 </html>`

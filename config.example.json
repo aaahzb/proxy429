@@ -9,13 +9,14 @@
   "retry_status_codes": [429, 500, 502, 503, 504],
   "respect_retry_after": true,
   "classifier_thinking_disabled": true,
-  "classifier_system_prefix": "You are a security monitor",
   "classifier_max_tokens": 0,
   "upstream_header_timeout_s": 70,
   "ping_interval_s": 5,
   "log_request_detail": false,
   "log_file": "",
   "recent_sample_window": 20,
+  "convertAlltoStream": false,
+  "responses_listen": "",
   "routes": [
     {
       "pattern": "claude-opus*",
@@ -27,9 +28,20 @@
     },
     {
       "pattern": "claude-haiku*",
-      "url": "https://your-other-upstream.example.com",
-      "api": "替换成对应上游的key",
-      "model": "目标模型名"
+      "url": "https://api.deepseek.com",
+      "api": "sk-deepseek-替换成你的key",
+      "model": "deepseek-V4-pro",
+      "enhance_search": {
+        "summary_thinking": false,
+        "summary_level": "mid"
+      }
+    },
+    {
+      "pattern": "claude-sonnet*",
+      "url": "https://your-vl-upstream.example.com",
+      "api": "替换成多模态上游的key",
+      "model": "kimi-vl",
+      "no_search": true
     }
   ],
   "classifier_route": {
@@ -45,17 +57,14 @@
   "multimodal_fallback": {
     "url": "https://your-multimodal-upstream.example.com",
     "api": "替换成多模态上游的key",
-    "model": "kimi-vl",
-    "no_search": false
+    "model": "kimi-vl"
   },
   "search_fallback": {
     "url": "https://api.deepseek.com",
     "api": "sk-deepseek-替换成你的key",
     "model": "deepseek-search",
-    "text_only": true,
     "summary_mode": false,
     "summary_thinking": false,
     "summary_level": "low"
-  },
-  "search_debug_dir": ""
+  }
 }
