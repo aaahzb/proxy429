@@ -25,6 +25,7 @@ const (
 	configsPath       = "/__configs"       // GET 列出当前配置目录下所有 .json（供切换）
 	switchPath        = "/__switch"        // POST 切换到指定配置文件并即时生效
 	newConfigPath     = "/__newconfig"     // POST 新建配置文件（空白模板）并切换
+	codexSetupPath    = "/__codexsetup"    // GET codex-setup.ps1 模板（配置页实时生成 Codex 脚本用）
 	renameConfigPath  = "/__renameconfig"  // POST 重命名配置文件
 	delConfigPath     = "/__delconfig"     // POST 删除配置文件（不允许删当前在用的）
 	resetStatsPath    = "/__resetstats"    // POST 清空累计统计（切换配置不再自动清）
@@ -351,6 +352,19 @@ func readConfigTemplate() []byte {
 	return configExampleBytes
 }
 
+// codexSetupHandler 返回内嵌的 codex-setup.ps1 模板原文（含 BOM，下载可直接运行）。
+// 配置页 JS 取回后按当前编辑框内容替换 $BAKED_BASE_URL / $BAKED_MODEL 锚点实时生成。
+// 限本机访问（与其余 /__* 管理端点同规则）。
+func codexSetupHandler(w http.ResponseWriter, r *http.Request) {
+	if !isLocalRequest(r) {
+		http.Error(w, "forbidden (local only)", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(codexSetupPS1)
+}
+
 // newConfigHandler 新建配置文件：用 config.example.json 作为空白模板写入指定文件名，
 // 创建成功后立即切换到新配置。文件已存在则拒绝。限本机访问。
 func newConfigHandler(w http.ResponseWriter, r *http.Request) {
@@ -654,6 +668,14 @@ const logViewerHTML = `<!DOCTYPE html>
   th { color:#9a9a9a; font-weight:normal; }
   #log { white-space:pre-wrap; word-break:break-word; line-height:1.45; }
   #cfg { width:100%; min-height:60vh; background:#1e1e1e; color:#d4d4d4; border:1px solid #333; border-radius:4px; padding:8px; font:inherit; }
+  #codexBox { margin-top:14px; border-top:1px solid #2a2a2a; padding-top:10px; }
+  #codexBox .t { color:#9a9a9a; margin-bottom:6px; }
+  #codexBox .dim { color:#777; font-size:12px; margin-top:4px; }
+  #codexPs { width:100%; min-height:220px; background:#181818; color:#b8b8b8; border:1px solid #333; border-radius:4px; padding:8px; font:12px/1.4 Consolas,monospace; }
+  #codexModelCustom { background:#1e1e1e; color:#d4d4d4; border:1px solid #333; border-radius:3px; padding:4px 6px; font:inherit; }
+  #codexEnable { background:#2a2410; border:1px solid #6b5d1f; border-radius:4px; padding:8px 10px; margin-bottom:8px; color:#d8c27a; }
+  #codexEnable .dim { color:#9a8a55; font-size:12px; margin-top:4px; }
+  #codexGen.off { opacity:.35; pointer-events:none; }
   button { background:#264f78; color:#d4d4d4; border:1px solid #3a6ea5; border-radius:3px; padding:5px 12px; cursor:pointer; font:inherit; }
   button:hover { background:#2f6090; }
   button.ghost { background:#333; border-color:#444; }
@@ -760,9 +782,10 @@ const logViewerHTML = `<!DOCTYPE html>
       <p>顶层配置 <code>convertAlltoStream</code>（默认 false）开启后，所有非流式请求（<code>stream:false</code> 或省略）都被代理悄悄改为流式发给上游：在途流页面实时可见吐字、统计首字与 tok/s。请求方无感知——代理把上游流完整收完后，<b>原样重建</b>非流式 JSON（所有内容块按流里原样拼回，含搜索结果 encrypted_content）一次性返回，调用方拿到的仍是它预期的非流式响应。流中途断开（未见 message_stop）时未向客户端写任何内容，代理整体重试。</p>
       <p>仅作用于 Anthropic Messages 请求（/v1/messages）；已是流式的请求、搜索摘要模式不受影响。重试等待期间不发 SSE 保活 ping（会污染非流式响应），静默等待。</p>
       <h3>Responses API 监听口 responses_listen</h3>
-      <p>顶层配置 <code>responses_listen</code>（默认空，不启用）设为如 <code>127.0.0.1:8081</code> 后，代理在该地址额外开一个 OpenAI Responses API 端点（<code>/v1/responses</code>）：把 Codex CLI 等只说 Responses 协议的工具接到 Anthropic 上游。请求被翻译成 Anthropic Messages 走主管线（路由/重试/本控制台监控照常生效），响应翻译回 Responses（客户端 stream:true 拿 SSE 事件流，false 拿一次性 JSON）。</p>
+      <p>顶层配置 <code>responses_listen</code>（空 = 不启用；配置模板默认演示 <code>127.0.0.1:8081</code>）设为如 <code>127.0.0.1:8081</code> 后，代理在该地址额外开一个 OpenAI Responses API 端点（<code>/v1/responses</code>）：把 Codex CLI 等只说 Responses 协议的工具接到 Anthropic 上游。请求被翻译成 Anthropic Messages 走主管线（路由/重试/本控制台监控照常生效），响应翻译回 Responses（客户端 stream:true 拿 SSE 事件流，false 拿一次性 JSON）。</p>
       <p>工具里的 model 名照常参与路由匹配：在 routes 加一条如 <code>gpt-5*</code> 即可指定上游与改写模型。改动需重启；访问控制与主端口同规则（allow_remote=false 时仅本机）。</p>
       <p>翻译规则与 cc-switch 3.20.0 一致：<code>reasoning.effort</code> 按模型分类映射——adaptive 模型（fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6）翻成 <code>thinking:adaptive</code> + <code>output_config.effort</code>（fable-5/mythos-5 关不掉 thinking，显式 none 翻成 effort:low）；其余模型翻成 budget_tokens（low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576）。查表用客户端发来的 model 名（路由改写之前），想让表生效就把客户端 model 直接填目标模型名。工具映射（function/custom/namespace/tool_search/web_search/input_file）与完整映射表见使用说明.md「Responses 翻译映射表」。</p>
+      <p><b>Codex CLI 接入</b>：最省事——本控制台「配置」标签下方按编辑框实时生成 codex-setup.ps1（地址取 <code>responses_listen</code>；routes 每个 pattern 的代表名全部写进 Codex <code>/model</code> 菜单，下拉选中项为默认模型；复制后粘贴进 PowerShell 即运行，零交互，可下载 .ps1）。仓库根目录另有交互版 <code>codex-setup.ps1</code>（仿 DeepSeek 官方脚本：选模型、备份后改写 config.toml、写模型目录、可一键还原）。手动：编辑 <code>~/.codex/config.toml</code>——顶层 <code>model_provider = "proxy429"</code>、<code>model = "gpt-5-codex"</code>、<code>preferred_auth_method = "apikey"</code> + <code>forced_login_method = "api"</code>（免官方登录），加 <code>[model_providers.proxy429]</code> 段（<code>base_url = "http://127.0.0.1:8081/v1"</code>、<code>wire_api = "responses"</code>、<code>experimental_bearer_token</code> 填任意占位串）。改完重启 Codex。逐步教程见使用说明.md「让 Codex CLI 走代理」。</p>
       <h3>路由与能力兜底</h3>
       <p>请求按顺序匹配上游：classifier_route（分类器分流）→ fast_route（快速直连）→ routes（按 model pattern 匹配）。命中 route 后，若该上游能力不足（text_only 缺图片 / no_search 缺搜索）按以下处理：</p>
       <ul>
@@ -862,6 +885,31 @@ const logViewerHTML = `<!DOCTYPE html>
     <button id="reloadBtn" class="ghost">仅重载（不改动文件）</button>
     <span id="cfgMsg"></span>
   </div>
+  <div id="codexBox">
+    <div class="t">Codex 一键配置脚本（Windows）—— 按上方编辑框实时生成，地址取自 responses_listen，模型目录取自 routes 的 pattern</div>
+    <div id="codexEnable" style="display:none">
+      当前配置没有 responses_listen，Responses API 监听口未启用。要为本配置增加 Responses API 功能吗？
+      <button id="codexEnableBtn">是，添加并保存</button>
+      <span id="codexEnableMsg"></span>
+      <div class="dim">会在上方 JSON 的 "listen" 行后加一行 "responses_listen": "127.0.0.1:8081"（端口可改）并立即保存；监听口只在代理启动时创建，保存后还需重启代理才生效。</div>
+    </div>
+    <div id="codexGen">
+    <div style="margin-bottom:6px">
+      默认模型: <select id="codexModel">
+        <option value="gpt-5-codex">gpt-5-codex（gpt-5*）</option>
+        <option value="claude-fable-5">claude-fable-5</option>
+        <option value="__custom__">自定义…</option>
+        <option value="__restore__">（还原默认 Codex 配置）</option>
+      </select>
+      <input id="codexModelCustom" placeholder="自定义模型名" style="display:none">
+      <button id="codexCopyBtn" class="ghost">复制脚本</button>
+      <button id="codexDlBtn" class="ghost">下载 .ps1</button>
+      <span id="codexMsg"></span>
+    </div>
+    <textarea id="codexPs" readonly spellcheck="false" placeholder="模板加载中…"></textarea>
+    <div class="dim">用法：复制后直接粘贴进 PowerShell 窗口回车即运行（等价 irm|iex），或下载后以 powershell -ExecutionPolicy Bypass -File 运行。脚本免交互、免官方登录、token 占位（真实 key 由上面路由的 api 注入）。下拉列出 routes 每个 pattern 的一个代表名（route.model 能命中 pattern 时用真名，否则用去 * 的 pattern）：这些名字全部写进 Codex 的 /model 菜单，选中项为默认模型。改了 responses_listen 需先「保存并重载」并重启代理后再用生成的脚本。</div>
+    </div>
+  </div>
 </div>
 
 <div id="cfgDelModal">
@@ -906,6 +954,7 @@ document.querySelectorAll('.tab').forEach(t => {
     if (t.dataset.tab === 'config'){
       if(!cfgLoaded) loadConfig(); else loadConfigList();
       cfgPollTimer = setInterval(loadConfigList, 3000);
+      ensurePsTemplate();
     }
   };
 });
@@ -1260,6 +1309,7 @@ async function loadConfig(){
     document.getElementById('cfgPath').textContent = d.path + (d.exists?'':'（文件不存在，保存将创建）');
     document.getElementById('cfg').value = d.content || '';
     cfgLoaded = true;
+    genPs();
     const dc = await rc.json();
     fillCfgLists(dc);
     lastCfgFiles = JSON.stringify(dc.files);
@@ -1293,6 +1343,146 @@ document.getElementById('reloadBtn').onclick = async () => {
     const r = await fetch('/__reload',{method:'POST'});
     if(r.ok) setMsg('ok','已重载'); else setMsg('err','失败: '+await r.text());
   }catch(e){ setMsg('err','失败: '+e); }
+};
+
+// ---- Codex 一键脚本：取内嵌模板，按编辑框的 responses_listen + routes + 所选模型实时生成 ----
+let psTemplate = null; // /__codexsetup 取回的模板文本（已去 BOM）
+let codexModelList = [{name:'gpt-5-codex',src:'gpt-5*'},{name:'claude-fable-5',src:''}]; // 上次成功推导的目录模型
+async function ensurePsTemplate(){
+  if(psTemplate !== null) return;
+  try{
+    const t = await (await fetch('/__codexsetup',{cache:'no-store'})).text();
+    psTemplate = t.replace(/^\uFEFF/, '');
+    genPs();
+  }catch(e){ document.getElementById('codexMsg').innerHTML = '<span class="err">模板加载失败: '+e+'</span>'; }
+}
+// responses_listen 为空 = Responses 口未启用：生成区整组置灰，只留「添加该功能」入口。
+// 绝不回落默认地址——本机 8081 可能被别的程序占用，Codex 指过去会出莫名错误。
+function setCodexUiEnabled(on){
+  document.getElementById('codexEnable').style.display = on ? 'none' : '';
+  document.getElementById('codexGen').classList.toggle('off', !on);
+  if(!on) document.getElementById('codexPs').value = '# Responses API 未启用：点上方「是，添加并保存」后，这里才会生成脚本';
+}
+// 「是，添加并保存」：在编辑框 JSON 的 "listen" 行后插入 responses_listen，再走既有保存流程
+document.getElementById('codexEnableBtn').onclick = () => {
+  const ta = document.getElementById('cfg');
+  const lines = ta.value.split('\n');
+  let idx = lines.findIndex(l => /^\s*"listen"\s*:/.test(l));
+  if(idx < 0) idx = lines.findIndex(l => l.indexOf('{') >= 0);
+  if(idx < 0){ document.getElementById('codexEnableMsg').innerHTML = '<span class="err">找不到插入位置，请手动在配置 JSON 里加一行 "responses_listen": "127.0.0.1:8081",</span>'; return; }
+  const indent = (lines[idx].match(/^\s*/) || [''])[0];
+  lines.splice(idx + 1, 0, indent + '"responses_listen": "127.0.0.1:8081",');
+  ta.value = lines.join('\n');
+  document.getElementById('codexEnableMsg').textContent = '';
+  document.getElementById('saveBtn').click();
+  genPs();
+  document.getElementById('codexMsg').innerHTML = '<span class="ok">已添加并保存 responses_listen（端口可在上方 JSON 改）。<b>重启代理</b>后监听口才生效，之后 Codex 才能连上</span>';
+};
+// 与 main.go matchModel 同语义：* 匹配任意长度（含 0）任意字符
+function matchPat(p, n){
+  const parts = String(p).split('*');
+  if(parts.length === 1) return p === n;
+  if(!n.startsWith(parts[0])) return false;
+  n = n.slice(parts[0].length);
+  for(let i = 1; i < parts.length - 1; i++){
+    const idx = n.indexOf(parts[i]);
+    if(idx < 0) return false;
+    n = n.slice(idx + parts[i].length);
+  }
+  return n.endsWith(parts[parts.length - 1]);
+}
+// 从编辑框 routes 推导目录模型（Codex /model 菜单内容）：route.model 自己能命中 pattern 就用真名
+// （thinking 查表更准），否则用去掉 * 的 pattern 代表名（* 可匹配 0 字符，必命中）；纯 * 兜底 route.model。
+// JSON 暂无法解析返回 null（保持现有清单不动，打字途中不闪）。
+function deriveCodexModels(){
+  let c;
+  try{ c = JSON.parse(document.getElementById('cfg').value); }catch(e){ return null; }
+  const out = [];
+  for(const r of (c.routes || [])){
+    if(!r || typeof r.pattern !== 'string' || !r.pattern) continue;
+    const m = (typeof r.model === 'string') ? r.model.trim() : '';
+    const name = (m && matchPat(r.pattern, m)) ? m : (r.pattern.replace(/\*/g, '') || m);
+    // 逗号是 BAKED_CATALOG 分隔符、引号/反斜杠会破坏 PS 字符串：这类名字跳过
+    if(name && !/['"\s\\,]/.test(name) && !out.some(o => o.name === name)) out.push({name: name, src: r.pattern});
+  }
+  return out;
+}
+// 模型下拉按 routes 重建（选中项尽量保留）；只在清单变化时调用，避免打字途中闪烁
+function refreshCodexModels(list){
+  const sel = document.getElementById('codexModel');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  for(const o of list){
+    const opt = document.createElement('option');
+    opt.value = o.name;
+    opt.textContent = (o.src && o.src !== o.name) ? o.name + '（' + o.src + '）' : o.name;
+    sel.appendChild(opt);
+  }
+  const oc = document.createElement('option'); oc.value = '__custom__'; oc.textContent = '自定义…'; sel.appendChild(oc);
+  const orr = document.createElement('option'); orr.value = '__restore__'; orr.textContent = '（还原默认 Codex 配置）'; sel.appendChild(orr);
+  let found = false;
+  for(const opt of sel.options){ if(opt.value === prev){ found = true; break; } }
+  sel.value = found ? prev : sel.options[0].value;
+  document.getElementById('codexModelCustom').style.display = (sel.value === '__custom__') ? '' : 'none';
+}
+function codexModelChoice(){
+  const v = document.getElementById('codexModel').value;
+  if(v === '__custom__'){
+    const m = document.getElementById('codexModelCustom').value.trim();
+    return (m && !/['"\\\s]/.test(m)) ? m : codexModelList[0].name;
+  }
+  return v;
+}
+function genPs(){
+  if(psTemplate === null) return;
+  let c;
+  try{ c = JSON.parse(document.getElementById('cfg').value); }
+  catch(e){
+    // 打字途中解析失败：不动现有内容，只提示
+    document.getElementById('codexMsg').innerHTML = '<span class="err">配置 JSON 暂无法解析，脚本保持上次有效内容</span>';
+    return;
+  }
+  const addr = String(c.responses_listen || '').trim();
+  if(!addr || /['"\s]/.test(addr)){ document.getElementById('codexMsg').textContent = ''; setCodexUiEnabled(false); return; }
+  document.getElementById('codexMsg').textContent = '';
+  setCodexUiEnabled(true);
+  const baseUrl = 'http://' + addr + '/v1';
+  const derived = deriveCodexModels();
+  if(derived !== null && derived.length &&
+      derived.map(o => o.name).join('|') !== codexModelList.map(o => o.name).join('|')){
+    codexModelList = derived;
+    refreshCodexModels(codexModelList);
+  }
+  // 目录 = routes 各 pattern 的代表名全集 + 选中项（脚本侧还会并入已存在的目录条目）
+  const cat = codexModelList.map(o => o.name);
+  const sel = codexModelChoice();
+  if(sel !== '__restore__' && !cat.includes(sel)) cat.push(sel);
+  document.getElementById('codexPs').value = psTemplate
+    .replace("$BAKED_BASE_URL = ''", "$BAKED_BASE_URL = '" + baseUrl + "'")
+    .replace("$BAKED_MODEL    = ''", "$BAKED_MODEL    = '" + sel + "'")
+    .replace("$BAKED_CATALOG  = ''", "$BAKED_CATALOG  = '" + cat.join(',') + "'");
+}
+document.getElementById('cfg').addEventListener('input', genPs);
+document.getElementById('codexModel').onchange = () => {
+  document.getElementById('codexModelCustom').style.display =
+    (document.getElementById('codexModel').value === '__custom__') ? '' : 'none';
+  genPs();
+};
+document.getElementById('codexModelCustom').addEventListener('input', genPs);
+document.getElementById('codexCopyBtn').onclick = async () => {
+  try{
+    await navigator.clipboard.writeText(document.getElementById('codexPs').value);
+    document.getElementById('codexMsg').innerHTML = '<span class="ok">已复制，粘贴到 PowerShell 窗口回车即运行</span>';
+  }catch(e){ document.getElementById('codexMsg').innerHTML = '<span class="err">复制失败: '+e+'（可手动全选脚本框复制）</span>'; }
+};
+document.getElementById('codexDlBtn').onclick = () => {
+  // 下载必须带 BOM：PS 5.1 把无 BOM 的 .ps1 按 ANSI(GBK) 读，中文会乱码
+  const blob = new Blob(['\uFEFF' + document.getElementById('codexPs').value], {type:'text/plain;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'codex-setup.ps1';
+  a.click();
+  URL.revokeObjectURL(a.href);
 };
 
 // ---- 配置文件切换 ----

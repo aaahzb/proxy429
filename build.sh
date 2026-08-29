@@ -58,14 +58,12 @@ PLIST
     else
       echo "未签名（codesign 不可用，可手动 codesign -s - --force $APP）"
     fi
-    cp config.example.json release/
     [ -f 使用说明.md ] && cp 使用说明.md release/ || true
     echo "BUILD_OK 版本=$VERSION 平台=darwin/$(go env GOARCH) -> $APP"
     ;;
   linux)
     export CGO_ENABLED=0
     build_bin release/proxy429 ""
-    cp config.example.json release/
     [ -f 使用说明.md ] && cp 使用说明.md release/ || true
     echo "BUILD_OK 版本=$VERSION 平台=linux/$(go env GOARCH) -> release/proxy429"
     ;;
@@ -73,7 +71,6 @@ PLIST
     export CGO_ENABLED=0
     # -H=windowsgui：GUI 子系统，启动不弹控制台窗口，纯托盘运行；日志看网页控制台或 log_file。
     build_bin release/proxy429.exe "-H=windowsgui"
-    cp config.example.json release/
     [ -f 使用说明.md ] && cp 使用说明.md release/ || true
     echo "BUILD_OK 版本=$VERSION 平台=windows/$(go env GOARCH) -> release/proxy429.exe"
     ;;

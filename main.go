@@ -93,7 +93,7 @@ type FastRoute struct {
 }
 
 // MultimodalRoute 定义多模态兜底路由：当请求含图片却命中 text_only 的纯文本模型时，
-// 自动改走此处指定的多模态上游。NoSearch 标记该兜底也不支持搜索，带搜索的图片请求会改走 search_fallback。
+// 自动改走此处指定的多模态上游。
 type MultimodalRoute struct {
 	URL   string `json:"url"`   // 目标上游 Base URL
 	API   string `json:"api"`   // 目标 API key；空则透传客户端原 token
@@ -101,7 +101,7 @@ type MultimodalRoute struct {
 }
 
 // SearchRoute 定义搜索兜底路由：当请求带搜索工具却命中 no_search 的不支持搜索上游时，
-// 自动改走此处指定的支持搜索的上游。TextOnly 标记该兜底也不支持图片，带图片的搜索请求会改走 multimodal_fallback。
+// 自动改走此处指定的支持搜索的上游。
 type SearchRoute struct {
 	URL             string `json:"url"`              // 目标上游 Base URL
 	API             string `json:"api"`              // 目标 API key；空则透传客户端原 token
@@ -187,6 +187,12 @@ func loadConfig(path string) (*Config, error) {
 //
 //go:embed config.example.json
 var configExampleBytes []byte
+
+// codexSetupPS1 是内嵌的 Codex 一键配置脚本模板，经 /__codexsetup 提供给网页控制台：
+// 页面按当前配置实时替换其中的 $BAKED_BASE_URL / $BAKED_MODEL 锚点生成最终脚本。
+//
+//go:embed codex-setup.ps1
+var codexSetupPS1 []byte
 
 // activeConfigStateFile 记录上次选中的路由配置文件名（basename），放在路由配置同目录。
 // 用 .txt 扩展名而非 .json：既不会被 listConfigFiles 当作路由配置列出，也避免与用户创建的 .json 重名。
@@ -3182,6 +3188,7 @@ func runServer(c *Config) {
 	http.HandleFunc(configsPath, configsHandler)
 	http.HandleFunc(switchPath, switchHandler)
 	http.HandleFunc(newConfigPath, newConfigHandler)
+	http.HandleFunc(codexSetupPath, codexSetupHandler)
 	http.HandleFunc(renameConfigPath, renameConfigHandler)
 	http.HandleFunc(delConfigPath, delConfigHandler)
 	http.HandleFunc(resetStatsPath, resetStatsHandler)

@@ -16,7 +16,7 @@
   "log_file": "",
   "recent_sample_window": 20,
   "convertAlltoStream": false,
-  "responses_listen": "",
+  "responses_listen": "127.0.0.1:8081",
   "routes": [
     {
       "pattern": "claude-opus*",
@@ -42,6 +42,12 @@
       "api": "替换成多模态上游的key",
       "model": "kimi-vl",
       "no_search": true
+    },
+    {
+      "pattern": "gpt-5*",
+      "url": "https://api.deepseek.com",
+      "api": "sk-deepseek-替换成你的key",
+      "model": "deepseek-V4-pro"
     }
   ],
   "classifier_route": {

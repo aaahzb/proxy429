@@ -74,7 +74,7 @@ Claude Code 的所有请求先发到本地代理（`127.0.0.1:8080`），代理�
 - **log_request_detail**：是否打印每个请求的 stream/tools/system 前缀（诊断分类器指纹用，默认关）。
 - **recent_sample_window**：网页控制台「状态」标签「首字」「tok/s」取最近多少次请求的样本做统计（滑动窗口）。默认 `20`；改大更平滑、改小更跟手。仅统计正常透传（情况 C）的流。
 - **convertAlltoStream**：全局流式化开关（默认 `false`）。开启后，所有非流式请求（`stream:false` 或省略）被代理悄悄改为流式发给上游——网页控制台实时可见吐字，首字延迟与 tok/s 统计与普通流式请求一致。请求方无感知：代理把上游流完整收完后，**原样重建**非流式 JSON 一次性返回（所有内容块按流里原样拼回，含搜索结果 `encrypted_content`），调用方拿到的仍是它预期的非流式响应。流中途断开（未见 `message_stop`）时未向客户端写任何内容，代理整体重试。仅作用于 Anthropic Messages 请求（`/v1/messages`）；已是流式的请求与搜索摘要模式不受影响。详见「全局流式化」一节。
-- **responses_listen**：OpenAI Responses API 监听口（默认空，不启用）。设为如 `127.0.0.1:8081` 后，代理在该地址额外开一个 Responses API 端点（`/v1/responses`），把 Responses 协议请求翻译成 Anthropic Messages 走主管线（路由/重试/网页监控全部生效），响应再翻译回 Responses 协议。供 Codex CLI 等只说 Responses 协议的工具接入 Anthropic 上游。改动需重启生效。详见「Responses API 监听口」一节。
+- **responses_listen**：OpenAI Responses API 监听口（空 = 不启用；配置模板默认演示 `127.0.0.1:8081`）。设为如 `127.0.0.1:8081` 后，代理在该地址额外开一个 Responses API 端点（`/v1/responses`），把 Responses 协议请求翻译成 Anthropic Messages 走主管线（路由/重试/网页监控全部生效），响应再翻译回 Responses 协议。供 Codex CLI 等只说 Responses 协议的工具接入 Anthropic 上游。改动需重启生效。详见「Responses API 监听口」一节。
 - **routes**：模型路由规则数组，按 `pattern` 通配匹配请求的 model 名，命中则改走指定上游（换 URL/API/model）。未配置或空数组则不路由，所有请求走默认 `upstream`。详见「路由功能」一节。
 - **classifier_route**：分类器请求专用路由（对象，与 `routes` 平级）。命中分类器（安全判断）的请求无视原 model 统一路由到指定 `url`/`api`/`model`；未配置则分类器请求仍按 model 走 `routes`（兼容）。详见「路由功能」一节。
 - **fast_route**：fast 模式请求专用路由（对象，与 `routes` 平级）。检测到 `"speed":"fast"` 的非分类器请求统一路由到指定 `url`/`api`/`model`；未配置则不干预（兼容）。详见「路由功能」一节。
@@ -138,7 +138,7 @@ claude
 - **windows** -> `release/proxy429.exe`（链接器 `-H=windowsgui`，GUI 子系统，启动不弹控制台窗口，纯托盘运行）
 - **linux** -> `release/proxy429`
 
-同时把 `config.example.json` 和 `使用说明.md`（若存在）复制进 `release/`。
+同时把 `使用说明.md`（若存在）复制进 `release/`。
 
 ```bash
 bash build.sh
@@ -427,13 +427,14 @@ Claude Code `/fast` 模式在请求体里加 `"speed":"fast"` 字段、请求头
 
 ## Responses API 监听口（responses_listen）
 
-`responses_listen`（顶层配置，默认空 = 不启用）让代理在指定地址额外开一个 **OpenAI Responses API** 端点，把只说 Responses 协议的工具（Codex CLI 等）接到任意 Anthropic 上游：
+`responses_listen`（顶层配置；空 = 不启用，配置模板演示值 `127.0.0.1:8081`）让代理在指定地址额外开一个 **OpenAI Responses API** 端点，把只说 Responses 协议的工具（Codex CLI 等）接到任意 Anthropic 上游：
 
 ```json
 "responses_listen": "127.0.0.1:8081"
 ```
 
 - **接入方式**：工具指向 `http://127.0.0.1:8081/v1`，按 Responses 协议 POST `/v1/responses`（`/responses` 也认）。请求里的 model 名照常参与主管线路由匹配——在 `routes` 里加一条对应 pattern（如 `gpt-5*`）即可指定走哪个 Anthropic 上游、改写成什么模型。
+- **Codex CLI 接入**：Windows 上一键搞定——网页控制台「配置」标签下方按当前编辑框**实时生成** codex-setup.ps1（地址取 `responses_listen`；`routes` 每个 pattern 的代表名全部写进 Codex `/model` 菜单，下拉选中项为默认模型；零交互），复制后粘贴进 PowerShell 即运行；或运行仓库根目录的交互版 `codex-setup.ps1`（仿 DeepSeek 官方脚本：备份后外科手术式改写 config.toml、写模型目录、选 9 还原）。手动配置：编辑 `~/.codex/config.toml`（Windows 为 `%USERPROFILE%\.codex\config.toml`）——顶层写 `model_provider = "proxy429"`、`model = "gpt-5-codex"`（参与路由匹配与 thinking 查表）、`preferred_auth_method = "apikey"` 与 `forced_login_method = "api"`（免去官方账号登录），再加 `[model_providers.proxy429]` 段：`base_url = "http://127.0.0.1:8081/v1"`、`wire_api = "responses"`、`experimental_bearer_token = "任意占位"`（代理不校验 token，真实 key 由路由 `api` 注入）。结构与 cc-switch 接管 Codex 时写入的一致；改完重启 Codex（config.toml 不热加载）。多模型切换：加 `[profiles.名字]` 各设 `model`（`codex --profile 名字` 启动）或临时 `codex --model 名字`，代理按模型名路由、无需改动。逐步教程见 `使用说明.md`「让 Codex CLI 走代理」。
 - **翻译**：`instructions`/system 消息 → `system`；扁平 `input[]` 重新嵌套成 Anthropic messages（`function_call` 并入 assistant 的 tool_use、连续 `function_call_output` 合并进一条 user 的 tool_result，不完整工具轮自动丢弃、首条非 user 自动补前导）；`max_output_tokens` → `max_tokens`（缺省 32000）。
 - **thinking 映射**（与 cc-switch 3.20.0 的 thinking_optimizer 完全一致）：`reasoning.effort` 按模型分类走两条路径——adaptive 模型（fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6，子串匹配）翻成 `thinking:{"type":"adaptive"}` + `output_config.effort`（low/medium/high/max），其中 fable-5/mythos-5/mythos-preview/sonnet-5 不带 effort 也默认开；fable-5/mythos-5 关不掉 thinking，显式 `effort:"none"` 翻成 adaptive + `effort:"low"`。其余模型翻成 `thinking:{"type":"enabled","budget_tokens":N}`（low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576，上限压到 max_tokens 一半、不足 1024 不开）。工具续轮缺签名 thinking 回放、或 thinking 与强制 tool_choice 冲突时按 cc-switch 同款规则降级/报错。查表用客户端发来的 model 名（路由改写之前）。完整映射表见 `使用说明.md`「Responses 翻译映射表」。
 - **工具体系**（与 cc-switch 3.20.0 对齐）：function 工具与 `web_search` 托管工具 → Anthropic tools（web_search 映射 `web_search_20250305`，cc-switch 反而是丢弃的）；`custom` freeform 工具（如 Codex 的 apply_patch）→ 包装成 `{"input": string}` 的 JSON Schema，原始工具定义内嵌 description，响应拆包回 `custom_tool_call`（流式走 `custom_tool_call_input.done` 事件）；`namespace`（MCP）工具 → 子工具拍平成 `ns__name`（超 64 字节截断加 sha256 后缀），响应还原成带 `namespace` 字段的 function_call；`tool_search` → 固定代理工具。工具结果里的图片媒体（MCP image 块、JSON 字符串嵌套、整串 data URL）自动剥离成 Anthropic image 块而非字符串化；`input_file` → document 块；`tool_choice` 全形状映射（required/auto/none/function/custom/tool_search，未知形状降级 auto）；Anthropic 模型 Read 工具调用的 `pages:""` 怪癖自动清理。
