@@ -1,6 +1,5 @@
 {
   "listen": "127.0.0.1:8080",
-  "allow_remote": false,
   "upstream": "https://ark.cn-beijing.volces.com/api/plan",
   "max_retries": 5,
   "base_delay_s": 0.5,
@@ -47,7 +46,8 @@
       "pattern": "gpt-5*",
       "url": "https://api.deepseek.com",
       "api": "sk-deepseek-替换成你的key",
-      "model": "deepseek-V4-pro"
+      "model": "deepseek-V4-pro",
+      "url_response_api": "https://api.deepseek.com"
     }
   ],
   "classifier_route": {

@@ -1,0 +1,2 @@
+# bash 脚本必须 LF 签出（本仓库 autocrlf=true，CRLF 会让 bash 报 \r 命令不存在）
+codex-setup.sh text eol=lf

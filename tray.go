@@ -20,6 +20,21 @@ import (
 // trayStop 在 onExit 时关闭，通知 pollTrayColor 停止更新（避免退出后还调 systray API）。
 var trayStop = make(chan struct{})
 
+// trayCfgSwitched 是配置清单变化后的通知（容量 1，非阻塞投递、满则丢弃——重建菜单
+// 天然幂等，多次变化合并成一次即可）：switchConfig（托盘点击/网页切换/新建并切换）、
+// 网页端删除/重命名配置、保存时新建配置文件，都经 notifyTrayCfgChanged 投递；
+// 托盘借此重建「切换配置」子菜单，勾选与文件清单即时跟上，不必手动「刷新列表」。
+var trayCfgSwitched = make(chan struct{}, 1)
+
+// notifyTrayCfgChanged 非阻塞投递配置清单变化通知：托盘未就绪/正在退出、
+// 或通知已有积压（重建幂等）时直接丢弃。
+func notifyTrayCfgChanged() {
+	select {
+	case trayCfgSwitched <- struct{}{}:
+	default:
+	}
+}
+
 // setupTray 启动系统托盘/菜单栏图标，并阻塞主线程直到 systray.Quit。
 // macOS 要求 UI 事件循环跑在主 OS 线程，故此函数必须在 main 里直接调用（不要 go），
 // 不能塞进 goroutine。HTTP 服务等其它工作在各自 goroutine 里并发跑。
@@ -42,7 +57,8 @@ func onReady() {
 	}()
 
 	// 「切换配置」：子菜单列出当前配置目录下所有 .json 文件，点击即时切换并重载。
-	// 当前配置打勾；切换失败（配置坏）则保持旧配置，勾选不变。「刷新列表」用于新增配置文件后重建菜单。
+	// 当前配置打勾；切换失败（配置坏）则保持旧配置，勾选不变。网页端发起的切换经
+	// trayCfgSwitched 通知自动重建；「刷新列表」用于直接往目录丢配置文件后手动重建。
 	mSwitch := systray.AddMenuItem("切换配置", "")
 	var cfgItems []*systray.MenuItem
 	// 先声明再赋值：闭包内部会调用 rebuildCfgMenu 重建菜单，短变量声明的作用域从语句结束才开始，
@@ -81,6 +97,17 @@ func onReady() {
 		}()
 	}
 	rebuildCfgMenu()
+	// 网页端发起的切换（切配置/新建并切换）也走 switchConfig：收通知重建子菜单，勾选与清单即时刷新。
+	go func() {
+		for {
+			select {
+			case <-trayStop:
+				return
+			case <-trayCfgSwitched:
+				rebuildCfgMenu()
+			}
+		}
+	}()
 
 	systray.AddSeparator()
 

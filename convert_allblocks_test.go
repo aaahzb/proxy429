@@ -13,6 +13,7 @@ import (
 
 // testSSEAllBlocks 构造含全部块类型的 SSE 流：
 // thinking + server_tool_use + web_search_tool_result（含 encrypted_content 整块内联）+ tool_use（input_json_delta 分段）+ text。
+// server_tool_use 带 query 才算真搜索——空 query 会被 Responses 翻译层当 Kimi 空搜索占位丢弃。
 func testSSEAllBlocks() string {
 	return "" +
 		`event: message_start` + "\n" +
@@ -24,7 +25,7 @@ func testSSEAllBlocks() string {
 		`event: content_block_stop` + "\n" +
 		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
 		`event: content_block_start` + "\n" +
-		`data: {"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"call_00_x","name":"web_search","input":{}}}` + "\n\n" +
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"call_00_x","name":"web_search","input":{"query":"测试查询"}}}` + "\n\n" +
 		`event: content_block_stop` + "\n" +
 		`data: {"type":"content_block_stop","index":1}` + "\n\n" +
 		`event: content_block_start` + "\n" +

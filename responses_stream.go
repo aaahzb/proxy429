@@ -69,7 +69,8 @@ const (
 	bkThinking
 	bkRedactedThinking
 	bkToolUse
-	bkInstantDone // server_tool_use/web_search_tool_result：start 时块已完整，add+done 已发
+	bkSearchUse   // server_tool_use：query 可能走 input_json_delta（实测 Kimi 常只给 id/name），stop 补全后才发项
+	bkInstantDone // web_search_tool_result 及未知块：start 时块已完整，add+done 已发
 )
 
 type blockState struct {
@@ -78,9 +79,11 @@ type blockState struct {
 	itemID      string
 	callID      string
 	name        string
-	accum       string // text/thinking/input_json 累积
-	signature   string // signature_delta 累积
-	startInput  string // content_block_start 自带的 tool_use input（无 delta 时兜底）
+	accum       string                 // text/thinking/input_json 累积
+	signature   string                 // signature_delta 累积
+	startInput  string                 // content_block_start 自带的 tool_use input（无 delta 时兜底）
+	searchBlk   map[string]interface{} // server_tool_use 块原文（stop 补全 input 后发项+配对信封）
+	heldText    bool                   // text 块待判定是否 Kimi 空搜索前言：分流前 delta 憋着不发
 }
 
 // anthToRespStream 把 Anthropic SSE 事件流翻译成 Responses SSE 事件流。
@@ -98,6 +101,8 @@ type anthToRespStream struct {
 	items           []map[string]interface{} // 已完成的 output 项（按完成顺序）
 	usage           map[string]interface{}
 	stopReason      string
+	triple          *searchTriple          // 搜索信封归属三元组（路由定案后由 translatingWriter 注入；nil = 不出信封）
+	lastSearchUse   map[string]interface{} // 最近一个 server_tool_use 块（结果块到达时配对封信封）
 }
 
 func newAnthToRespStream(emit func(string), model string, reg *toolRegistry) *anthToRespStream {
@@ -192,6 +197,26 @@ func (s *anthToRespStream) allocOutputIndex() int {
 	return i
 }
 
+// emitTextStart 发 text 块的 output_item.added + content_part.added。
+// 这两个事件从 content_block_start 推迟到首个岔开前言的 delta（或块收尾时补发），
+// 以便 Kimi 空搜索前言整块静默丢弃（见 kimiSearchPreamble）。
+func (s *anthToRespStream) emitTextStart(bs *blockState) {
+	s.send(respOutputItemAdded(bs.outputIndex, respMessageItem(bs.itemID, "in_progress", "")))
+	s.send(respSSEEvent("response.content_part.added", map[string]interface{}{
+		"type": "response.content_part.added", "item_id": bs.itemID,
+		"output_index": bs.outputIndex, "content_index": 0,
+		"part": map[string]interface{}{"type": "output_text", "text": "", "annotations": []interface{}{}},
+	}))
+}
+
+// emitTextDelta 发一个 output_text.delta。
+func (s *anthToRespStream) emitTextDelta(bs *blockState, t string) {
+	s.send(respSSEEvent("response.output_text.delta", map[string]interface{}{
+		"type": "response.output_text.delta", "item_id": bs.itemID,
+		"output_index": bs.outputIndex, "content_index": 0, "delta": t,
+	}))
+}
+
 func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}) {
 	if cb == nil {
 		return
@@ -201,14 +226,12 @@ func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}
 	switch objStr(cb, "type") {
 	case "text":
 		bs.kind = bkText
+		bs.heldText = true
 		bs.itemID = fmt.Sprintf("%s_msg_%d", s.responseID, itemNum)
 		bs.accum = objStr(cb, "text")
-		s.send(respOutputItemAdded(bs.outputIndex, respMessageItem(bs.itemID, "in_progress", "")))
-		s.send(respSSEEvent("response.content_part.added", map[string]interface{}{
-			"type": "response.content_part.added", "item_id": bs.itemID,
-			"output_index": bs.outputIndex, "content_index": 0,
-			"part": map[string]interface{}{"type": "output_text", "text": "", "annotations": []interface{}{}},
-		}))
+		// item.added / content_part.added 推迟到 emitTextStart：Kimi 前言/query 回声
+		// （kimiSearchPreamble、stripSearchQueryEcho）要整块判定（回声行整行删/
+		// 重复裸前言剥光/纯前言丢弃），得等文本岔开前缀（或块收尾）再定。
 	case "thinking", "redacted_thinking":
 		if objStr(cb, "type") == "thinking" {
 			bs.kind = bkThinking
@@ -245,13 +268,40 @@ func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}
 		}
 		s.send(respOutputItemAdded(bs.outputIndex,
 			toolCallItemFromRegistry(s.reg, bs.itemID, "in_progress", bs.callID, bs.name, "")))
-	case "server_tool_use", "web_search_tool_result":
+	case "server_tool_use":
+		// query 可能不在 start 给（实测 Kimi 常只给 id/name，query 经后续
+		// input_json_delta 到达）：憋到 stop 补全 input 后再发项+记配对。
+		bs.kind = bkSearchUse
+		bs.searchBlk = cb
+		if inp := cb["input"]; inp != nil {
+			if b := canonicalJSON(inp); b != "" && b != "{}" {
+				bs.startInput = b
+			}
+		}
+	case "web_search_tool_result":
 		// start 时块已完整：直接 added+done，stop 时不再处理。
 		bs.kind = bkInstantDone
 		if item := webSearchCallItem(cb, s.responseID, itemNum); item != nil {
 			s.send(respOutputItemAdded(bs.outputIndex, item))
 			s.send(respOutputItemDone(bs.outputIndex, item))
 			s.items = append(s.items, item)
+		}
+		// 搜索块信封：结果块到达时与前面的 server_tool_use 配对封袋，作为额外
+		// reasoning 项随行（客户端保管，下轮回放时还原，见 searchEnvelopePrefix）。
+		if s.lastSearchUse != nil {
+			if enc := encodeSearchEnvelope(s.triple, s.lastSearchUse, cb); enc != "" {
+				envItem := map[string]interface{}{
+					"id":                fmt.Sprintf("rs_%s_env%d", s.responseID, itemNum),
+					"type":              "reasoning",
+					"summary":           []interface{}{},
+					"encrypted_content": enc,
+				}
+				envIdx := s.allocOutputIndex()
+				s.send(respOutputItemAdded(envIdx, envItem))
+				s.send(respOutputItemDone(envIdx, envItem))
+				s.items = append(s.items, envItem)
+			}
+			s.lastSearchUse = nil
 		}
 	default:
 		// 不认识的块类型：丢弃但占位，保持 index 对齐。
@@ -269,11 +319,21 @@ func (s *anthToRespStream) handleBlockDelta(index int, delta map[string]interfac
 	case "text_delta":
 		t := objStr(delta, "text")
 		bs.accum += t
+		if bs.heldText {
+			// 前言碎片未集齐、或按 stripSearchQueryEcho 剥完为空（回声行未收完/
+			// 块内还没有正文）→ 继续憋着；否则补发开始事件，剩余文本作为一个
+			// delta 补发（hold 条件保证岔开时剥完非空）。
+			if holdSearchQueryEchoText(bs.accum) {
+				return
+			}
+			bs.accum = stripSearchQueryEcho(bs.accum)
+			s.emitTextStart(bs)
+			s.emitTextDelta(bs, bs.accum)
+			bs.heldText = false
+			return
+		}
 		if t != "" {
-			s.send(respSSEEvent("response.output_text.delta", map[string]interface{}{
-				"type": "response.output_text.delta", "item_id": bs.itemID,
-				"output_index": bs.outputIndex, "content_index": 0, "delta": t,
-			}))
+			s.emitTextDelta(bs, t)
 		}
 	case "thinking_delta":
 		t := objStr(delta, "thinking")
@@ -292,7 +352,9 @@ func (s *anthToRespStream) handleBlockDelta(index int, delta map[string]interfac
 		// custom 工具与 Read 不在中途转发参数 delta：custom 要在收拢时解包成裸
 		// 字符串发 custom_tool_call_input.done，Read 要在收拢时做 pages:"" sanitize
 		// （中途发会把待清理的片段漏给客户端）。对照 cc-switch 同款抑制。
-		if t != "" && bs.name != "Read" && !s.reg.isCustomTool(bs.name) {
+		// bkSearchUse 的参数碎片只累积（web_search_call 没有参数流概念，stop 时
+		// 拼进 action.query），不能走 function_call_arguments.delta。
+		if t != "" && bs.kind == bkToolUse && bs.name != "Read" && !s.reg.isCustomTool(bs.name) {
 			s.send(respSSEEvent("response.function_call_arguments.delta", map[string]interface{}{
 				"type": "response.function_call_arguments.delta", "item_id": bs.itemID,
 				"output_index": bs.outputIndex, "delta": t,
@@ -309,6 +371,18 @@ func (s *anthToRespStream) handleBlockStop(index int) {
 	delete(s.blocks, index)
 	switch bs.kind {
 	case bkText:
+		if bs.heldText {
+			// 憋到块收尾：剥完回声/前言为空 → 整块丢弃（没发过事件、不进 items）；
+			// 否则（整块内容在 start 自带、被截断的前言前缀等）按同款规则补发全流程事件。
+			rest := stripSearchQueryEcho(bs.accum)
+			if strings.TrimSpace(rest) == "" {
+				return
+			}
+			bs.accum = rest
+			s.emitTextStart(bs)
+			s.emitTextDelta(bs, bs.accum)
+			bs.heldText = false
+		}
 		s.send(respSSEEvent("response.output_text.done", map[string]interface{}{
 			"type": "response.output_text.done", "item_id": bs.itemID,
 			"output_index": bs.outputIndex, "content_index": 0, "text": bs.accum,
@@ -343,6 +417,26 @@ func (s *anthToRespStream) handleBlockStop(index int) {
 		item := respReasoningItem(bs.itemID, bs.accum, encodeThinkingEnvelope(blk))
 		s.send(respOutputItemDone(bs.outputIndex, item))
 		s.items = append(s.items, item)
+	case bkSearchUse:
+		// 补全 input：优先 input_json_delta 累积，回退 start 自带（与 bkToolUse 同优先级）。
+		raw := bs.accum
+		if raw == "" {
+			raw = bs.startInput
+		}
+		if raw != "" {
+			var inp interface{}
+			if json.Unmarshal([]byte(raw), &inp) == nil {
+				bs.searchBlk["input"] = inp
+			}
+		}
+		// input 终局后块才完整：此刻发 web_search_call 项（有 query 才出调用项），
+		// 并记为最近一个搜索调用，供紧随的结果块配对封信封。
+		if item := webSearchCallItem(bs.searchBlk, s.responseID, bs.outputIndex); item != nil {
+			s.send(respOutputItemAdded(bs.outputIndex, item))
+			s.send(respOutputItemDone(bs.outputIndex, item))
+			s.items = append(s.items, item)
+		}
+		s.lastSearchUse = bs.searchBlk
 	case bkToolUse:
 		// 优先用流式 input_json_delta 的累积；网关没发 delta 时回退到
 		// content_block_start 自带的 input（对照 cc-switch close_block 的优先级）。
@@ -437,6 +531,7 @@ type translatingWriter struct {
 	clientStream bool
 	model        string
 	reg          *toolRegistry
+	triple       *searchTriple // 搜索信封归属三元组（主 handler 路由定案后经 setSearchTriple 注入）
 
 	header http.Header
 	status int
@@ -482,6 +577,15 @@ func newTranslatingWriter(dst http.ResponseWriter, clientStream bool, model stri
 }
 
 func (tw *translatingWriter) Header() http.Header { return tw.header }
+
+// setSearchTriple 由主 handler 在路由定案后注入搜索信封的归属三元组（Responses 翻译口
+// 专用；Anthropic 口的 ResponseWriter 没有此方法，handler 的类型断言自然跳过）。
+// api 参数是实际生效的鉴权 token（与 effectiveKey 同口径），方法内只存其哈希与
+// 派生掩码，不存原文。
+func (tw *translatingWriter) setSearchTriple(url, api, model string) {
+	tw.triple = newSearchTriple(url, model, api)
+	tw.conv.triple = tw.triple
+}
 
 func (tw *translatingWriter) WriteHeader(status int) { tw.status = status }
 
@@ -613,7 +717,7 @@ func (tw *translatingWriter) finishBuffered() {
 		writeResponsesError(tw.dst, http.StatusBadGateway, "api_error", "invalid upstream JSON: "+err.Error())
 		return
 	}
-	respObj := anthropicToResponsesObject(msg, tw.model, tw.reg)
+	respObj := anthropicToResponsesObject(msg, tw.model, tw.reg, tw.triple)
 	if !tw.clientStream {
 		b, _ := json.Marshal(respObj)
 		tw.writeDstHeader(http.StatusOK, "application/json")

@@ -63,7 +63,7 @@ func TestConfigCoversAllStructFields(t *testing.T) {
 	// Config 结构体全字段（debug 字段列入豁免）。
 	exempt := map[string]bool{"search_debug_dir": true}
 	for _, f := range []string{
-		"listen", "allow_remote", "upstream", "max_retries", "base_delay_s",
+		"listen", "upstream", "max_retries", "base_delay_s",
 		"max_delay_s", "total_budget_s", "retry_status_codes", "respect_retry_after",
 		"classifier_thinking_disabled", "classifier_max_tokens",
 		"upstream_header_timeout_s", "ping_interval_s", "log_request_detail",

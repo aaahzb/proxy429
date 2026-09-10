@@ -7,8 +7,11 @@ package main
 // anthropic_response_to_responses（响应方向），按本代理需要裁剪。
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,14 +19,31 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 )
 
 // ctxKeyTranslated 是内部请求 context 的键：标记本请求来自 Responses 翻译口。
-// 主 handler 据此给 flight 打 [translate] 标记。用 context 而非 header——
-// copyHeaders 会把 header 透传到上游，context 不会泄露。
+// 主 handler 据此给 flight 打来源标记（网页 API 列显示 [translate]/[Response]）。
+// 用 context 而非 header——copyHeaders 会把 header 透传到上游，context 不会泄露。
 type ctxKeyTranslatedT struct{}
 
 var ctxKeyTranslated ctxKeyTranslatedT
+
+// ctxKeyConvID 是内部请求 context 的键：把 Responses 请求的会话标识
+// （prompt_cache_key，Codex 恒带；次选 client_metadata.thread_id）递给主 handler，
+// 供"缓存年龄"列按会话锚定。同 ctxKeyTranslated 的理由：用 context 不用 header，不会漏到上游。
+type ctxKeyConvIDT struct{}
+
+var ctxKeyConvID ctxKeyConvIDT
+
+// ctxKeyTranslated 的取值：flight.translated 同款三态——
+// translatedResponses 表示 Responses 请求被翻译成 Anthropic 走主管线（API 列 [translate]）；
+// translatedResponsesRaw 表示命中路由配了 url_response_api，Responses 原文透传不翻译（API 列 [Response]）。
+const (
+	translatedResponses    = "responses"
+	translatedResponsesRaw = "responses-raw"
+)
 
 // thinkingEnvelopePrefix 是思考块信封前缀：把 Anthropic 签名 thinking 块 JSON
 // base64url 后加此前缀，塞进 Responses reasoning.encrypted_content 返回给客户端；
@@ -35,9 +55,32 @@ const thinkingEnvelopePrefix = "p429-ant-thinking-v1:"
 // （Anthropic 必填，缺了 400）。
 const defaultResponsesMaxTokens = 32000
 
-// runResponsesServer 启动 OpenAI Responses API 监听口（独立于主端口的 mux）。
-// 监听失败只告警禁用，不影响主代理。
-func runResponsesServer(listen string) {
+// responsesSrv 跟踪 Responses 监听口的运行状态，供配置重载/切换时动态启停（不必重启进程）。
+var responsesSrv = struct {
+	sync.Mutex
+	addr string       // 当前实际监听的地址（空 = 未在监听）
+	srv  *http.Server // 运行中的 server，供关闭
+}{}
+
+// reconcileResponsesServer 把 Responses 监听口对齐到配置地址：
+// 地址不变则不动；变了（含新增/停用/改地址）先关旧监听再起新的。
+// 监听失败只告警禁用，不影响主代理。启动、配置重载、切换配置三处都会调用。
+func reconcileResponsesServer(listen string) {
+	responsesSrv.Lock()
+	defer responsesSrv.Unlock()
+	if listen == responsesSrv.addr {
+		return // 现状已是目标状态（含都为空）
+	}
+	if responsesSrv.srv != nil {
+		// 立即关闭并释放端口：地址都变了，旧端口上的进行中请求留着也没意义
+		_ = responsesSrv.srv.Close()
+		responsesSrv.srv = nil
+		responsesSrv.addr = ""
+		log.Printf("[Responses] 监听口已随配置变更关闭")
+	}
+	if listen == "" {
+		return
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/responses", responsesHandler)
 	mux.HandleFunc("/responses", responsesHandler)
@@ -46,17 +89,59 @@ func runResponsesServer(listen string) {
 		log.Printf("[Responses] 监听 %s 失败: %v（Responses API 功能禁用，主代理不受影响）", listen, err)
 		return
 	}
+	srv := &http.Server{Handler: mux}
+	responsesSrv.srv = srv
+	responsesSrv.addr = listen
 	log.Printf("[Responses] OpenAI Responses API 监听 http://%s（请求翻译成 Anthropic 走主管线）", listen)
-	if err := http.Serve(ln, mux); err != nil {
-		log.Printf("[Responses] 服务退出: %v", err)
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("[Responses] 服务退出: %v", err)
+		}
+	}()
+}
+
+// predictSearchTriple 按路由规则预测本请求的上游归属三元组（搜索信封还原的比对基准）。
+// 只复刻主路径（fast 字面名 > routes 通配 > 默认 upstream）；分类器/text_only/no_search/
+// 增强搜索等条件分支不预测——预测偏差顶多让信封还原后撞 400，主管线 fail-soft 会剥掉
+// 重试（见 handler 的 tool_call_id 兜底），不会错出数据。完全预测不了（无路由命中且
+// 默认 upstream 为空）返回 nil = 信封一律放行。
+func predictSearchTriple(c *Config, r *http.Request, model string) *searchTriple {
+	if fr := c.FastRoute; fr != nil && fr.URL != "" && fr.Model != "" && model == "fast_route" {
+		return newSearchTriple(fr.URL, fr.Model, effectiveKey(fr.API, r))
 	}
+	for i := range c.Routes {
+		rr := &c.Routes[i]
+		if isReservedRoutePattern(rr.Pattern) {
+			continue
+		}
+		if matchModel(rr.Pattern, model) {
+			m := rr.Model
+			if m == "" {
+				m = model
+			}
+			return newSearchTriple(rr.URL, m, effectiveKey(rr.API, r))
+		}
+	}
+	if c.Upstream == "" {
+		return nil
+	}
+	return newSearchTriple(c.Upstream, model, effectiveKey("", r))
+}
+
+// effectiveKey 算上游请求实际生效的鉴权 token：路由 key 非空用路由 key，
+// 空则透传客户端 Authorization 头值（与主 handler 的鉴权覆盖逻辑同口径）。
+func effectiveKey(routeAPI string, r *http.Request) string {
+	if routeAPI != "" {
+		return routeAPI
+	}
+	return r.Header.Get("Authorization")
 }
 
 // responsesHandler 处理一个 Responses API 请求：翻译成 Anthropic 后内部调用主 handler。
 func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	c := cfg.Load()
-	// 与主 handler 同语义：allow_remote=false 时仅本机可连。
-	if !c.AllowRemote && !isLocalRequest(r) {
+	// 与主 handler 同语义：转发通道永远仅本机可连。
+	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -83,7 +168,39 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	clientStream, _ := body["stream"].(bool)
 	origModel, _ := body["model"].(string)
 
-	anth, reg, err := responsesToAnthropic(body)
+	// 会话标识（状态页"缓存年龄"列用）：Codex 恒带 prompt_cache_key（= 会话 UUID），
+	// 次选 client_metadata.thread_id（Codex 中与前者同值）。只读，不改请求体。
+	convID, _ := body["prompt_cache_key"].(string)
+	if convID == "" {
+		if cm, ok := body["client_metadata"].(map[string]interface{}); ok {
+			convID, _ = cm["thread_id"].(string)
+		}
+	}
+
+	// 原生透传预检：model 命中的路由配了 url_response_api 时，Responses 原文不翻译，
+	// 原样交给主 handler——路由循环里的透传分支会把上游切成该路由的 url_response_api。
+	// 监控流/统计/重试管线与翻译流完全相同（主 handler 按 ctx 标记换 Responses 口径解析）。
+	// 预检只定"翻译还是透传"；真正的路由决策以 handler 为准（配置热重载致路由消失时 handler 报 502）。
+	if matchPassthroughResponsesRoute(c, origModel) != nil {
+		r2 := r.Clone(r.Context())
+		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyTranslated, translatedResponsesRaw))
+		if convID != "" {
+			r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyConvID, convID))
+		}
+		r2.Method = http.MethodPost
+		r2.URL.Path = "/v1/responses"
+		r2.Body = io.NopCloser(bytes.NewReader(raw))
+		r2.ContentLength = int64(len(raw))
+		// 头保留客户端原样：上游就是原生 Responses 服务，Authorization 等在路由命中时被目标 key 覆盖。
+		handler(w, r2)
+		return
+	}
+
+	// 翻译期的搜索还原上下文：时间规则剥块计数/对话水位/还原时刻收集；
+	// 随内部请求下发，主 handler 把剥块计数进 flight（[剥N] 显示），
+	// 400 兜底剥块时拿还原时刻学对话水位。
+	replay := &searchReplayCtx{convID: convID}
+	anth, reg, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay)
 	if err != nil {
 		writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -91,6 +208,12 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	// 上游永远走流式（与 convertAlltoStream 同哲学）：网页可监控吐字，回传侧再按客户端需要
 	// 实时翻译 SSE 或收集后一次性返回 Responses JSON。
 	anth["stream"] = true
+	// fast_route 在 Codex 菜单里的条目名就是字面名 "fast_route"（Codex 不对照配置校验目录名）：
+	// 选中即注入 speed:"fast"，由主 handler 的 fast 分支接管（改走 fast_route 上游、
+	// model 改写为 fast_route.model）。"fast_route" 同时是路由 pattern 保留名，防撞名截流。
+	if fr := c.FastRoute; fr != nil && fr.URL != "" && fr.Model != "" && origModel == "fast_route" {
+		anth["speed"] = "fast"
+	}
 	newBody, err := json.Marshal(anth)
 	if err != nil {
 		writeResponsesError(w, http.StatusInternalServerError, "api_error", "marshal converted body failed")
@@ -100,7 +223,11 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	// 构造内部请求：路径换成 /v1/messages，头只保留鉴权（路由命中时会被目标 key 覆盖），
 	// 不带 Codex 客户端的 OpenAI 专用头去骚扰 Anthropic 上游。
 	r2 := r.Clone(r.Context())
-	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyTranslated, "responses"))
+	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyTranslated, translatedResponses))
+	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeySearchReplay, replay))
+	if convID != "" {
+		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyConvID, convID))
+	}
 	r2.Method = http.MethodPost
 	r2.URL.Path = "/v1/messages"
 	r2.Body = io.NopCloser(strings.NewReader(string(newBody)))
@@ -156,6 +283,13 @@ func isMeaningfulText(s string) bool { return strings.TrimSpace(s) != "" }
 // 对照 cc-switch responses_request_to_anthropic。返回的工具注册表记录 custom/
 // namespace/tool_search 工具的原始身份，响应翻译（流式与非流式）据此拆包。
 func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, *toolRegistry, error) {
+	return responsesToAnthropicTriple(body, nil, nil)
+}
+
+// responsesToAnthropicTriple 同 responsesToAnthropic，额外带本请求的路由预测三元组
+// （搜索信封还原的比对基准；nil = 预测不了，信封一律放行）与搜索还原上下文
+// （时间规则剥块计数/对话水位/还原时刻收集；nil = 只转换不统计）。
+func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx) (map[string]interface{}, *toolRegistry, error) {
 	result := map[string]interface{}{}
 	if model := objStr(body, "model"); model != "" {
 		result["model"] = model
@@ -196,7 +330,7 @@ func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, 
 			}}
 		}
 	case []interface{}:
-		msgs, err = convertInputToMessages(inp, reg)
+		msgs, err = convertInputToMessages(inp, reg, reqTriple, replay)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -349,9 +483,14 @@ func responsesSystemText(item map[string]interface{}) []string {
 //   - tool_search_call → tool_use（代理工具名，arguments 对象作 input）
 //   - function_call_output/custom_tool_call_output/tool_search_output → user 的
 //     tool_result 块（连续的合并进同一条 user 消息）
-//   - reasoning.encrypted_content 带我们信封前缀 → 还原签名 thinking 块
-func convertInputToMessages(items []interface{}, reg *toolRegistry) ([]map[string]interface{}, error) {
+//   - reasoning.encrypted_content 带我们信封前缀 → 还原签名 thinking 块；
+//     带搜索信封前缀且三元组与本请求路由预测一致 → 还原完整搜索块（见 searchEnvelopePrefix）
+func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *searchTriple, replay *searchReplayCtx) ([]map[string]interface{}, error) {
 	var msgs []map[string]interface{}
+	var reqMask []byte // 路由预测的 key 派生掩码（nil = 预测不了，信封解不开自然跳过）
+	if reqTriple != nil {
+		reqMask = reqTriple.mask
+	}
 	for _, it := range items {
 		item := asObj(it)
 		if item == nil {
@@ -421,16 +560,54 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry) ([]map[strin
 			}
 			pushToolResultBlock(&msgs, block)
 		case "input_text":
-			if t := objStr(item, "text"); isMeaningfulText(t) {
+			// 剥掉历史里的搜索 query 回声行（见 stripSearchQueryEcho），全文无条件应用。
+			if t := stripSearchQueryEcho(objStr(item, "text")); isMeaningfulText(t) {
 				pushBlock(&msgs, "user", map[string]interface{}{"type": "text", "text": t})
 			}
-		case "input_image":
-			if b := imageBlockFromInputImage(item); b != nil {
-				pushBlock(&msgs, "user", b)
-			}
+		case "input_image", "input_file":
+			// 顶层裸附件部件：认不出标准形态时序列化成文本兜底，不静默丢
+			// （见 pushMediaPart）。
+			pushMediaPart(&msgs, "user", item)
 		case "reasoning":
-			if b := decodeThinkingEnvelope(objStr(item, "encrypted_content")); b != nil {
+			enc := objStr(item, "encrypted_content")
+			if b := decodeThinkingEnvelope(enc); b != nil {
 				pushAssistantThinkingBlock(&msgs, b)
+			} else if tri, blocks, ts, ok := decodeSearchEnvelope(enc, reqMask); ok {
+				// 搜索信封：解得开（key 同源）且 url 也同源才还原上行——不同源还原
+				// 也解不开，跳过省 token；跨模型不拦（实测照常解密）。reqMask 为
+				// nil = 本请求预测不了路由 key，解不开混淆自然跳过（v1 的放行
+				// 分支随明文 payload 一起退役）。
+				if reqTriple == nil || reqTriple.sameOrigin(tri) {
+					// 时间规则主动剥（不撞 400 不烧重试）：封入超 searchEnvelopeMaxAge
+					// （无 ts 的老信封同此），或本对话已学到更短的水位且它比水位老。
+					// 剥块计数与还原时刻都记进 replay（nil = 只转换不统计）。
+					var cutoff time.Time
+					if replay != nil && replay.convID != "" {
+						cutoff = searchCutoffFor(replay.convID)
+					}
+					switch {
+					case ts.IsZero() || time.Since(ts) > searchEnvelopeMaxAge:
+						if replay != nil {
+							replay.proactiveAge += len(blocks)
+						}
+					case !cutoff.IsZero() && ts.Before(cutoff):
+						replay.proactiveCutoff += len(blocks)
+					default:
+						for _, b := range blocks {
+							pushBlock(&msgs, "assistant", b)
+						}
+						if replay != nil {
+							replay.restored = append(replay.restored, ts)
+						}
+					}
+				}
+			}
+		case "web_search_call", "server_tool_use", "web_search_tool_result":
+			// web_search_call 调用项不回放（代理自造 id 上行必 400，见
+			// searchBlocksFromResponsesItem）；Anthropic 形状的搜索块空壳整条删除、
+			// 有内容的原样上行。搜索内容的唯一回放载体是上面的搜索信封。
+			for _, b := range searchBlocksFromResponsesItem(item) {
+				pushBlock(&msgs, "assistant", b)
 			}
 		default:
 			// message 项或带 role 的项：system/developer 已在上面收进 system，这里跳过。
@@ -447,29 +624,23 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry) ([]map[strin
 			}
 			switch c := item["content"].(type) {
 			case string:
-				if isMeaningfulText(c) {
-					pushBlock(&msgs, anthRole, map[string]interface{}{"type": "text", "text": c})
+				if t := stripSearchQueryEcho(c); isMeaningfulText(t) {
+					pushBlock(&msgs, anthRole, map[string]interface{}{"type": "text", "text": t})
 				}
 			case []interface{}:
 				for _, p := range c {
 					pm := asObj(p)
 					switch objStr(pm, "type") {
 					case "input_text", "output_text":
-						if t := objStr(pm, "text"); isMeaningfulText(t) {
+						if t := stripSearchQueryEcho(objStr(pm, "text")); isMeaningfulText(t) {
 							pushBlock(&msgs, anthRole, map[string]interface{}{"type": "text", "text": t})
 						}
 					case "refusal":
-						if t := objStr(pm, "refusal"); isMeaningfulText(t) {
+						if t := stripSearchQueryEcho(objStr(pm, "refusal")); isMeaningfulText(t) {
 							pushBlock(&msgs, anthRole, map[string]interface{}{"type": "text", "text": t})
 						}
-					case "input_image":
-						if b := imageBlockFromInputImage(pm); b != nil {
-							pushBlock(&msgs, anthRole, b)
-						}
-					case "input_file":
-						if b := documentBlockFromInputFile(pm); b != nil {
-							pushBlock(&msgs, anthRole, b)
-						}
+					case "input_image", "input_file":
+						pushMediaPart(&msgs, anthRole, pm)
 					}
 				}
 			}
@@ -589,6 +760,24 @@ func pushBlock(msgs *[]map[string]interface{}, role string, block map[string]int
 	*msgs = append(*msgs, map[string]interface{}{
 		"role": role, "content": []interface{}{block},
 	})
+}
+
+// pushMediaPart 把 input_image/input_file 部件转成 Anthropic image/document 块追加。
+// 认不出的形态（blob:/file: 本地 URL、file_id 云端引用、残缺 data URL 等）序列化成
+// 文本块兜底：字节流拿不到是客观限制，但整块静默消失不是——与工具结果部件路径的
+// 兜底口径一致（见 toolResultContentFromResponsesItem）。
+func pushMediaPart(msgs *[]map[string]interface{}, role string, pm map[string]interface{}) {
+	var b map[string]interface{}
+	switch objStr(pm, "type") {
+	case "input_image":
+		b = imageBlockFromInputImage(pm)
+	case "input_file":
+		b = documentBlockFromInputFile(pm)
+	}
+	if b == nil {
+		b = map[string]interface{}{"type": "text", "text": canonicalJSON(pm)}
+	}
+	pushBlock(msgs, role, b)
 }
 
 // pushToolResultBlock 追加 tool_result：保持 Anthropic 要求的顺序——tool_result 块
@@ -1001,6 +1190,250 @@ func decodeThinkingEnvelope(s string) map[string]interface{} {
 	return block
 }
 
+// ---- 搜索块信封 ----
+
+// searchEnvelopePrefix 是搜索块信封前缀：把一次搜索的 server_tool_use +
+// web_search_tool_result 两块连同归属三元组，经 key 派生掩码异或混淆后 base64url
+// 加此前缀，塞进 Responses reasoning.encrypted_content 返回给客户端（与 thinking
+// 信封同管道）。客户端下一轮原样回传，代理解信封把完整搜索结构还原上行——模型据此
+// 直接读上次搜索内容，不必原关键字重搜。v2 起 payload 混淆存储：信封在客户端历史
+// （Codex 会话记录）里躺着，不躺明文 url/模型/key 哈希（用户要求，混淆非加密）。
+const searchEnvelopePrefix = "p429-ant-search-v2:"
+
+// searchEnvelopeMaxAge 是信封封入时刻的硬上限：超过就不还原（时间规则主动剥，
+// 不撞 400 不烧重试）。上游搜索 id 注册表有存活期，超龄信封还原必被拒。
+// 无 ts 字段的老信封（v2 初版）按超龄处理——一次性淘汰。
+const searchEnvelopeMaxAge = time.Hour
+
+// searchReplayCtx 是搜索信封还原的每次请求上下文（翻译期单 goroutine，免锁）：
+// convID 用于查/学对话水位；proactiveAge/proactiveCutoff 计数时间规则剥的块
+// （[剥N] 的时间部分，拆分只写日志）；restored 收集实际还原上行的信封封入
+// 时刻——400 兜底剥块时取最老的一个学成对话水位。
+type searchReplayCtx struct {
+	convID          string
+	proactiveAge    int // 超 searchEnvelopeMaxAge 剥的块数
+	proactiveCutoff int // 对话水位剥的块数
+	restored        []time.Time
+}
+
+// ctxKeySearchReplay 是内部请求 context 的键：把翻译期的搜索还原上下文
+// 带给主 handler（剥块计数进 flight、400 时学水位）。同 ctxKeyTranslated
+// 的理由：用 context 不用 header，不会漏到上游。
+type ctxKeySearchReplayT struct{}
+
+var ctxKeySearchReplay ctxKeySearchReplayT
+
+// searchCutoff 按对话记录信封水位（封入时刻下界）：比水位老的信封默认全剥。
+// 400 兜底剥块时学习（上游真实存活期可能短于 searchEnvelopeMaxAge，水位按对话
+// 自适应下探）；只升不降（水位越新剥得越多，旧信息已被新信息覆盖）。
+var searchCutoff = struct {
+	sync.Mutex
+	m map[string]time.Time
+}{m: make(map[string]time.Time)}
+
+// searchCutoffFor 查对话水位；无记录返回零值（不拦任何信封）。
+func searchCutoffFor(convID string) time.Time {
+	searchCutoff.Lock()
+	defer searchCutoff.Unlock()
+	return searchCutoff.m[convID]
+}
+
+// learnSearchCutoff 把对话水位抬到 ts（只升不降）。
+func learnSearchCutoff(convID string, ts time.Time) {
+	if convID == "" || ts.IsZero() {
+		return
+	}
+	searchCutoff.Lock()
+	defer searchCutoff.Unlock()
+	if ts.After(searchCutoff.m[convID]) {
+		searchCutoff.m[convID] = ts
+	}
+}
+
+// searchTriple 是搜索信封的归属信息：url+模型+key 哈希。KeyH 只存 key 的
+// sha256 前 16 hex，不裸存 key。Model 只作排查参考，不参与还原比对——见 sameOrigin。
+// mask 是 key 派生的异或掩码（json:"-" 永不信封序列化）：encode/decode 都要它，
+// 路由定案后由 newSearchTriple 一并派生。
+type searchTriple struct {
+	URL   string `json:"u"`
+	Model string `json:"m"`
+	KeyH  string `json:"k"`
+	mask  []byte `json:"-"`
+}
+
+// newSearchTriple 建归属三元组：api 是实际生效的鉴权 token（effectiveKey 口径），
+// 只存其哈希，并派生信封混淆掩码。
+func newSearchTriple(url, model, api string) *searchTriple {
+	return &searchTriple{URL: url, Model: model, KeyH: hashSearchKey(api), mask: searchEnvMask(api)}
+}
+
+// searchEnvMask 从 api key 派生 32 字节混淆掩码（域分隔，不与 KeyH 同源）。
+func searchEnvMask(api string) []byte {
+	sum := sha256.Sum256([]byte("p429-search-mask\x00" + api))
+	return sum[:]
+}
+
+// xorSearchMask 循环异或掩码（混淆/解混淆同一函数）。纯异或，无加密开销。
+func xorSearchMask(mask, p []byte) []byte {
+	out := make([]byte, len(p))
+	for i := range p {
+		out[i] = p[i] ^ mask[i%len(mask)]
+	}
+	return out
+}
+
+// sameOrigin 判断两归属是否同一上游来源：只比 url+key 两腿。模型腿不参与——
+// 2026-09-10 实测同 endpoint 同 key 跨模型回放（k3-256k 的搜索块丢给
+// kimi-for-coding 追问）200 零重搜、模型给出正文级摘要，跨模型不拦还原。
+func (t *searchTriple) sameOrigin(o *searchTriple) bool {
+	return t.URL == o.URL && t.KeyH == o.KeyH
+}
+
+// hashSearchKey 算 api key 的比对哈希（sha256 前 16 hex）。参数是实际生效的
+// 鉴权 token：路由 key 非空用路由 key，空则是透传的客户端 Authorization 头值。
+func hashSearchKey(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// encodeSearchEnvelope 把一次搜索的两个 Anthropic 块与归属三元组编码成信封字符串。
+// 三元组/块缺失或 server_tool_use 无 query（空搜索）时不编码——空壳没有回放价值。
+func encodeSearchEnvelope(t *searchTriple, useBlk, resBlk map[string]interface{}) string {
+	if t == nil || useBlk == nil || resBlk == nil {
+		return ""
+	}
+	if objStr(asObj(useBlk["input"]), "query") == "" {
+		return ""
+	}
+	// id 归一：Kimi 流式搜索的 server_tool_use 块 id 是 tool_ 开头，但搜索注册表
+	// 只登记结果块的 srvtoolu_ id——回放时按 stu.id 查注册表，查不到就 400
+	// tool_call_id is not found（2026-09-10 受控实验：流式原样回放 400，把 stu.id
+	// 改写成 result.tool_use_id 后 200；非流式搜索两者天生一致，不受影响）。
+	// 信封是唯一的回放载体，在封入时归一；浅拷贝不改调用方共享的块。
+	if tid := objStr(resBlk, "tool_use_id"); tid != "" && objStr(useBlk, "id") != tid {
+		cp := make(map[string]interface{}, len(useBlk)+1)
+		for k, v := range useBlk {
+			cp[k] = v
+		}
+		cp["id"] = tid
+		useBlk = cp
+	}
+	payload, err := json.Marshal(map[string]interface{}{
+		"t":  t,
+		"b":  []map[string]interface{}{useBlk, resBlk},
+		"ts": time.Now().Unix(), // 封入时刻：还原侧按龄/对话水位剥块的依据
+	})
+	if err != nil {
+		return ""
+	}
+	// 混淆存储：掩码缺失宁可不出信封，也不发明文 payload。
+	if len(t.mask) == 0 {
+		return ""
+	}
+	return searchEnvelopePrefix + base64.RawURLEncoding.EncodeToString(xorSearchMask(t.mask, payload))
+}
+
+// decodeSearchEnvelope 识别搜索信封前缀并还原三元组、两个内容块与封入时刻 ts
+// （无 ts 字段的老信封返回零值——还原侧按超龄剥掉）。mask 是本请求路由预测的
+// key 派生掩码（nil/不对 → 异或出来不是 JSON，自然 ok=false——key 腿的比对
+// 就含在解混淆里）；不是我们的信封、或块形态不对，返回 ok=false。
+func decodeSearchEnvelope(s string, mask []byte) (*searchTriple, []map[string]interface{}, time.Time, bool) {
+	if !strings.HasPrefix(s, searchEnvelopePrefix) || len(mask) == 0 {
+		return nil, nil, time.Time{}, false
+	}
+	b, err := base64.RawURLEncoding.DecodeString(s[len(searchEnvelopePrefix):])
+	if err != nil {
+		return nil, nil, time.Time{}, false
+	}
+	b = xorSearchMask(mask, b)
+	var payload struct {
+		T  *searchTriple            `json:"t"`
+		B  []map[string]interface{} `json:"b"`
+		Ts int64                    `json:"ts"`
+	}
+	if err := json.Unmarshal(b, &payload); err != nil || payload.T == nil || len(payload.B) != 2 {
+		return nil, nil, time.Time{}, false
+	}
+	if objStr(payload.B[0], "type") != "server_tool_use" ||
+		objStr(payload.B[1], "type") != "web_search_tool_result" {
+		return nil, nil, time.Time{}, false
+	}
+	var ts time.Time
+	if payload.Ts > 0 {
+		ts = time.Unix(payload.Ts, 0)
+	}
+	return payload.T, payload.B, ts, true
+}
+
+// stripSearchBlocksInBody 从 Anthropic 请求体剥掉所有回放的搜索结构
+// （server_tool_use/web_search_tool_result 块）：剥后空壳消息整条删除、相邻同 role
+// 消息合并（删消息可能造成 user user 相邻）。n 是剥掉的搜索块数（两种块各算 1，
+// 删空壳消息不另计），供 [剥N] 显示与日志拆分。没有任何搜索块时 ok=false（无需重试）。
+// 用于搜索信封还原被上游拒（400 tool_call_id）后的 fail-soft 重试。
+func stripSearchBlocksInBody(body []byte) (nb []byte, n int, ok bool) {
+	var m map[string]interface{}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, 0, false
+	}
+	msgs := asArr(m["messages"])
+	if msgs == nil {
+		return nil, 0, false
+	}
+	stripped := false
+	var newMsgs []interface{}
+	for _, mi := range msgs {
+		msg := asObj(mi)
+		content := asArr(msg["content"])
+		if msg == nil || content == nil {
+			newMsgs = append(newMsgs, mi)
+			continue
+		}
+		var nc []interface{}
+		for _, c := range content {
+			if t := objStr(asObj(c), "type"); t == "server_tool_use" || t == "web_search_tool_result" {
+				stripped = true
+				n++
+				continue
+			}
+			nc = append(nc, c)
+		}
+		if len(nc) == 0 {
+			stripped = true // 整条消息只剩搜索块 → 删
+			continue
+		}
+		msg["content"] = nc
+		newMsgs = append(newMsgs, msg)
+	}
+	if !stripped {
+		return nil, 0, false
+	}
+	m["messages"] = mergeSameRoleMessages(newMsgs)
+	out, err := json.Marshal(m)
+	if err != nil {
+		return nil, 0, false
+	}
+	return out, n, true
+}
+
+// mergeSameRoleMessages 合并相邻同 role 且 content 都是数组的消息（剥块/删消息后的规整）。
+func mergeSameRoleMessages(msgs []interface{}) []interface{} {
+	var out []interface{}
+	for _, mi := range msgs {
+		msg := asObj(mi)
+		if len(out) > 0 && msg != nil {
+			prev := asObj(out[len(out)-1])
+			pc, pok := prev["content"].([]interface{})
+			cc, cok := msg["content"].([]interface{})
+			if pok && cok && objStr(prev, "role") != "" && objStr(prev, "role") == objStr(msg, "role") {
+				prev["content"] = append(pc, cc...)
+				continue
+			}
+		}
+		out = append(out, mi)
+	}
+	return out
+}
+
 // ---- 响应翻译：Anthropic message JSON → Responses 对象（非流式路径） ----
 
 // mapStopReasonToStatus 把 Anthropic stop_reason 映射成 Responses (status, incomplete_reason)。
@@ -1047,7 +1480,8 @@ func buildResponsesUsage(usage map[string]interface{}) map[string]interface{} {
 // 对照 cc-switch anthropic_response_to_responses_with_context。
 // model 参数是客户端原始 model 名（管线回传时已被改写回原名的场景之外兜底用）。
 // reg 是请求侧建立的工具注册表：tool_use 块据此还原 custom/namespace/tool_search 身份。
-func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *toolRegistry) map[string]interface{} {
+// triple 是搜索信封的归属三元组（nil = 不出搜索信封，如 Anthropic 口直接调用）。
+func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *toolRegistry, triple *searchTriple) map[string]interface{} {
 	id := objStr(msg, "id")
 	var responseID string
 	switch {
@@ -1064,6 +1498,7 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 
 	var output []interface{}
 	var textParts []interface{}
+	var lastSearchUse map[string]interface{} // 最近一个 server_tool_use 块（搜索结果块到达时配对封信封）
 	flushText := func() {
 		if len(textParts) == 0 {
 			return
@@ -1082,7 +1517,8 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 		blk := asObj(b)
 		switch objStr(blk, "type") {
 		case "text":
-			if t := objStr(blk, "text"); t != "" {
+			// 搜索 query 回声行整行删除（见 stripSearchQueryEcho）；剥完为空则丢弃。
+			if t := stripSearchQueryEcho(objStr(blk, "text")); strings.TrimSpace(t) != "" {
 				textParts = append(textParts, map[string]interface{}{
 					"type": "output_text", "text": t, "annotations": []interface{}{},
 				})
@@ -1124,6 +1560,21 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 			if item := webSearchCallItem(blk, responseID, len(output)); item != nil {
 				output = append(output, item)
 			}
+			// 搜索块信封：结果块到达时与前面的 server_tool_use 配对封袋，作为额外
+			// reasoning 项随行——客户端保管，下轮回放时还原（见 searchEnvelopePrefix）。
+			if objStr(blk, "type") == "server_tool_use" {
+				lastSearchUse = blk
+			} else if lastSearchUse != nil {
+				if enc := encodeSearchEnvelope(triple, lastSearchUse, blk); enc != "" {
+					output = append(output, map[string]interface{}{
+						"id":                fmt.Sprintf("rs_%s_env%d", responseID, len(output)),
+						"type":              "reasoning",
+						"summary":           []interface{}{},
+						"encrypted_content": enc,
+					})
+				}
+				lastSearchUse = nil
+			}
 		}
 	}
 	flushText()
@@ -1160,6 +1611,89 @@ func functionCallItem(itemID, status, callID, name, arguments string) map[string
 	}
 }
 
+// kimiSearchPreamble 是 Kimi（k3-256k）在请求带 web_search 工具时每轮响应开头白送的
+// 空搜索前言文本（query 为空）。在线探针实证其 anthropic 端点会发「空搜索三连」：
+// 此前言 text 块 + 无 id/input 的 server_tool_use + content 为空的 web_search_tool_result，
+// 哪怕模型根本没搜索。更麻烦的是模型会从历史里模仿这个模式：前言会重复多次并直接粘在
+// 正文开头（实测 "Search results for query: Search results for query: 我确认一下…"）。
+// 处理规则（下游响应与上游请求回放同套，见 stripSearchQueryEcho）：纯前言与
+// 「单条前言+query」的回声行整行删除（query 回声灌进上下文会诱发连续同类搜索）；
+// ≥2 条连续裸前言粘在正文前（模仿签名）剥光留正文；空的 web_search 结构不产出/不回放。
+const kimiSearchPreamble = "Search results for query: "
+
+// stripKimiSearchPreamble 去掉文本开头重复出现的前言，返回剩余部分。
+func stripKimiSearchPreamble(text string) string {
+	for strings.HasPrefix(text, kimiSearchPreamble) {
+		text = strings.TrimPrefix(text, kimiSearchPreamble)
+	}
+	return text
+}
+
+// countPreambleRun 返回文本开头连续完整前言的条数。
+func countPreambleRun(text string) int {
+	n := 0
+	for strings.HasPrefix(text, kimiSearchPreamble) {
+		text = strings.TrimPrefix(text, kimiSearchPreamble)
+		n++
+	}
+	return n
+}
+
+// stripRepeatedPreamble 是 stripKimiSearchPreamble 的克制版：只有开头连续重复 ≥2 条
+// （模型模仿的签名，实测均为 ×2/×3）才整段剥掉；恰好一条前言+文本是真搜索的 query
+// 展示位，原样保留。剥完为空/纯前言的丢弃由调用方负责。
+func stripRepeatedPreamble(text string) string {
+	if countPreambleRun(text) < 2 {
+		return text
+	}
+	return stripKimiSearchPreamble(text)
+}
+
+// isPreambleRun 报告流式累积文本是否仍可能是"纯前言"（前言的若干次重复 + 一个前言前缀）。
+// 满足则继续憋着不转发；一旦岔开（接的是正文）即可剥离前言后补发。
+func isPreambleRun(accum string) bool {
+	return strings.HasPrefix(kimiSearchPreamble, stripKimiSearchPreamble(accum))
+}
+
+// stripSearchQueryEcho 删除文本里的搜索 query 回声行：以「Search results for query: 」
+// 开头的整行（前缀+query 一起删，含无尾空格的裸前言形态）；行首粘连的重复裸前言
+// （模型模仿签名，≥2 条）按 stripRepeatedPreamble 规则剥光留同行正文。删除留下的
+// 行首空行一并去掉；不含回声行的文本经 Split/Join 恒等返回，一个字节都不动。
+// 纯函数、幂等：同一文本任何时刻处理结果一致——这是请求体前缀缓存稳定的前提，
+// 上游回放方向对每个请求、每条消息的每段文本无条件应用。
+func stripSearchQueryEcho(text string) string {
+	lines := strings.Split(text, "\n")
+	kept := lines[:0]
+	dropped := false
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, kimiSearchPreamble) {
+			if countPreambleRun(ln) >= 2 {
+				ln = stripRepeatedPreamble(ln) // 模仿签名：剥裸前言留同行正文
+			} else {
+				dropped = true // 单条前言开头 = query 回声行：整行删除
+				continue
+			}
+		} else if strings.TrimRight(ln, " \t\r") == strings.TrimSpace(kimiSearchPreamble) {
+			dropped = true // 无尾空格的裸前言
+			continue
+		}
+		kept = append(kept, ln)
+	}
+	if dropped {
+		for len(kept) > 0 && strings.TrimSpace(kept[0]) == "" {
+			kept = kept[1:] // 删除留下的行首空行
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
+// holdSearchQueryEchoText 报告流式累积文本是否仍需憋着不转发：仍在前言碎片跑道
+// （isPreambleRun），或按 stripSearchQueryEcho 剥完为空（回声行还没收完/块内还没有
+// 正文）——两种情况都不能发任何事件；岔出非空正文时补发才开始。
+func holdSearchQueryEchoText(accum string) bool {
+	return isPreambleRun(accum) || strings.TrimSpace(stripSearchQueryEcho(accum)) == ""
+}
+
 // webSearchCallItem 把 Anthropic server_tool_use / web_search_tool_result 块转成
 // Responses web_search_call 项。server_tool_use（带 query）转成 completed 的搜索调用；
 // web_search_tool_result 块本身不单独成项（结果已在 server_tool_use 的动作里表达不了
@@ -1170,15 +1704,17 @@ func webSearchCallItem(blk map[string]interface{}, responseID string, idx int) m
 		if objStr(blk, "name") != "web_search" {
 			return nil
 		}
-		action := map[string]interface{}{"type": "search"}
-		if q := objStr(asObj(blk["input"]), "query"); q != "" {
-			action["query"] = q
+		q := objStr(asObj(blk["input"]), "query")
+		if q == "" {
+			// 空搜索三连的 server_tool_use 无 id 无 input（见 kimiSearchPreamble）：
+			// 没有信息量，丢弃。真搜索必带 query；其配套结果块的 sources 项照常生成。
+			return nil
 		}
 		return map[string]interface{}{
 			"id":     fmt.Sprintf("ws_%s_%d", responseID, idx),
 			"type":   "web_search_call",
 			"status": "completed",
-			"action": action,
+			"action": map[string]interface{}{"type": "search", "query": q},
 		}
 	case "web_search_tool_result":
 		// 结果块：提取来源 URL 列表，作为一个 completed 调用项的 sources 呈现。
@@ -1198,6 +1734,45 @@ func webSearchCallItem(blk map[string]interface{}, responseID string, idx int) m
 			"status": "completed",
 			"action": map[string]interface{}{"type": "search", "sources": sources},
 		}
+	}
+	return nil
+}
+
+// searchBlocksFromResponsesItem 把回放历史里的搜索结构还原成 Anthropic 内容块。
+// web_search_call 调用项一律不还原：它的 id 是代理自造的（ws_+响应 id），上游搜索
+// 注册表从未登记，转成 server_tool_use 上行必 400——生产实证：搜索块出生 33 秒的
+// 追问（#3）与 54 分钟的追问（#19）第一尝试都被拒，fail-soft 连坐把信封还原的真
+// 搜索对一起剥掉，模型被迫重搜。搜索内容只由搜索信封承载（其块带原生注册 id，
+// 实测回放 200），调用项只是客户端侧的展示件。已是 Anthropic 形状的
+// server_tool_use/web_search_tool_result（防御性覆盖，id 为原生注册 id）有内容
+// 的原样上行，空壳（无 input/无 content）删除。
+func searchBlocksFromResponsesItem(item map[string]interface{}) []map[string]interface{} {
+	switch objStr(item, "type") {
+	case "web_search_call":
+		return nil
+	case "server_tool_use":
+		// 非 Responses 协议项（防御性覆盖）：已是 Anthropic 块形状，带 input 内容
+		// 的原样上行；空调用（Kimi 空搜索三连那种无 id 无 input 的壳）删除。
+		inp := asObj(item["input"])
+		if len(inp) == 0 {
+			return nil
+		}
+		return []map[string]interface{}{{
+			"type": "server_tool_use", "id": objStr(item, "id"),
+			"name": objStr(item, "name"), "input": inp,
+		}}
+	case "web_search_tool_result":
+		content := asArr(item["content"])
+		if len(content) == 0 {
+			return nil
+		}
+		tid := objStr(item, "tool_use_id")
+		if tid == "" {
+			tid = objStr(item, "id")
+		}
+		return []map[string]interface{}{{
+			"type": "web_search_tool_result", "tool_use_id": tid, "content": content,
+		}}
 	}
 	return nil
 }
