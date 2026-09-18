@@ -324,19 +324,19 @@ func TestRecordCacheObsLocked(t *testing.T) {
 	cacheObsMap = map[string]*cacheObsEntry{}
 
 	recordCacheObsLocked("u|m", obsAlive, 5*time.Minute)
-	if cacheObsMap["u|m"].changedAt.IsZero() {
-		t.Error("首次成界应记结论时间 changedAt")
+	if cacheObsMap["u|m"].aliveAt.IsZero() {
+		t.Error("首次成界应记下界形成时间 aliveAt")
 	}
-	stale := time.Now().Add(-time.Hour) // 哨兵：数值不变的观测必须保持 changedAt 不动
+	stale := time.Now().Add(-time.Hour) // 哨兵：数值不变的观测必须保持形成时间不动
 
-	cacheObsMap["u|m"].changedAt = stale
-	recordCacheObsLocked("u|m", obsAlive, 3*time.Minute) // 较小不抬低下界，结论时间不重置
-	if !cacheObsMap["u|m"].changedAt.Equal(stale) {
-		t.Error("下界数值未变化不应重置结论时间")
+	cacheObsMap["u|m"].aliveAt = stale
+	recordCacheObsLocked("u|m", obsAlive, 3*time.Minute) // 较小不抬低下界，形成时间不重置
+	if !cacheObsMap["u|m"].aliveAt.Equal(stale) {
+		t.Error("下界数值未变化不应重置形成时间")
 	}
-	recordCacheObsLocked("u|m", obsAlive, 9*time.Minute) // 较大抬高下界，结论时间重置
-	if !cacheObsMap["u|m"].changedAt.After(stale) {
-		t.Error("下界抬高应重置结论时间")
+	recordCacheObsLocked("u|m", obsAlive, 9*time.Minute) // 较大抬高下界，形成时间重置
+	if !cacheObsMap["u|m"].aliveAt.After(stale) {
+		t.Error("下界抬高应重置形成时间")
 	}
 	recordCacheObsLocked("u|m", obsDead, 20*time.Minute)
 	recordCacheObsLocked("u|m", obsDead, 30*time.Minute) // 较大不抬升上界
@@ -356,19 +356,23 @@ func TestRecordCacheObsLocked(t *testing.T) {
 		t.Errorf("另一上游键应独立累积，实际 %+v", e2)
 	}
 
-	// TTL 中途变长：新存活观测 25min 越过旧上界 20min → 上界作废，下界照常抬高；观测数归零重计（本次为第 1 次）
-	cacheObsMap["u|m"].changedAt = stale
+	// TTL 中途变长：新存活观测 25min 越过旧上界 20min → 上界作废（形成时间同步清零），下界照常抬高；观测数归零重计（本次为第 1 次）
+	cacheObsMap["u|m"].aliveAt = stale
 	recordCacheObsLocked("u|m", obsAlive, 25*time.Minute)
 	if e.aliveMax != 25*time.Minute || e.deadMin != 0 {
 		t.Errorf("新存活越过旧上界：上界应作废，实际 aliveMax=%v deadMin=%v", e.aliveMax, e.deadMin)
 	}
+	if !e.deadAt.IsZero() {
+		t.Error("上界作废重测时其形成时间应清零（界不存在则形成时间不存在）")
+	}
 	if e.samples != 1 {
 		t.Errorf("交叉作废后 samples = %d，期望 1（归零重计，本次观测为第 1 次）", e.samples)
 	}
-	if !e.changedAt.After(stale) {
-		t.Error("上界作废重测应重置结论时间")
+	if !e.aliveAt.After(stale) {
+		t.Error("下界抬高应重置下界形成时间")
 	}
-	// 与下界不矛盾的死亡观测照常成立（活过 25min、40min 时已死，两侧并存），次数累加
+	// 与下界不矛盾的死亡观测照常成立（活过 25min、40min 时已死，两侧并存），次数累加；下界形成时间不动
+	cacheObsMap["u|m"].aliveAt = stale
 	recordCacheObsLocked("u|m", obsDead, 40*time.Minute)
 	if e.aliveMax != 25*time.Minute || e.deadMin != 40*time.Minute {
 		t.Errorf("不矛盾的死亡应两侧并存，实际 aliveMax=%v deadMin=%v", e.aliveMax, e.deadMin)
@@ -376,22 +380,31 @@ func TestRecordCacheObsLocked(t *testing.T) {
 	if e.samples != 2 {
 		t.Errorf("不矛盾观测后 samples = %d，期望 2", e.samples)
 	}
-	// TTL 中途变短（或提前驱逐）：新死亡观测 10min 跌破旧下界 25min → 下界作废，观测数再归零
-	cacheObsMap["u|m"].changedAt = stale
+	if !e.aliveAt.Equal(stale) {
+		t.Error("新增死亡观测不应动下界形成时间")
+	}
+	if e.deadAt.IsZero() {
+		t.Error("上界成立应记上界形成时间 deadAt")
+	}
+	// TTL 中途变短（或提前驱逐）：新死亡观测 10min 跌破旧下界 25min → 下界作废（形成时间清零），观测数再归零
+	cacheObsMap["u|m"].deadAt = stale
 	recordCacheObsLocked("u|m", obsDead, 10*time.Minute)
 	if e.aliveMax != 0 || e.deadMin != 10*time.Minute {
 		t.Errorf("新死亡跌破旧下界：下界应作废，实际 aliveMax=%v deadMin=%v", e.aliveMax, e.deadMin)
 	}
+	if !e.aliveAt.IsZero() {
+		t.Error("下界作废重测时其形成时间应清零（界不存在则形成时间不存在）")
+	}
 	if e.samples != 1 {
 		t.Errorf("再次交叉作废后 samples = %d，期望 1", e.samples)
 	}
-	if !e.changedAt.After(stale) {
-		t.Error("下界作废重测应重置结论时间")
+	if !e.deadAt.After(stale) {
+		t.Error("上界压低应重置上界形成时间")
 	}
 }
 
 // TestSnapshotCacheObs 锁定实测缓存时间快照：键拆成 URL（剥 scheme）+模型、下界/上界格式化为
-// mm:ss（"00:30"，无观测侧留空）、观测次数透传、按 URL+模型排序；空表返回 nil。
+// mm:ss（"00:30"，≥1h 显 h:mm:ss 如 "1:42:00"，无观测侧留空）、观测次数透传、按 URL+模型排序；空表返回 nil。
 func TestSnapshotCacheObs(t *testing.T) {
 	oldMap := cacheObsMap
 	defer func() { cacheObsMap = oldMap }()
@@ -412,7 +425,7 @@ func TestSnapshotCacheObs(t *testing.T) {
 	}
 	// 排序：a.com < api.kimi.com < b.com
 	want := []cacheObsRow{
-		{URL: "a.com", Model: "m", Alive: "102:00", Dead: "", Samples: 3},
+		{URL: "a.com", Model: "m", Alive: "1:42:00", Dead: "", Samples: 3},
 		{URL: "api.kimi.com/coding", Model: "k3-256k", Alive: "23:30", Dead: "41:05", Samples: 12},
 		{URL: "b.com", Model: "d", Alive: "", Dead: "07:09", Samples: 2},
 	}
@@ -422,10 +435,15 @@ func TestSnapshotCacheObs(t *testing.T) {
 		}
 	}
 
-	// 结论形成列：changedAt 至今的时长（m:ss）；零值（尚无结论）留空
-	cacheObsMap["https://b.com|d"].changedAt = time.Now().Add(-90 * time.Second)
+	// ≥形成/<形成列：各自界形成至今的时长（m:ss）；界不存在时对应形成时间也留空，
+	// 即使条目里残留了该侧时间戳（防御：显示规则只看界是否存在）
+	cacheObsMap["https://b.com|d"].deadAt = time.Now().Add(-90 * time.Second)
+	cacheObsMap["https://b.com|d"].aliveAt = time.Now().Add(-3 * time.Minute) // 无下界，此戳不得显示
 	got = snapshotCacheObs()
-	if got[2].Age != "1:30" || got[0].Age != "" || got[1].Age != "" {
-		t.Errorf("结论形成列：b.com 应 1:30、无 changedAt 的两行应空，实际 %+v", got)
+	if got[2].DeadAge != "1:30" || got[2].AliveAge != "" {
+		t.Errorf("b.com 应 <形成 1:30、≥形成空（无下界），实际 %+v", got[2])
+	}
+	if got[0].AliveAge != "" || got[0].DeadAge != "" || got[1].AliveAge != "" || got[1].DeadAge != "" {
+		t.Errorf("无时间戳的两行两列形成时间应全空，实际 %+v", got)
 	}
 }

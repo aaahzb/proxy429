@@ -199,6 +199,98 @@ func TestResponsesToAnthropicThinkingBudget(t *testing.T) {
 	}
 }
 
+// TestResponsesToAnthropicThinkStyleOverride 锁定路由 thinking 参数（目标模型思考形态
+// 声明）对翻译判定的覆盖：auto 维持按客户端 model 名查表；budget 强制经典
+// enabled+budget_tokens（即使客户端别名叫 adaptive 表内模型）；adaptive 强制
+// adaptive+output_config.effort（即使客户端名不在表内）；强制后关思考仍允许
+// （cannotDisable 不再套用 fable/mythos 规则）。
+func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
+	mk := func(model, effort string) map[string]interface{} {
+		return map[string]interface{}{
+			"model":     model,
+			"input":     "hi",
+			"reasoning": map[string]interface{}{"effort": effort},
+		}
+	}
+
+	// auto：fable-5 表内 → adaptive + effort 映射（high→high）。
+	out, _, err := responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "")
+	if err != nil {
+		t.Fatalf("auto err: %v", err)
+	}
+	th := asObj(out["thinking"])
+	if objStr(th, "type") != "adaptive" || objStr(asObj(out["output_config"]), "effort") != "high" {
+		t.Errorf("auto fable-5: thinking=%v output_config=%v, want adaptive/high", th, out["output_config"])
+	}
+
+	// budget 强制：同为 fable-5 别名，路由声明 budget → enabled+16000（压顶），无 output_config。
+	out, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "budget")
+	if err != nil {
+		t.Fatalf("budget err: %v", err)
+	}
+	th = asObj(out["thinking"])
+	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+		t.Errorf("budget fable-5: thinking=%v, want enabled/16000", th)
+	}
+	if out["output_config"] != nil {
+		t.Errorf("budget 路径不应有 output_config: %v", out["output_config"])
+	}
+
+	// adaptive 强制：gpt-5-codex 不在表内，路由声明 adaptive → adaptive+effort high。
+	out, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "high"), nil, nil, "adaptive")
+	if err != nil {
+		t.Fatalf("adaptive err: %v", err)
+	}
+	th = asObj(out["thinking"])
+	if objStr(th, "type") != "adaptive" || objStr(asObj(out["output_config"]), "effort") != "high" {
+		t.Errorf("adaptive gpt-5-codex: thinking=%v output_config=%v, want adaptive/high", th, out["output_config"])
+	}
+
+	// 强制 adaptive + 显式关（effort none）→ disabled（cannotDisable 被覆盖，允许关）。
+	out, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "adaptive")
+	if err != nil {
+		t.Fatalf("adaptive none err: %v", err)
+	}
+	if objStr(asObj(out["thinking"]), "type") != "disabled" {
+		t.Errorf("adaptive+none: thinking=%v, want disabled", out["thinking"])
+	}
+
+	// budget 强制 + 显式关 → disabled。
+	out, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "none"), nil, nil, "budget")
+	if err != nil {
+		t.Fatalf("budget none err: %v", err)
+	}
+	if objStr(asObj(out["thinking"]), "type") != "disabled" {
+		t.Errorf("budget+none: thinking=%v, want disabled", out["thinking"])
+	}
+}
+
+// TestResponsesThinkMode 锁定状态页「API」列思考值的 Responses 口径：reasoning.effort 只显
+// 档位词（"effort·" 前缀多余——Responses 口径由列绿色承担），显式关闭值
+// （none/off/disabled，大小写不敏感）归并为 "关"；无 reasoning / 无 effort / reasoning 非对象都返回空（列显 -）。
+func TestResponsesThinkMode(t *testing.T) {
+	cases := []struct {
+		name string
+		body map[string]interface{}
+		want string
+	}{
+		{"无 reasoning 字段", map[string]interface{}{"model": "m"}, ""},
+		{"reasoning 非对象", map[string]interface{}{"reasoning": "high"}, ""},
+		{"无 effort", map[string]interface{}{"reasoning": map[string]interface{}{"summary": "auto"}}, ""},
+		{"effort high", map[string]interface{}{"reasoning": map[string]interface{}{"effort": "high"}}, "high"},
+		{"effort minimal", map[string]interface{}{"reasoning": map[string]interface{}{"effort": "minimal"}}, "minimal"},
+		{"effort none 归并为关", map[string]interface{}{"reasoning": map[string]interface{}{"effort": "none"}}, "关"},
+		{"effort OFF 大小写不敏感", map[string]interface{}{"reasoning": map[string]interface{}{"effort": "OFF"}}, "关"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := responsesThinkMode(tc.body); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResponsesToAnthropicToolChoiceAndTools(t *testing.T) {
 	body := map[string]interface{}{
 		"model": "gpt-5-codex",

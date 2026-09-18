@@ -65,6 +65,7 @@ type RouteRule struct {
 	NoSearch       bool                 `json:"no_search"`                  // 目标上游不支持搜索；请求带搜索工具时改走 search_fallback 兜底
 	EnhanceSearch  *EnhanceSearchConfig `json:"enhance_search,omitempty"`   // 增强搜索：非 nil 启用。请求带搜索工具时不调主力，改用本 route 上游走 kimi 摘要模式
 	URLResponseAPI string               `json:"url_response_api,omitempty"` // 原生 Responses API 上游 Base URL：非空时 Responses 监听口命中本路由的请求不翻译，原样透传到此（仅影响 Responses 口；Anthropic 口流量不受影响仍走 url）
+	Thinking       string               `json:"thinking,omitempty"`         // 目标模型的思考形态（仅 Responses 翻译流生效）：""/"auto"=按客户端 model 名查表；"adaptive"=强制 adaptive+effort；"budget"=强制 enabled+budget_tokens
 }
 
 // EnhanceSearchConfig 是 routes 条目内可选的增强搜索参数。route 命中且请求带搜索工具时，
@@ -186,6 +187,11 @@ func loadConfig(path string) (*Config, error) {
 	for i := range c.Routes {
 		if isReservedRoutePattern(c.Routes[i].Pattern) {
 			log.Printf("[配置] 警告：第 %d 条路由 pattern 全字撞保留名 %q（Codex 菜单保留名：* 兜底=Fallback、fast 通道=fast_route），该路由不生效，请改名", i+1, c.Routes[i].Pattern)
+		}
+		switch c.Routes[i].Thinking {
+		case "", "auto", "adaptive", "budget":
+		default:
+			return nil, fmt.Errorf("第 %d 条路由（pattern %q）的 thinking 值 %q 非法：只支持 auto / adaptive / budget", i+1, c.Routes[i].Pattern, c.Routes[i].Thinking)
 		}
 	}
 	return &c, nil
@@ -660,13 +666,17 @@ type flight struct {
 	searchPrompt   string           // step2 摘要指令文本（仅搜索摘要子流非空），供状态页在途流/完成流最前端显示
 	translated     string           // 翻译口来源标记（"responses"=翻译进来的流，"responses-raw"=route 配 url_response_api 的原生透传流），网页 API 列显示 [translate]/[Response]
 	countTokens    bool             // count_tokens 探针流（countTokensPath），响应只有 {"input_tokens":N}，网页 model 列显示 [count_tokens] 前缀
-	searchStripped atomic.Int32     // 剥掉的回放搜索块总数（时间规则剥+400 兜底剥；网页红标 [剥N]，拆分只写日志）
+	searchStripped atomic.Int32     // 剥掉的回放搜索块总数（对话水位剥+400 兜底剥；网页红标 [剥N]，拆分只写日志）
 	searchReplay   *searchReplayCtx // Responses 翻译口的搜索还原上下文（ctx 带入，仅 handler goroutine 读写）；400 兜底剥块时取还原时刻学对话水位
 
 	// 会话缓存跟踪（状态页"缓存年龄"列）：路由阶段一次性写入，addFinished 同 goroutine 读取。
 	convID      string // 会话标识（Anthropic 口取 metadata.user_id 内 session_id，Responses 口取 prompt_cache_key）；空则不参与
 	convAnchor  string // 锚定键后缀（"route:<pattern>"/"classifier"/"fast"，空=默认上游）：同会话同锚才互为同一条缓存 lineage
 	upstreamKey string // 上游归类键（路由后最终 base URL|实际发送模型，其他参数不看）：实测缓存存活观测的归类维度
+
+	// think 是实际发给上游的请求体里的思考配置最短形态（"关"/"开 <budget>"/"adaptive"/档位词），
+	// 状态页「API」列思考值用——哪套 API 的词汇由列颜色承担，不在文字里。空=请求体未带思考字段（列显 -）。
+	think string
 
 	toolMu    sync.Mutex
 	toolNames []string       // 响应流里工具调用的名字（按首次出现顺序；toolMu 保护）
@@ -940,6 +950,7 @@ type finishedFlight struct {
 	routeReason    int32  // 路由原因（route*），网页 model 列显示 [标签] 前缀用
 	status         int    // HTTP 状态码
 	gaveUp         bool   // 重试/预算用尽已透传兜底错误事件（此时 status 为 0），网页状态码列显 [重试尽]
+	attempts       int32  // 尝试次数（=重试次数+1；1 = 一把过无重试），网页状态码列 >1 时追加 [重试N次]
 	bytes          int64
 	stage          int32 // 结束时阶段
 	ended          time.Time
@@ -958,12 +969,13 @@ type finishedFlight struct {
 	translated     string  // 翻译口来源标记（"responses"=翻译，"responses-raw"=原生透传），网页 API 列 [translate]/[Response]
 	countTokens    bool    // count_tokens 探针流，网页 model 列 [count_tokens] 前缀
 	tools          string  // 工具调用标签（"[Read*1][Edit*3]"，无工具为空），网页 model 列追加显示
-	searchStripped int     // 剥掉的回放搜索块总数（时间规则剥+400 兜底剥；0=未剥），网页缓存命中列红标 [剥N]
+	searchStripped int     // 剥掉的回放搜索块总数（对话水位剥+400 兜底剥；0=未剥），网页缓存命中列红标 [剥N]
 	convKey        string  // 会话缓存锚定键（convID|convAnchor）；空则该流不参与"缓存年龄"显示与裁剪保护
 	// start 锚流开始时刻：缓存写入/刷新发生在上游处理输入（≈流开始）时，"缓存年龄"与裁剪保护窗口都锚它。
 	start       time.Time
 	obsKey      string // 实测缓存存活配对键（convID|upstreamKey）；空则不参与观测（黄灯 499/无会话/无归类键）
 	upstreamKey string // 上游归类键（路由后 url|模型）：「缓存命中」弹窗实测表按此键归组
+	think       string // 实际发给上游的思考配置最短形态（状态页「API」列思考值）；空=请求体未带思考字段
 }
 
 var (
@@ -1028,6 +1040,7 @@ func addFinished(f *flight) {
 		routeReason:    f.routeReason.Load(),
 		status:         f.status,
 		gaveUp:         f.gaveUp,
+		attempts:       f.attempt.Load(),
 		bytes:          f.bytes.Load(),
 		stage:          f.stage.Load(),
 		ended:          now,
@@ -1051,6 +1064,7 @@ func addFinished(f *flight) {
 		start:          f.start,
 		obsKey:         obsKey,
 		upstreamKey:    f.upstreamKey,
+		think:          f.think,
 	}
 	finishedMu.Lock()
 	// 实测缓存存活观测：与同会话同上游的上一条完成流配对（finished 升序，倒扫取最近一条同键）。
@@ -1111,8 +1125,10 @@ type cacheObsEntry struct {
 	deadMin  time.Duration // 死亡观测的最小间隔（实测上界：缓存没活过这么久）；0 = 尚无死亡观测
 	samples  int           // 观测次数（存活+死亡合计）
 
-	// changedAt 是当前上下界结论最后变化的时刻：任一界数值变化（含作废重测）即重置。
-	changedAt time.Time
+	// aliveAt/deadAt 是各自界数值最后变化的时刻：该界数值变化（含矛盾作废）即重置，
+	// 作废重测侧清零——界不存在时对应形成时间也不存在。
+	aliveAt time.Time
+	deadAt  time.Time
 }
 
 var cacheObsMap = map[string]*cacheObsEntry{} // 键 = upstreamKey（url|模型）；finishedMu 同护
@@ -1139,6 +1155,7 @@ func classifyCacheObservation(prevCacheRead, curCacheRead, curInput, curCacheCre
 // recordCacheObsLocked 把一次观测累积进该上游条目：存活取 max（下界只升），死亡取 min（上界只降）。
 // 两侧矛盾时以较新的观测为准、被否的一侧作废重测：上游缓存时间中途变长（新存活观测越过旧上界）
 // 则上界作废；中途变短或被提前驱逐（新死亡观测跌破旧下界）则下界作废。
+// 每界的形成时间各自记账：该界数值变化（含被作废清零）才动，仅新增支撑观测不动。
 // 不变式：两侧都非零时 aliveMax < deadMin（显示永不倒挂）。调用方须持 finishedMu。
 func recordCacheObsLocked(key string, kind cacheObsKind, interval time.Duration) {
 	e := cacheObsMap[key]
@@ -1146,31 +1163,28 @@ func recordCacheObsLocked(key string, kind cacheObsKind, interval time.Duration)
 		e = &cacheObsEntry{}
 		cacheObsMap[key] = e
 	}
-	changed := false // 上下界任一数值变化（含作废）才重置结论时间；仅新增支撑观测不重置
+	now := time.Now()
 	if kind == obsAlive {
 		if interval > e.aliveMax {
 			e.aliveMax = interval
-			changed = true
+			e.aliveAt = now // 下界数值变化才重起算
 		}
 		if e.deadMin > 0 && e.deadMin <= e.aliveMax {
 			e.deadMin = 0 // 旧上界被新存活证据否定（TTL 变长/旧上界是噪声），作废重测
+			e.deadAt = time.Time{}
 			e.samples = 0 // 观测次数同步归零重计：只计支撑当前上下界的观测
-			changed = true
 		}
 	}
 	if kind == obsDead {
 		if e.deadMin == 0 || interval < e.deadMin {
 			e.deadMin = interval
-			changed = true
+			e.deadAt = now // 上界数值变化才重起算
 		}
 		if e.aliveMax >= e.deadMin {
 			e.aliveMax = 0 // 旧下界被新死亡证据否定（TTL 变短/提前驱逐），作废重测
-			e.samples = 0  // 观测次数同步归零重计：只计支撑当前上下界的观测
-			changed = true
+			e.aliveAt = time.Time{}
+			e.samples = 0 // 观测次数同步归零重计：只计支撑当前上下界的观测
 		}
-	}
-	if changed {
-		e.changedAt = time.Now()
 	}
 	e.samples++
 }
@@ -1196,8 +1210,10 @@ type cacheObsRow struct {
 	Dead    string `json:"dead"`    // 上界读法，无死亡观测为 ""
 	Samples int    `json:"samples"` // 观测次数（存活+死亡合计）
 
-	// Age 是当前上下界结论形成至今的时长（任一界数值变化即重新起算），m:ss 递增。
-	Age string `json:"age"`
+	// AliveAge/DeadAge 是各自界数值形成至今的时长（该界数值变化即重新起算），m:ss 递增；
+	// 对应界无观测（Alive/Dead 为 ""）时同样为 ""。
+	AliveAge string `json:"aliveAge"`
+	DeadAge  string `json:"deadAge"`
 }
 
 // snapshotCacheObs 返回全部上游的实测缓存存活快照，按 URL+模型排序（显示稳定）。
@@ -1216,12 +1232,15 @@ func snapshotCacheObs() []cacheObsRow {
 		row := cacheObsRow{URL: url, Model: model, Samples: e.samples}
 		if e.aliveMax > 0 {
 			row.Alive = fmtObsDur(e.aliveMax)
+			if !e.aliveAt.IsZero() {
+				row.AliveAge = fmtCacheAge(now.Sub(e.aliveAt))
+			}
 		}
 		if e.deadMin > 0 {
 			row.Dead = fmtObsDur(e.deadMin)
-		}
-		if !e.changedAt.IsZero() {
-			row.Age = fmtCacheAge(now.Sub(e.changedAt))
+			if !e.deadAt.IsZero() {
+				row.DeadAge = fmtCacheAge(now.Sub(e.deadAt))
+			}
 		}
 		out = append(out, row)
 	}
@@ -2380,6 +2399,60 @@ func extractConvID(body []byte) string {
 	return ""
 }
 
+// extractThinkMode 提取 Anthropic 格式请求体里的思考配置，供状态页「API」列思考值显示
+// 实际发给上游的形态（调用点在分类器关思考改写之后；翻译口传进来的是映射后的 body）。
+// 值取最短形态（词汇口径由列颜色承担，不靠前缀文字）：
+// thinking.type=disabled → "关"；enabled → "开 <budget_tokens>"（无预算只显 "开"）；
+// adaptive 无档 → "adaptive"，带 output_config.effort → 只显档位词（"high"/"max"…）；
+// 只有 output_config.effort 没有 thinking → 同样只显档位词；未知 type 原样显示。
+// 无 thinking/output_config 字段返回空（列显 -）。
+// 复用 locateTopFields 只 unmarshal 相关小对象，不整体解析 body；只读不改。
+func extractThinkMode(body []byte) string {
+	spans, ok := locateTopFields(body)
+	if !ok {
+		return ""
+	}
+	mode := ""
+	effort := ""
+	for _, s := range spans {
+		switch s.name {
+		case "thinking":
+			var t struct {
+				Type   string `json:"type"`
+				Budget int64  `json:"budget_tokens"`
+			}
+			if err := json.Unmarshal(body[s.valStart:s.valEnd], &t); err != nil {
+				continue
+			}
+			switch t.Type {
+			case "disabled":
+				mode = "关"
+			case "enabled":
+				if t.Budget > 0 {
+					mode = fmt.Sprintf("开 %d", t.Budget)
+				} else {
+					mode = "开"
+				}
+			default:
+				mode = t.Type // adaptive 及未知类型原样显示
+			}
+		case "output_config":
+			var oc struct {
+				Effort string `json:"effort"`
+			}
+			if err := json.Unmarshal(body[s.valStart:s.valEnd], &oc); err == nil {
+				effort = oc.Effort
+			}
+		}
+	}
+	// 档位词独显：adaptive 带档与仅 effort 都归到档位本身（"adaptive·high" 这类前缀是冗余的，
+	// 网页用颜色区分这是哪套 API 的词汇）。
+	if effort != "" && (mode == "" || mode == "adaptive") {
+		return effort
+	}
+	return mode
+}
+
 // replaceModelValue 把请求体 "model" 字段的值替换为 newModel，供路由命中时改写请求体。
 // 复用 locateModel 定位值区间后做字节拼接；长度变化由后续 bytes.NewReader 重算 Content-Length。
 // 参数 body：原请求体；newModel：目标模型名；返回改写后的新 body。未定位到 model 字段时原样返回。
@@ -3059,6 +3132,7 @@ func searchAndRespond(w http.ResponseWriter, body []byte, sf *SearchRoute, f *fl
 	}
 	searchDebugWrite(fid, "step1_req.json", step1Body)
 	step1F := newSearchSubFlight("搜索step1·" + sf.Model)
+	step1F.think = extractThinkMode(step1Body) // 状态页「API」列思考值 = 实际发给上游的配置
 	r1, r1Raw, err := searchPostFlight(sf.URL, sf.API, step1Body, step1F, false, sf.Model)
 	flights.unregister(step1F.id)
 	addFinished(step1F)
@@ -3135,6 +3209,7 @@ func searchAndRespond(w http.ResponseWriter, body []byte, sf *SearchRoute, f *fl
 		searchDebugWrite(fid, att.label+"_req.json", step2Body)
 		step2F := newSearchSubFlight(att.label + "·" + sf.Model)
 		step2F.searchPrompt = instr
+		step2F.think = extractThinkMode(step2Body) // 状态页「API」列思考值 = 实际发给上游的配置
 		r2, r2Raw, err := searchPostFlight(sf.URL, sf.API, step2Body, step2F, true, sf.Model)
 		flights.unregister(step2F.id)
 		addFinished(step2F)
@@ -3760,14 +3835,19 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if v, ok := r.Context().Value(ctxKeyConvID).(string); ok {
 		f.convID = v
 	}
-	// Responses 翻译口带来的搜索还原上下文：时间规则剥块计数进 flight（[剥N] 显示，
-	// 日志写明拆分——超龄/对话水位各剥多少）；replay 指针留在 flight 上，
-	// 400 兜底剥块时取还原时刻学对话水位（见转发循环的 tool_call_id 分支）。
+	// responses-raw 透传口经 context 带思考模式（reasoning.effort 原样——透传零修改，
+	// 上游收到的就是它；翻译口/直连口的思考值在下面改写完成后从 Anthropic body 提取）。
+	if v, ok := r.Context().Value(ctxKeyThink).(string); ok {
+		f.think = v
+	}
+	// Responses 翻译口带来的搜索还原上下文：水位主动剥块计数进 flight（[剥N] 显示）；
+	// replay 指针留在 flight 上，400 兜底剥块时取还原时刻学对话水位
+	// （见转发循环的 tool_call_id 分支）。
 	if v, ok := r.Context().Value(ctxKeySearchReplay).(*searchReplayCtx); ok && v != nil {
 		f.searchReplay = v
-		if n := v.proactiveAge + v.proactiveCutoff; n > 0 {
-			f.searchStripped.Store(int32(n))
-			log.Printf("[剥块] #%d 时间规则剥 %d 个回放搜索块（超龄 %d、对话水位 %d）", f.id, n, v.proactiveAge, v.proactiveCutoff)
+		if v.proactiveCutoff > 0 {
+			f.searchStripped.Store(int32(v.proactiveCutoff))
+			log.Printf("[剥块] #%d 对话水位剥 %d 个回放搜索块", f.id, v.proactiveCutoff)
 		}
 	}
 	// count_tokens 探针打标记：完成流的原始内容只有 {"input_tokens":N}，
@@ -3821,6 +3901,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		stats.classifierHits.Add(1) // 命中即计：分流/关思考与否都统计（观测 Claude Code 安全判断请求量）
 	}
 	body = maybeRewriteClassifier(body)
+
+	// 状态页「API」列思考值 = 实际发给上游的思考配置：在分类器改写之后提取，翻译口看到的也是
+	// 映射后的 thinking（如 Codex effort high → 开 16384），不是客户端发下来的原样。
+	// responses-raw 透传 body 是 Responses 格式（无 thinking 字段），其 reasoning.effort
+	// 已在上面由 ctx 带上，这里不覆盖。
+	if f.think == "" {
+		f.think = extractThinkMode(body)
+	}
 
 	// 1.6 路由匹配。
 	// 优先级：分类器路由 > fast 路由 > model 路由（按 routes 通配）。

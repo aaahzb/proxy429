@@ -37,6 +37,15 @@ type ctxKeyConvIDT struct{}
 
 var ctxKeyConvID ctxKeyConvIDT
 
+// ctxKeyThink 是内部请求 context 的键：把透传分支的思考模式（reasoning.effort 原样，
+// 状态页「API」列思考值）递给主 handler——透传 body 是 Responses 格式，handler 里的
+// extractThinkMode 认不出（无 thinking 字段），故由 context 单独携带。
+// 翻译分支不用：翻译后 body 的 thinking 就是实际发上游的，handler 直接提取。
+// 同 ctxKeyTranslated：用 context 不用 header，不会漏到上游。
+type ctxKeyThinkT struct{}
+
+var ctxKeyThink ctxKeyThinkT
+
 // ctxKeyTranslated 的取值：flight.translated 同款三态——
 // translatedResponses 表示 Responses 请求被翻译成 Anthropic 走主管线（API 列 [translate]）；
 // translatedResponsesRaw 表示命中路由配了 url_response_api，Responses 原文透传不翻译（API 列 [Response]）。
@@ -109,23 +118,33 @@ func predictSearchTriple(c *Config, r *http.Request, model string) *searchTriple
 	if fr := c.FastRoute; fr != nil && fr.URL != "" && fr.Model != "" && model == "fast_route" {
 		return newSearchTriple(fr.URL, fr.Model, effectiveKey(fr.API, r))
 	}
+	if rr := matchRouteRule(c, model); rr != nil {
+		m := rr.Model
+		if m == "" {
+			m = model
+		}
+		return newSearchTriple(rr.URL, m, effectiveKey(rr.API, r))
+	}
+	if c.Upstream == "" {
+		return nil
+	}
+	return newSearchTriple(c.Upstream, model, effectiveKey("", r))
+}
+
+// matchRouteRule 返回第一条命中 model 的路由（跳过保留名 pattern），未命中返回 nil。
+// 翻译期预测（搜索三元组、路由 thinking 形态）共用这一个匹配点，与主 handler 的
+// 路由循环同序同规则。注意 fast 字面名通道不经此匹配（调用方各自先判 fast）。
+func matchRouteRule(c *Config, model string) *RouteRule {
 	for i := range c.Routes {
 		rr := &c.Routes[i]
 		if isReservedRoutePattern(rr.Pattern) {
 			continue
 		}
 		if matchModel(rr.Pattern, model) {
-			m := rr.Model
-			if m == "" {
-				m = model
-			}
-			return newSearchTriple(rr.URL, m, effectiveKey(rr.API, r))
+			return rr
 		}
 	}
-	if c.Upstream == "" {
-		return nil
-	}
-	return newSearchTriple(c.Upstream, model, effectiveKey("", r))
+	return nil
 }
 
 // effectiveKey 算上游请求实际生效的鉴权 token：路由 key 非空用路由 key，
@@ -177,6 +196,10 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 思考模式（状态页「API」列思考值）：仅透传分支用——透传零修改，上游收到的 reasoning.effort
+	// 就是它；翻译分支不走这里（翻译后 body 的 thinking 由主 handler 从最终 body 提取）。
+	think := responsesThinkMode(body)
+
 	// 原生透传预检：model 命中的路由配了 url_response_api 时，Responses 原文不翻译，
 	// 原样交给主 handler——路由循环里的透传分支会把上游切成该路由的 url_response_api。
 	// 监控流/统计/重试管线与翻译流完全相同（主 handler 按 ctx 标记换 Responses 口径解析）。
@@ -186,6 +209,9 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyTranslated, translatedResponsesRaw))
 		if convID != "" {
 			r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyConvID, convID))
+		}
+		if think != "" {
+			r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyThink, think))
 		}
 		r2.Method = http.MethodPost
 		r2.URL.Path = "/v1/responses"
@@ -200,7 +226,13 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	// 随内部请求下发，主 handler 把剥块计数进 flight（[剥N] 显示），
 	// 400 兜底剥块时拿还原时刻学对话水位。
 	replay := &searchReplayCtx{convID: convID}
-	anth, reg, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay)
+	// 路由声明的思考形态（thinking 参数）：翻译时只知道客户端 model 名，adaptive/budget
+	// 判定默认查客户端名的映射表——目标模型能力与此不一致时按路由配置覆盖。
+	thinkStyle := ""
+	if rr := matchRouteRule(c, origModel); rr != nil {
+		thinkStyle = rr.Thinking
+	}
+	anth, reg, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle)
 	if err != nil {
 		writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -283,13 +315,16 @@ func isMeaningfulText(s string) bool { return strings.TrimSpace(s) != "" }
 // 对照 cc-switch responses_request_to_anthropic。返回的工具注册表记录 custom/
 // namespace/tool_search 工具的原始身份，响应翻译（流式与非流式）据此拆包。
 func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, *toolRegistry, error) {
-	return responsesToAnthropicTriple(body, nil, nil)
+	return responsesToAnthropicTriple(body, nil, nil, "")
 }
 
 // responsesToAnthropicTriple 同 responsesToAnthropic，额外带本请求的路由预测三元组
-// （搜索信封还原的比对基准；nil = 预测不了，信封一律放行）与搜索还原上下文
-// （时间规则剥块计数/对话水位/还原时刻收集；nil = 只转换不统计）。
-func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx) (map[string]interface{}, *toolRegistry, error) {
+// （搜索信封还原的比对基准；nil = 预测不了，信封一律放行）、搜索还原上下文
+// （时间规则剥块计数/对话水位/还原时刻收集；nil = 只转换不统计）与路由声明的目标
+// 模型思考形态 thinkStyle（""/"auto"=按客户端 model 名查表；"adaptive"=强制 adaptive；
+// "budget"=强制 enabled+budget_tokens——路由 thinking 参数，解决路由目标模型与客户端
+// 别名的思考能力不一致，如客户端叫 claude-fable-5 实际路由到只支持 budget 的 Kimi）。
+func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx, thinkStyle string) (map[string]interface{}, *toolRegistry, error) {
 	result := map[string]interface{}{}
 	if model := objStr(body, "model"); model != "" {
 		result["model"] = model
@@ -360,12 +395,25 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 
 	// reasoning.effort → thinking。自适应模型（usesAdaptiveThinking 映射表）走
 	// thinking:{type:"adaptive"} + output_config.effort；其余模型走 enabled+budget_tokens。
-	// 判定用客户端发来的 model 名（路由改写在更后面的 handler 里发生），与 cc-switch
+	// 判定默认用客户端发来的 model 名（路由改写在更后面的 handler 里发生），与 cc-switch
 	// 读 body.model 一致。对照 transform_codex_anthropic.rs 312-367。
+	// thinkStyle 非 auto 时按路由声明覆盖判定结果：目标模型能力与客户端别名不一致时
+	// （如别名叫 claude-fable-5 实际路由到只支持 budget 的上游）以路由配置为准。
 	effort := objStr(asObj(body["reasoning"]), "effort")
 	model := objStr(body, "model")
 	adaptiveModel := usesAdaptiveThinking(model)
 	cannotDisable := thinkingCannotBeDisabled(model)
+	switch thinkStyle {
+	case "adaptive":
+		// 路由声明目标模型支持 adaptive：强制 adaptive 口径（关思考仍允许——
+		// 目标模型的真实能力由配置方负责，不再套 fable/mythos 的关不掉规则）。
+		adaptiveModel = true
+		cannotDisable = false
+	case "budget":
+		// 路由声明目标模型只支持经典 enabled+budget_tokens。
+		adaptiveModel = false
+		cannotDisable = false
+	}
 	explicitlyDisabled := reasoningExplicitlyDisabled(effort)
 	adaptiveEffort := codexEffortToAnthropic(effort)
 	adaptiveShouldThink := adaptiveModel && (adaptiveThinkingIsDefault(model) || adaptiveEffort != "")
@@ -578,25 +626,25 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 				// nil = 本请求预测不了路由 key，解不开混淆自然跳过（v1 的放行
 				// 分支随明文 payload 一起退役）。
 				if reqTriple == nil || reqTriple.sameOrigin(tri) {
-					// 时间规则主动剥（不撞 400 不烧重试）：封入超 searchEnvelopeMaxAge
-					// （无 ts 的老信封同此），或本对话已学到更短的水位且它比水位老。
+					// 水位主动剥（不撞 400 不烧重试）：本对话已学到水位时，不比水位
+					// 新的信封默认全剥（注册表按龄淘汰，撞过 400 说明最老的死了，
+					// 同龄与更老的必死）。不设固定年龄上限——实测封入 1.7h 的 id
+					// 仍存活，固定上限会误杀活信封。无 ts 的老信封（v2 初版，全部
+					// 早于 ts 时代）视同最老：有水位剥、无水位乐观还原。
 					// 剥块计数与还原时刻都记进 replay（nil = 只转换不统计）。
 					var cutoff time.Time
 					if replay != nil && replay.convID != "" {
 						cutoff = searchCutoffFor(replay.convID)
 					}
 					switch {
-					case ts.IsZero() || time.Since(ts) > searchEnvelopeMaxAge:
-						if replay != nil {
-							replay.proactiveAge += len(blocks)
-						}
-					case !cutoff.IsZero() && ts.Before(cutoff):
+					case !cutoff.IsZero() && (ts.IsZero() || !ts.After(cutoff)):
 						replay.proactiveCutoff += len(blocks)
 					default:
 						for _, b := range blocks {
 							pushBlock(&msgs, "assistant", b)
 						}
-						if replay != nil {
+						// 还原时刻只收带 ts 的：无 ts 信封参与取最老会毒化水位学习
+						if replay != nil && !ts.IsZero() {
 							replay.restored = append(replay.restored, ts)
 						}
 					}
@@ -1053,6 +1101,22 @@ func reasoningExplicitlyDisabled(effort string) bool {
 	return false
 }
 
+// responsesThinkMode 提取 Responses 请求体的思考配置，供状态页「API」列思考值显示
+// （透传分支用——透传零修改，reasoning.effort 就是实际发上游的）。
+// 值取最短形态（Responses 口径由列绿色承担，不带 "effort·" 前缀）：
+// reasoning.effort 只显档位词（"high"…），显式关闭值（none/off/disabled）归并为 "关"；
+// 无 reasoning/effort 字段返回空（列显 -）。
+func responsesThinkMode(body map[string]interface{}) string {
+	effort := objStr(asObj(body["reasoning"]), "effort")
+	if effort == "" {
+		return ""
+	}
+	if reasoningExplicitlyDisabled(effort) {
+		return "关"
+	}
+	return effort
+}
+
 // trailingTurnSupportsThinking 判断末尾一轮是否支持开 thinking。对照 cc-switch 同名函数：
 // 全新的 user 提问可以开；工具结果续轮只有紧邻的上一条 assistant 带签名
 // thinking/redacted_thinking 块（且 tool_result 的 id 全部与其 tool_use 配对）才可开——
@@ -1200,18 +1264,12 @@ func decodeThinkingEnvelope(s string) map[string]interface{} {
 // （Codex 会话记录）里躺着，不躺明文 url/模型/key 哈希（用户要求，混淆非加密）。
 const searchEnvelopePrefix = "p429-ant-search-v2:"
 
-// searchEnvelopeMaxAge 是信封封入时刻的硬上限：超过就不还原（时间规则主动剥，
-// 不撞 400 不烧重试）。上游搜索 id 注册表有存活期，超龄信封还原必被拒。
-// 无 ts 字段的老信封（v2 初版）按超龄处理——一次性淘汰。
-const searchEnvelopeMaxAge = time.Hour
-
 // searchReplayCtx 是搜索信封还原的每次请求上下文（翻译期单 goroutine，免锁）：
-// convID 用于查/学对话水位；proactiveAge/proactiveCutoff 计数时间规则剥的块
-// （[剥N] 的时间部分，拆分只写日志）；restored 收集实际还原上行的信封封入
-// 时刻——400 兜底剥块时取最老的一个学成对话水位。
+// convID 用于查/学对话水位；proactiveCutoff 计数水位主动剥的块（[剥N] 的一部分，
+// 拆分只写日志）；restored 收集实际还原上行的信封封入时刻（无 ts 不收）——
+// 400 兜底剥块时取最老的一个学成对话水位。
 type searchReplayCtx struct {
 	convID          string
-	proactiveAge    int // 超 searchEnvelopeMaxAge 剥的块数
 	proactiveCutoff int // 对话水位剥的块数
 	restored        []time.Time
 }
@@ -1223,9 +1281,10 @@ type ctxKeySearchReplayT struct{}
 
 var ctxKeySearchReplay ctxKeySearchReplayT
 
-// searchCutoff 按对话记录信封水位（封入时刻下界）：比水位老的信封默认全剥。
-// 400 兜底剥块时学习（上游真实存活期可能短于 searchEnvelopeMaxAge，水位按对话
-// 自适应下探）；只升不降（水位越新剥得越多，旧信息已被新信息覆盖）。
+// searchCutoff 按对话记录信封水位（封入时刻下界）：不比水位新的信封默认全剥
+// （注册表按龄淘汰：撞过 400 说明最老的死了，同龄与更老的必死）。400 兜底
+// 剥块时学习——对搜索 id 真实存活期不设任何先验，完全按对话实测自适应；
+// 只升不降（水位越新剥得越多，旧信息已被新信息覆盖）。
 var searchCutoff = struct {
 	sync.Mutex
 	m map[string]time.Time
@@ -1321,7 +1380,7 @@ func encodeSearchEnvelope(t *searchTriple, useBlk, resBlk map[string]interface{}
 	payload, err := json.Marshal(map[string]interface{}{
 		"t":  t,
 		"b":  []map[string]interface{}{useBlk, resBlk},
-		"ts": time.Now().Unix(), // 封入时刻：还原侧按龄/对话水位剥块的依据
+		"ts": time.Now().Unix(), // 封入时刻：还原侧按对话水位剥块的依据
 	})
 	if err != nil {
 		return ""
@@ -1334,9 +1393,10 @@ func encodeSearchEnvelope(t *searchTriple, useBlk, resBlk map[string]interface{}
 }
 
 // decodeSearchEnvelope 识别搜索信封前缀并还原三元组、两个内容块与封入时刻 ts
-// （无 ts 字段的老信封返回零值——还原侧按超龄剥掉）。mask 是本请求路由预测的
-// key 派生掩码（nil/不对 → 异或出来不是 JSON，自然 ok=false——key 腿的比对
-// 就含在解混淆里）；不是我们的信封、或块形态不对，返回 ok=false。
+// （无 ts 字段的老信封返回零值——还原侧视同最老：有水位剥、无水位乐观还原）。
+// mask 是本请求路由预测的 key 派生掩码（nil/不对 → 异或出来不是 JSON，自然
+// ok=false——key 腿的比对就含在解混淆里）；不是我们的信封、或块形态不对，
+// 返回 ok=false。
 func decodeSearchEnvelope(s string, mask []byte) (*searchTriple, []map[string]interface{}, time.Time, bool) {
 	if !strings.HasPrefix(s, searchEnvelopePrefix) || len(mask) == 0 {
 		return nil, nil, time.Time{}, false

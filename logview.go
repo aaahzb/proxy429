@@ -111,7 +111,8 @@ type flightInfo struct {
 	HasFull      bool   `json:"hasFull,omitempty"`  // 仍持有完整输出副本（下载输出/交互式JSON 可用）
 	StageMs      int64  `json:"stageMs"`            // 当前灯色已持续的毫秒数（状态灯旁显示，灯色变化才清零）
 	Tools        string `json:"tools,omitempty"`    // 工具调用标签（"[Read*1][Edit*3]"，无工具省略；随转发实时累积）
-	Stripped     int    `json:"stripped,omitempty"` // 剥掉的回放搜索块总数（时间规则+400 兜底；0 省略），model 列红标 [剥N]
+	Stripped     int    `json:"stripped,omitempty"` // 剥掉的回放搜索块总数（对话水位+400 兜底；0 省略），model 列红标 [剥N]
+	Think        string `json:"think,omitempty"`    // 实际发给上游的思考配置最短形态（"关"/"开 N"/"adaptive"/档位词；口径由列颜色承担），空=未带思考字段（列显 -）
 }
 
 // logData 是 /__logs/data 返回的 JSON：最近日志 + 全量状态计数 + 在途流列表。
@@ -186,10 +187,11 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 			CountTokens:  f.countTokens,
 			SearchPrompt: f.searchPrompt,
 			Tools:        f.toolCallsTag(),             // 工具调用实时累积，在途流 model 列随 500ms 轮询逐步出现
-			Stripped:     int(f.searchStripped.Load()), // 时间规则剥块在流建立时即入账，400 兜底随转发增补
+			Stripped:     int(f.searchStripped.Load()), // 水位剥块在流建立时即入账，400 兜底随转发增补
 			ReqTrunc:     f.reqTrunc(),
 			HasFull:      f.hasFullContent(),
 			StageMs:      f.stageMs(),
+			Think:        f.think,
 		})
 	}
 	if d.Flights == nil {
@@ -729,9 +731,12 @@ func fmtCacheAge(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", s/60, s%60)
 }
 
-// fmtObsDur 把实测间隔格式化为 mm:ss（"00:30" / "23:30"，分钟零垫两位；超 99 分钟自然扩展为 "102:00"）。
+// fmtObsDur 把实测间隔格式化为 mm:ss（"00:30" / "23:30"，分钟零垫两位；≥1h 与缓存年龄同式 h:mm:ss，如 "4:44:13"）。
 func fmtObsDur(d time.Duration) string {
 	s := int(d.Seconds())
+	if s >= 3600 {
+		return fmtCacheAge(d)
+	}
 	return fmt.Sprintf("%02d:%02d", s/60, s%60)
 }
 
@@ -784,8 +789,10 @@ func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 			"routeReason": ff.routeReason,
 			"translated":  ff.translated,
 			"countTokens": ff.countTokens,
+			"think":       ff.think,
 			"status":      ff.status,
 			"gaveUp":        ff.gaveUp,
+			"attempts":      ff.attempts,
 			"bytes":       ff.bytes,
 			"total":         fmtMs(ff.totalMs),
 			"stage":       ff.stage,
@@ -983,13 +990,13 @@ const logViewerHTML = `<!DOCTYPE html>
   </div>
   <div class="cards" id="cards"></div>
   <div>在途流 <label style="margin-left:8px;color:#9a9a9a;font-weight:normal"><input type="checkbox" id="autoTrackChk" checked>自动跟踪最新</label> <label style="color:#9a9a9a;font-weight:normal">最多显示 <input type="number" id="maxFlightsInput" min="1" max="20" value="3" style="width:40px;background:#1e1e1e;color:#d4d4d4;border:1px solid #333;border-radius:3px;padding:2px 4px;font:inherit"> 个</label></div>
-  <table id="flights"><thead><tr><th></th><th>#</th><th>model</th><th>API</th><th>字节</th><th>状态</th></tr></thead><tbody></tbody></table>
+  <table id="flights"><thead><tr><th></th><th>#</th><th>model</th><th>API<span class="thq" title="协议来源：橙 [Anthropic] = Anthropic 口原生流量、紫 [translate] = Responses 口翻译成 Anthropic、绿 [Response] = Responses 口原生透传。名后 [值] = 实际发给上游的思考配置最短形态，其颜色 = 词汇口径（思考是针对上游的：非透传流上游收到的都是 Anthropic 格式）——橙 = Anthropic thinking（直连原样或翻译映射后）、绿 = Responses reasoning（仅透传，effort 原样）。值：关 = thinking 关或 effort none/off；开 N = enabled+budget_tokens N；adaptive = 自适应无档；low/high/max 等档位词 = adaptive 的 effort 或（绿色时）reasoning.effort 原值；无 [值] = 请求体未带思考字段">?</span></th><th>字节</th><th>状态</th></tr></thead><tbody></tbody></table>
   <div id="flightViewWrap" style="display:none;margin-top:8px">
     <div>流 #<span id="flightViewId"></span> <span id="flightViewKind">输出</span> <button id="flightViewWhatBtn" class="ghost" style="display:none">看请求体</button> <button id="flightViewRawBtn" class="ghost">显示原始</button> <button id="flightViewDlBtn" class="ghost" style="display:none">下载请求体</button> <button id="flightViewDlOutBtn" class="ghost" style="display:none">下载输出</button> <button id="flightViewTreeBtn" class="ghost" style="display:none">交互式JSON</button> <button id="flightViewClose" class="ghost">关闭</button></div>
     <div id="flightView" style="max-height:300px;overflow:auto;background:#1e1e1e;border:1px solid #333;padding:8px"></div>
   </div>
   <div style="margin-top:10px">最近完成的流</div>
-  <table id="finishedFlights"><thead><tr><th>#</th><th>model</th><th>API</th><th>字节</th><th>总时间</th><th>状态码</th><th>缓存命中</th><th>缓存年龄<span class="thq" title="该会话+路由最近一次缓存写入距现在的时长（m:ss 递增）。显示方括号且数字冻结（如 [4:32]）时：同会话同路由有一条正在进行的流刚刷新了缓存，方括号内是刷新那一刻的年龄；该流完成后恢复递增（新锚）。上游缓存真实存活期是动态的——点击「缓存命中」卡片，弹窗内有各上游（按 URL+模型归类）实测的缓存存活时间可对照">?</span></th><th>首字</th><th>tok/s</th><th>结束</th></tr></thead><tbody></tbody></table>
+  <table id="finishedFlights"><thead><tr><th>#</th><th>model</th><th>API<span class="thq" title="协议来源：橙 [Anthropic] = Anthropic 口原生流量、紫 [translate] = Responses 口翻译成 Anthropic、绿 [Response] = Responses 口原生透传。名后 [值] = 实际发给上游的思考配置最短形态，其颜色 = 词汇口径（思考是针对上游的：非透传流上游收到的都是 Anthropic 格式）——橙 = Anthropic thinking（直连原样或翻译映射后）、绿 = Responses reasoning（仅透传，effort 原样）。值：关 = thinking 关或 effort none/off；开 N = enabled+budget_tokens N；adaptive = 自适应无档；low/high/max 等档位词 = adaptive 的 effort 或（绿色时）reasoning.effort 原值；无 [值] = 请求体未带思考字段">?</span></th><th>字节</th><th>总时间</th><th>状态码</th><th>缓存命中</th><th>缓存年龄<span class="thq" title="该会话+路由最近一次缓存写入距现在的时长（m:ss 递增）。显示方括号且数字冻结（如 [4:32]）时：同会话同路由有一条正在进行的流刚刷新了缓存，方括号内是刷新那一刻的年龄；该流完成后恢复递增（新锚）。上游缓存真实存活期是动态的——点击「缓存命中」卡片，弹窗内有各上游（按 URL+模型归类）实测的缓存存活时间可对照">?</span></th><th>首字</th><th>tok/s</th><th>结束</th></tr></thead><tbody></tbody></table>
 </div>
 
 <div class="pane" id="pane-logs">
@@ -1035,7 +1042,7 @@ const logViewerHTML = `<!DOCTYPE html>
       <p>顶层配置 <code>responses_listen</code>（空 = 不启用；配置模板默认演示 <code>127.0.0.1:8081</code>）设为如 <code>127.0.0.1:8081</code> 后，代理在该地址额外开一个 OpenAI Responses API 端点（<code>/v1/responses</code>）：把 Codex CLI 等只说 Responses 协议的工具接到 Anthropic 上游。请求被翻译成 Anthropic Messages 走主管线（路由/重试/本控制台监控照常生效），响应翻译回 Responses（客户端 stream:true 拿 SSE 事件流，false 拿一次性 JSON）。</p>
       <p>工具里的 model 名照常参与路由匹配：在 routes 加一条如 <code>gpt-5*</code> 即可指定上游与改写模型。改动保存重载即生效（监听口随配置动态启停）；与主端口一样永远仅本机可连。</p>
       <p><b>原生透传 url_response_api</b>：route 条目配了 <code>url_response_api</code> 后，Responses 口命中该 route 的请求<b>不再翻译</b>，Responses 原文直接透传到该字段指定的原生 Responses 上游（base 填到 <code>…/coding</code> 或 <code>…/v1</code> 即可，代理自动补 <code>/v1/responses</code>；model 改写、key 覆盖、重试与本控制台监控统计照常）。适合 OpenAI 官方等原生完整实现 Responses 的上游——少一层翻译，缓存与计费口径和官方直连一致。已知限制：透传不改请求体（仅路由 model 改写照常），上游须接受客户端原样发来的全部工具——Codex 桌面端恒带的 tool_search 目前被 Kimi 拒绝（400），Kimi 待其支持后启用、期间走 url 翻译口。API 列一眼区分协议来源：橙色 <code>[Anthropic]</code> = Anthropic 口原生流量，绿色 <code>[Response]</code> = 这种透传流，紫色 <code>[translate]</code> = 翻译流。只影响 Responses 口：Anthropic 口（Claude Code）命中同一条 route 仍走该 route 的 <code>url</code> 字段，互不影响。</p>
-      <p>翻译规则与 cc-switch 3.20.0 一致：<code>reasoning.effort</code> 按模型分类映射——adaptive 模型（fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6）翻成 <code>thinking:adaptive</code> + <code>output_config.effort</code>（fable-5/mythos-5 关不掉 thinking，显式 none 翻成 effort:low）；其余模型翻成 budget_tokens（low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576）。查表用客户端发来的 model 名（路由改写之前），想让表生效就把客户端 model 直接填目标模型名。工具映射（function/custom/namespace/tool_search/web_search/input_file）与完整映射表见使用说明.md「Responses 翻译映射表」。</p>
+      <p>翻译规则与 cc-switch 3.20.0 一致：<code>reasoning.effort</code> 按模型分类映射——adaptive 模型（fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6）翻成 <code>thinking:adaptive</code> + <code>output_config.effort</code>（fable-5/mythos-5 关不掉 thinking，显式 none 翻成 effort:low）；其余模型翻成 budget_tokens（low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576）。查表用客户端发来的 model 名（路由改写之前），想让表生效就把客户端 model 直接填目标模型名；反过来别名命中上表但路由目标模型能力不一致时（如别名叫 claude-fable-5 实际路由到只支持 budget 的 Kimi），在该路由条目配 <code>thinking:"budget"/"adaptive"</code> 覆盖（见下方参数速查）。工具映射（function/custom/namespace/tool_search/web_search/input_file）与完整映射表见使用说明.md「Responses 翻译映射表」。</p>
       <p><b>思考/搜索信封</b>：签名 thinking 块与每次搜索的完整结果块（含 encrypted_content 正文）被自封装进 reasoning 项的 encrypted_content 随响应发给客户端，下轮客户端回放历史时还原上行——思考链不丢，追问直接读上次搜索到的正文、不再原关键字重搜。搜索信封带 url+key 哈希归属且整体经 key 派生掩码混淆（客户端历史里不躺明文 url/key 信息）：换了上游或 key 就解不开不还原（省 token），换模型不拦（实测照常解密）；旧对话的搜索块在上游过期（报 tool_call_id）时代理自动剥掉回放块重试一次，无感降级为需要时重新搜。</p>
       <p><b>Codex CLI 接入</b>：最省事——本控制台「配置」标签下方给出 Windows / macOS·Linux 两行一键命令（DeepSeek 文档同款格式，按编辑框实时生成：地址取 <code>responses_listen</code>；routes 每个 pattern 的代表名全部写进 Codex <code>/model</code> 菜单，下拉选中项为默认模型），复制到对应终端回车即运行，脚本由本代理实时烤制下发。仓库根目录另有交互版 <code>codex-setup.ps1</code>（Windows）与 <code>codex-setup.sh</code>（macOS/Linux）：选模型、备份后改写 config.toml、写模型目录、可一键还原。手动：编辑 <code>~/.codex/config.toml</code>——顶层 <code>model_provider = "proxy429"</code>、<code>model = "gpt-5-codex"</code>、<code>preferred_auth_method = "apikey"</code> + <code>forced_login_method = "api"</code>（免官方登录），加 <code>[model_providers.proxy429]</code> 段（<code>base_url = "http://127.0.0.1:8081/v1"</code>、<code>wire_api = "responses"</code>、<code>experimental_bearer_token</code> 填任意占位串）。改完重启 Codex。<b>503 且代理侧零日志</b>：系统代理或终端代理变量会把 127.0.0.1 的请求劫到代理服务器报 503——Windows 一键脚本安装时已自动写用户级 NO_PROXY（含 127.0.0.1）绕过；macOS 脚本自动把 NO_PROXY 写进 launchd 环境（GUI 应用与新终端窗口都生效）并安装登录项持久化（脚本选「还原」可撤销）；Linux 脚本只做体检并提示 <code>export NO_PROXY="localhost,127.0.0.1,::1"</code>；手动配置请自行 <code>setx NO_PROXY "localhost,127.0.0.1,::1"</code>（Windows）后重启 Codex。逐步教程见使用说明.md「让 Codex CLI 走代理」。</p>
       <h3>路由与能力兜底</h3>
@@ -1078,6 +1085,12 @@ const logViewerHTML = `<!DOCTYPE html>
       <td style="padding:6px 8px;vertical-align:top">只影响 Responses 口；Anthropic 口仍走该 route 的 url；配了它该 route 的 text_only/no_search/enhance_search 对透传流不生效</td>
       </tr>
       <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>thinking</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] 条目</td>
+      <td style="padding:6px 8px;vertical-align:top">声明目标模型的思考形态：auto（默认，按客户端 model 名查表）/ adaptive / budget</td>
+      <td style="padding:6px 8px;vertical-align:top">仅 Responses 翻译流生效（透传不翻译、Anthropic 口不改写）；别名命中 adaptive 表但目标是 Kimi 等 budget 上游时配 "budget" 纠正</td>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
       <td style="padding:6px 8px;vertical-align:top"><code>multimodal_fallback</code></td>
       <td style="padding:6px 8px;vertical-align:top">顶层</td>
       <td style="padding:6px 8px;vertical-align:top">图片兜底上游</td>
@@ -1116,10 +1129,11 @@ const logViewerHTML = `<!DOCTYPE html>
       <li><b>tok/s</b>：流式输出速率 = 输出 token 数 / 流式耗时。</li>
       <li><b>缓存命中</b>：见上。</li>
       <li><b>分类器</b>（状态卡片）：卡面数字 = 启动至今命中分类器（Claude Code 安全判断）特征的请求数——无论是否分流到 classifier_route、是否关思考都计，反映安全判断请求量。鼠标移上卡片看明细（命中总量 / 关思考改写次数），点击放大弹窗（含关思考占比）；「关思考」= 其中实际被改写关掉 thinking 的次数（仅 classifier_thinking_disabled 开启时发生；已是关思考形态的请求不产生改写，不计）。</li>
-      <li><b>缓存年龄</b>（最近完成流表）：按会话+路由锚定，显示该会话该路由最近一次缓存写入距现在过了多久（m:ss 递增）——上游缓存真实存活期是动态的，这列不再猜倒计时，只告诉你"这份缓存是多久前写的"，还能不能用请对照「缓存命中」弹窗的实测区间判断。同会话同路由最新一条流显示年龄；被更新的同键流刷新后旧行显示 <code>-</code>；无会话标识的流（count_tokens 探针、不带 metadata 的裸调用）恒 <code>-</code>。黄灯（等待首字节）阶段被下游主动断开的 499 流视同未刷新缓存：本行显 <code>-</code>、该键锚停留再上一次同键流；绿灯（流式中）断开的 499 说明上游已在吐字、缓存已写，照常作为新锚。同会话同路由有<b>在途流正在吐字</b>（绿灯转发中）时，缓存实际刚被刷新——该键最新完成行冻结显示 <code>[m:ss]</code>（方括号内为刷新那一刻旧锚的年龄，数字不变），新锚等该在途流完成归档后生效。会话标识来自客户端请求自带字段（Claude Code 的 metadata.user_id 内 session_id / Codex 的 prompt_cache_key），代理只读不改。年龄从流开始时刻起算（缓存写入/刷新发生在上游处理输入时）。<b>保留规则</b>：开始时刻距今 5 分钟内的"会话+路由最新一条"完成流不被「保留完成流 N」挤掉（列表行数可因此超 N）；显示 <code>-</code> 或超窗口的行照常先进先出裁剪。<b>点击「缓存命中」卡片</b>，弹窗底部「实测缓存时间」表列出各上游实测的缓存存活时间：按 URL+模型名归为一类（不看其他参数），同会话相邻两条流后条命中率 ≥95% 记一次区间下界「至少活了间隔那么久」（取最大值），前条命中过而后条命中率 &lt;50% 记一次区间上界「没活过间隔那么久」（取最小值；不看严格归零——系统提示词等公共前缀的残留缓存命中不算活着）；间隔按两条流各自的开始时刻算；输入总量（input+cache_read+cache_creation）不足 1024 token 的流不观测（小请求噪声大）；两侧观测矛盾时（上游缓存时间中途变化、或缓存被提前驱逐）以较新的观测为准、被否的一侧作废重测、观测次数同步归零重计；「结论形成」列 = 当前上下界数值形成至今的时长（m:ss 递增），任一界数值变化（含作废重测）即重新起算，只新增支撑观测、数值不变时不重置；实测只作展示，纯内存态（重启/清空统计即清零）。</li>
-      <li><b>model 列工具标签</b>：响应中调用过的工具以 [Read*1][Edit*3] 形式金色跟在 model 后（web_search 等服务端工具也计）；在途流随转发实时增加，完成流保留最终快照；同名 N 次合并显 *N（原始次数），单次调用显 *1，参数结构体为空的单次调用显 *0（如空搜索），顺序按首次出现。<b>剥块红标 [剥N]</b>：该流剥掉的回放搜索块总数（信封封入超 1 小时或老于本对话水位 → 时间规则直接剥不还原；还原后仍被上游拒 → 400 兜底剥光重试）。在途流挂在 model 列工具标签后，完成流改挂「缓存命中」列（如 81%[剥2]），同一标记两处只出现一处；只有发生过剥块的流才显示。拆分（时间规则剥多少、400 兜底剥多少）看日志 [剥块]/[兜底] 行；被剥后客户端无感（收不到 400），模型失去旧搜索上下文时可能重搜。</li>
+      <li><b>缓存年龄</b>（最近完成流表）：按会话+路由锚定，显示该会话该路由最近一次缓存写入距现在过了多久（m:ss 递增）——上游缓存真实存活期是动态的，这列不再猜倒计时，只告诉你"这份缓存是多久前写的"，还能不能用请对照「缓存命中」弹窗的实测区间判断。同会话同路由最新一条流显示年龄；被更新的同键流刷新后旧行显示 <code>-</code>；无会话标识的流（count_tokens 探针、不带 metadata 的裸调用）恒 <code>-</code>。黄灯（等待首字节）阶段被下游主动断开的 499 流视同未刷新缓存：本行显 <code>-</code>、该键锚停留再上一次同键流；绿灯（流式中）断开的 499 说明上游已在吐字、缓存已写，照常作为新锚。同会话同路由有<b>在途流正在吐字</b>（绿灯转发中）时，缓存实际刚被刷新——该键最新完成行冻结显示 <code>[m:ss]</code>（方括号内为刷新那一刻旧锚的年龄，数字不变），新锚等该在途流完成归档后生效。会话标识来自客户端请求自带字段（Claude Code 的 metadata.user_id 内 session_id / Codex 的 prompt_cache_key），代理只读不改。年龄从流开始时刻起算（缓存写入/刷新发生在上游处理输入时）。<b>保留规则</b>：开始时刻距今 5 分钟内的"会话+路由最新一条"完成流不被「保留完成流 N」挤掉（列表行数可因此超 N）；显示 <code>-</code> 或超窗口的行照常先进先出裁剪。<b>点击「缓存命中」卡片</b>，弹窗底部「实测缓存时间」表列出各上游实测的缓存存活时间：按 URL+模型名归为一类（不看其他参数），同会话相邻两条流后条命中率 ≥95% 记一次区间下界「至少活了间隔那么久」（取最大值），前条命中过而后条命中率 &lt;50% 记一次区间上界「没活过间隔那么久」（取最小值；不看严格归零——系统提示词等公共前缀的残留缓存命中不算活着）；间隔按两条流各自的开始时刻算；输入总量（input+cache_read+cache_creation）不足 1024 token 的流不观测（小请求噪声大）；两侧观测矛盾时（上游缓存时间中途变化、或缓存被提前驱逐）以较新的观测为准、被否的一侧作废重测、观测次数同步归零重计；「≥形成」「&lt;形成」两列 = 各自界数值形成至今的时长（m:ss 递增），该界数值变化（含矛盾作废重测）即重新起算，只新增支撑观测、数值不变时不重置；无该界观测时随界同显 <code>-</code>；实测只作展示，纯内存态（重启/清空统计即清零）。</li>
+      <li><b>model 列工具标签</b>：响应中调用过的工具以 [Read*1][Edit*3] 形式金色跟在 model 后（web_search 等服务端工具也计）；在途流随转发实时增加，完成流保留最终快照；同名 N 次合并显 *N（原始次数），单次调用显 *1，参数结构体为空的单次调用显 *0（如空搜索），顺序按首次出现。<b>剥块红标 [剥N]</b>：该流剥掉的回放搜索块总数（本对话撞过 400 学到水位后，不比水位新的信封直接剥不还原——注册表按龄淘汰，同龄与更老的必死，不设固定存活期上限；还原后仍被上游拒 → 400 兜底剥光重试并学水位）。在途流挂在 model 列工具标签后，完成流改挂「缓存命中」列（如 81%[剥2]），同一标记两处只出现一处；只有发生过剥块的流才显示。拆分（水位剥多少、400 兜底剥多少）看日志 [剥块]/[兜底] 行；被剥后客户端无感（收不到 400），模型失去旧搜索上下文时可能重搜。</li>
       <li><b>状态灯时长</b>：在途流表格首列状态灯（⚪请求 / 🟡等首字节 / 🟢转发中）旁的秒数 = 当前灯色已持续的时间；只在灯变色时清零——黄灯内部的路由、多次重试不单独清零，保证"黄灯亮了多久"连续真实。黄灯内正在等首字节时，状态灯与总时长之间另有 [尝试N: Xs] = 本次尝试已等待的时长（每次尝试重新起算；重试退避中显示 [退避中]）——黄灯总时长 = 各次尝试 + 退避之和，两者对照即可看出是否已在重试。</li>
-      <li><b>499</b>：状态码列中非 200 的状态码加方括号显示（如 [499]、[400]），一眼挑出异常流。重试/预算用尽时代理会向下游透传兜底 error 事件（overloaded_error），此类流状态码列显 [重试尽]（点击行可回看该兜底事件）。499 口径与上游提供商后台一致——上游响应没发完连接就结束了记 499（最常见是下游主动取消，取消会传导成上游断连；nginx 惯例 client closed request）；上游完整发完后下游才断开的（Codex 收完 response.completed 即关连接）仍记 200。</li>
+      <li><b>API 列</b>：协议来源 + 思考值合一格。名 = 协议来源：橙 <code>[Anthropic]</code> = Anthropic 口原生流量（Claude Code 等）、紫 <code>[translate]</code> = Responses 口翻译成 Anthropic 走主管线、绿 <code>[Response]</code> = Responses 口原生透传（路由配 url_response_api）。名后 <code>[值]</code> = <b>实际发给上游</b>的思考配置最短形态（翻译映射、分类器关思考等代理改写生效后的最终口径），<b>其颜色 = 词汇口径</b>（思考是针对上游的：非透传流上游收到的都是 Anthropic 格式，所以紫名后跟的是橙值）——橙 = Anthropic thinking、绿 = Responses reasoning（仅透传）。值：<code>关</code> = thinking disabled 或 effort none/off/disabled；<code>开 N</code> = enabled + budget_tokens N；<code>adaptive</code> = 自适应无档；<code>low</code>/<code>high</code>/<code>max</code> 等档位词 = adaptive 的 effort，绿色时则是 Responses 透传的 reasoning.effort 原值；无 <code>[值]</code> = 请求体未带思考字段。例：<code>[translate][开 16384]</code> = Codex 发 effort high 翻译到 Anthropic 上游；<code>[Anthropic][关]</code> = 命中分类器被代理关思考；<code>[Response][high]</code>（全绿）= 透传流 effort 原样。</li>
+      <li><b>499</b>：状态码列中非 200 的状态码加方括号显示（如 [499]、[400]），一眼挑出异常流。重试/预算用尽时代理会向下游透传兜底 error 事件（overloaded_error），此类流状态码列显 [重试尽]（点击行可回看该兜底事件）。发生过退避重试的流在状态码后追加金色 <code>[重试N次]</code>（N = 重试次数，如 200[重试2次]；[重试尽] 时同样带，可对照 max_retries 看是否打满）。499 口径与上游提供商后台一致——上游响应没发完连接就结束了记 499（最常见是下游主动取消，取消会传导成上游断连；nginx 惯例 client closed request）；上游完整发完后下游才断开的（Codex 收完 response.completed 即关连接）仍记 200。</li>
       </ul>
       <h3>流查看</h3>
       <p>点击在途流/最近完成流的行可看该流内容：默认看输出（「显示解析/显示原始」切换）；「看请求体」回看导致这个流的下游请求体（JSON 自动美化，非完整 JSON 按原文显示）。浏览一律只给前 256KB。勾选「储存完整结构体」（默认关，重启复位）后，新开始的请求额外记录完整请求体与输出（不设上限，占内存），查看器出现「下载请求体/下载输出」按钮可下载完整文件（JSON 美化后保存，非 JSON 按原文），以及「交互式JSON」按钮——把请求体/输出渲染成可按键折叠展开的 JSON 树（默认全部折叠，点键名行懒展开；输出是 SSE 事件流时解析成事件数组再成树）；取消勾选立即清空已存的完整副本、下载与交互按钮消失。数据残缺的流不会静默当成完整版：请求体只剩截断版的「下载请求体」置灰（悬停见原因），无完整输出副本的「下载输出」置灰，交互式JSON 对这两类直接提示不看。Responses 翻译口的流记录的是翻译成 Anthropic 后的请求体。</p>
@@ -1252,21 +1266,32 @@ function modelCell(model, prompt, routeReason, countTokens, tools, stripped){
   // 工具调用标签（"[Read*1][Edit*3]"）：跟在 model 链后，金色区分；来自服务端 toolCallsTag 的已格式化串，转义后插入
   // （注意：本函数内局部变量不能叫 esc——var 声明提升会遮蔽全局 esc()，上面这行就会拿不到函数）
   if(tools) model = model + '<span style="color:#d7ba7d">' + esc(tools) + '</span>';
-  // 剥块红标 [剥N]：该流剥掉的回放搜索块总数（时间规则+400 兜底）；只在在途流挂本列，
+  // 剥块红标 [剥N]：该流剥掉的回放搜索块总数（对话水位+400 兜底）；只在在途流挂本列，
   // 完成流改挂缓存命中列（见行模板）——同一红标两处只出现一处，避免重复计数观感
   if(stripped > 0) model = model + '<span style="color:#f48771">[剥' + stripped + ']</span>';
   if(!prompt) return '<td>'+model+'</td>';
   var escP = String(prompt).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   return '<td title="'+escP+'">'+model+'</td>';
 }
-// API 列单元格：该流的协议来源——
-// 空 = Anthropic 口原生流量（Claude Code 等，橙色 [Anthropic]，#d97757 = Claude 珊瑚橙）；
+// API 列单元格：协议来源 + 思考值合一格（省一列）——
+// 名部分：空 = Anthropic 口原生流量（Claude Code 等，橙色 [Anthropic]，#d97757 = Claude 珊瑚橙）；
 // 'responses-raw' = Responses 口原生透传（路由配了 url_response_api，绿色 [Response]，#2bbf8a = ChatGPT 绿 #10a37f 的提亮版）；
 // 'responses' = Responses 口翻译成 Anthropic 走主管线（紫色 [translate]，沿用旧 model 列前缀的颜色）。
-function apiCell(translated){
-  if(translated === 'responses-raw') return '<td><span style="color:#2bbf8a">[Response]</span></td>';
-  if(translated) return '<td><span style="color:#c586c0">[translate]</span></td>';
-  return '<td><span style="color:#d97757">[Anthropic]</span></td>';
+// 思考值（实际发给上游的思考配置最短形态：关 / 开 N / adaptive / high·max 等档位词）紧跟名后 [值]，
+// 颜色 = 词汇口径。思考是针对上游的——非透传流上游收到的都是 Anthropic 格式（直连原样、翻译映射后），
+// 故只有两色：橙 #d97757=Anthropic thinking 口径、绿 #2bbf8a=Responses reasoning 口径（仅透传）。
+// 所以紫色 [translate] 名后跟的是橙值。关也带色：绿关 vs 橙关能看出是哪侧关的。无思考字段时裸名无 [值]。
+function apiCell(translated, think){
+  var name, color;
+  if(translated === 'responses-raw'){ name = '[Response]'; color = '#2bbf8a'; }
+  else if(translated){ name = '[translate]'; color = '#c586c0'; }
+  else { name = '[Anthropic]'; color = '#d97757'; }
+  var html = '<span style="color:'+color+'">'+name+'</span>';
+  if(think){
+    var tc = translated==='responses-raw' ? '#2bbf8a' : '#d97757';
+    html += '<span style="color:'+tc+'">['+esc(think)+']</span>';
+  }
+  return '<td>'+html+'</td>';
 }
 // 路由原因 -> model 列前缀标签（与 main.go route* 枚举对齐：0透传 1pattern 2分类器 3fast 4多模态 5搜索）。
 // 透传不加前缀；标签淡蓝色与 model 链区分。
@@ -1695,7 +1720,7 @@ async function poll(){
     const fs = d.flights || [];
     fs.forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull}; });
     flightsBody.innerHTML = fs.map(f =>
-      '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>'+flightDot(f)+attemptTag(f)+' '+fmtStageDur(f.stageMs)+'</td><td>#'+f.id+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools,f.stripped)+apiCell(f.translated)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+flightStatus(f)+'</td></tr>'
+      '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>'+flightDot(f)+attemptTag(f)+' '+fmtStageDur(f.stageMs)+'</td><td>#'+f.id+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools,f.stripped)+apiCell(f.translated,f.think)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+flightStatus(f)+'</td></tr>'
     ).join('');
     // 在途流输出查看：手选单流优先，否则自动跟踪 grid，否则隐藏
     var fv = document.getElementById('flightView');
@@ -1794,7 +1819,7 @@ async function poll(){
         const rfd = await rf.json();
         (rfd.list||[]).forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull}; });
         document.querySelector('#finishedFlights tbody').innerHTML = (rfd.list||[]).map(function(f){
-          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools)+apiCell(f.translated)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+(f.total||'-')+'</td><td>'+(f.gaveUp?'[重试尽]':(f.status?(f.status===200?'200':'['+f.status+']'):'-'))+'</td><td>'+(f.hitRate||'-')+(f.stripped>0?'<span style="color:#f48771">[剥'+f.stripped+']</span>':'')+'</td><td>'+(f.cacheAge||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
+          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools)+apiCell(f.translated,f.think)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+(f.total||'-')+'</td><td>'+(f.gaveUp?'[重试尽]':(f.status?(f.status===200?'200':'['+f.status+']'):'-'))+(f.attempts>1?'<span style="color:#d7ba7d">[重试'+(f.attempts-1)+'次]</span>':'')+'</td><td>'+(f.hitRate||'-')+(f.stripped>0?'<span style="color:#f48771">[剥'+f.stripped+']</span>':'')+'</td><td>'+(f.cacheAge||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
         }).join('');
       }
     }catch(e){}
@@ -2376,16 +2401,19 @@ function cacheObsHTML(){
   var h = '<div style="color:#9a9a9a;margin:14px 0 4px">实测缓存时间（按上游 URL+模型）</div>'+
     '<table style="border-collapse:collapse;width:100%;font-size:14px"><thead><tr style="color:#9a9a9a;text-align:left">'+
     '<th style="padding:3px 12px 3px 0">模型</th><th style="padding:3px 12px 3px 0">URL</th>'+
-    '<th style="padding:3px 12px 3px 0;text-align:right">缓存时间 ≥</th><th style="padding:3px 12px 3px 0;text-align:right">缓存时间 &lt;</th>'+
-    '<th style="padding:3px 0;text-align:right">观测<span class="thq" title="支撑当前上下界的观测条数。上下界交叉时（新观测否定旧界——上游缓存时间中途变化或被提前驱逐），被否一侧作废重测，观测次数同步归零重计">?</span></th>'+
-    '<th style="padding:3px 0 3px 12px;text-align:right">结论形成<span class="thq" title="当前上/下界数值形成至今的时长（m:ss 递增）。任一界的数值发生变化（含矛盾作废重测）就重新起算；只新增支撑观测、数值不变时不重置">?</span></th></tr></thead><tbody>';
+    '<th style="padding:3px 12px 3px 0;text-align:right">缓存时间 ≥</th>'+
+    '<th style="padding:3px 12px 3px 0;text-align:right">≥形成<span class="thq" title="下界数值形成至今的时长（m:ss 递增）。下界数值发生变化才重新起算；只新增支撑观测、数值不变时不重置；无下界观测时为 -">?</span></th>'+
+    '<th style="padding:3px 12px 3px 0;text-align:right">缓存时间 &lt;</th>'+
+    '<th style="padding:3px 12px 3px 0;text-align:right">&lt;形成<span class="thq" title="上界数值形成至今的时长（m:ss 递增）。上界数值发生变化（含被新存活观测否决定作废重测）才重新起算；只新增支撑观测、数值不变时不重置；无上界观测时为 -">?</span></th>'+
+    '<th style="padding:3px 0;text-align:right">观测<span class="thq" title="支撑当前上下界的观测条数。上下界交叉时（新观测否定旧界——上游缓存时间中途变化或被提前驱逐），被否一侧作废重测，观测次数同步归零重计">?</span></th></tr></thead><tbody>';
   latestCacheObs.forEach(function(o){
     h += '<tr style="color:#d4d4d4"><td style="padding:3px 12px 3px 0">'+esc(o.model)+'</td>'+
       '<td style="padding:3px 12px 3px 0">'+esc(o.url)+'</td>'+
       '<td style="padding:3px 12px 3px 0;text-align:right">'+(o.alive||'-')+'</td>'+
+      '<td style="padding:3px 12px 3px 0;text-align:right">'+(o.aliveAge||'-')+'</td>'+
       '<td style="padding:3px 12px 3px 0;text-align:right">'+(o.dead||'-')+'</td>'+
-      '<td style="padding:3px 0;text-align:right">'+o.samples+'</td>'+
-      '<td style="padding:3px 0 3px 12px;text-align:right">'+(o.age||'-')+'</td></tr>';
+      '<td style="padding:3px 12px 3px 0;text-align:right">'+(o.deadAge||'-')+'</td>'+
+      '<td style="padding:3px 0;text-align:right">'+o.samples+'</td></tr>';
   });
   return h + '</tbody></table>';
 }

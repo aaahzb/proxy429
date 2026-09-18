@@ -528,10 +528,11 @@ func resetSearchCutoffForTest() func() {
 	}
 }
 
-// TestConvertInputSearchEnvelopeTimeRules 验证时间规则主动剥：封入超 1h（或无 ts
-// 老信封）→ 超龄剥；老于本对话水位 → 水位剥；比水位新 → 照常还原。主动剥不还原、
-// 不撞 400，计数进 replay 供 [剥N] 与日志拆分。
-func TestConvertInputSearchEnvelopeTimeRules(t *testing.T) {
+// TestConvertInputSearchEnvelopeWaterLevel 验证水位主动剥：不设固定年龄上限
+// （老信封无水位也乐观还原——直发探测实证封入 1.7h 的搜索 id 仍存活）；本对话
+// 学到水位后，不比水位新的信封（含恰等于水位）水位剥；无 ts 老信封视同最老——
+// 有水位剥、无水位乐观还原。主动剥不还原、不撞 400，计数进 replay 供 [剥N] 与日志。
+func TestConvertInputSearchEnvelopeWaterLevel(t *testing.T) {
 	defer resetSearchCutoffForTest()()
 	use, res := testSearchBlockPair()
 	tri := newSearchTriple("https://u1/", "m1", "key1")
@@ -554,28 +555,41 @@ func TestConvertInputSearchEnvelopeTimeRules(t *testing.T) {
 		}
 	}
 
-	// 超龄：封入 2 小时前 → 不还原，计超龄剥 2 块。
+	// 年龄不剥：封入 2 小时前但本对话无水位 → 照常还原（1h 硬规则已撤）。
 	replay := &searchReplayCtx{convID: "c-age"}
 	msgs, err := convertInputToMessages(itemsWith(encodeSearchEnvelopeWithTs(tri, use, res, time.Now().Add(-2*time.Hour).Unix())), buildToolRegistry(nil), tri, replay)
 	if err != nil {
 		t.Fatalf("convertInputToMessages: %v", err)
 	}
-	if n := countSearchBlocks(msgs); n != 0 || replay.proactiveAge != 2 {
-		t.Errorf("超龄信封：还原块数=%d(want 0) 超龄剥=%d(want 2)", n, replay.proactiveAge)
+	if n := countSearchBlocks(msgs); n != 2 || len(replay.restored) != 1 {
+		t.Errorf("无水位的老信封：还原块数=%d(want 2) 还原时刻数=%d(want 1)", n, len(replay.restored))
 	}
-	// 无 ts 老信封同样按超龄剥。
+	// 无 ts 老信封无水位时同样乐观还原（无 ts 可收，还原时刻保持 0）。
 	replay = &searchReplayCtx{convID: "c-age"}
 	msgs, _ = convertInputToMessages(itemsWith(encodeSearchEnvelopeWithTs(tri, use, res, 0)), buildToolRegistry(nil), tri, replay)
-	if n := countSearchBlocks(msgs); n != 0 || replay.proactiveAge != 2 {
-		t.Errorf("无 ts 信封：还原块数=%d(want 0) 超龄剥=%d(want 2)", n, replay.proactiveAge)
+	if n := countSearchBlocks(msgs); n != 2 || len(replay.restored) != 0 {
+		t.Errorf("无 ts 信封（无水位）：还原块数=%d(want 2) 还原时刻数=%d(want 0)", n, len(replay.restored))
 	}
 
-	// 水位：对话水位记在 10 分钟前——20 分钟前的信封水位剥，5 分钟前的照常还原。
-	learnSearchCutoff("c-water", time.Now().Add(-10*time.Minute))
+	// 水位：对话水位记在 10 分钟前（秒级精度，与信封 ts 解码同口径）——20 分钟
+	// 前的信封水位剥，恰等于水位的也剥（注册表按龄淘汰，同龄必死），无 ts 的
+	// 视同最老一并剥，5 分钟前的照常还原。
+	cut := time.Unix(time.Now().Add(-10*time.Minute).Unix(), 0)
+	learnSearchCutoff("c-water", cut)
 	replay = &searchReplayCtx{convID: "c-water"}
 	msgs, _ = convertInputToMessages(itemsWith(encodeSearchEnvelopeWithTs(tri, use, res, time.Now().Add(-20*time.Minute).Unix())), buildToolRegistry(nil), tri, replay)
 	if n := countSearchBlocks(msgs); n != 0 || replay.proactiveCutoff != 2 {
 		t.Errorf("老于水位的信封：还原块数=%d(want 0) 水位剥=%d(want 2)", n, replay.proactiveCutoff)
+	}
+	replay = &searchReplayCtx{convID: "c-water"}
+	msgs, _ = convertInputToMessages(itemsWith(encodeSearchEnvelopeWithTs(tri, use, res, cut.Unix())), buildToolRegistry(nil), tri, replay)
+	if n := countSearchBlocks(msgs); n != 0 || replay.proactiveCutoff != 2 {
+		t.Errorf("恰等于水位的信封：还原块数=%d(want 0) 水位剥=%d(want 2)", n, replay.proactiveCutoff)
+	}
+	replay = &searchReplayCtx{convID: "c-water"}
+	msgs, _ = convertInputToMessages(itemsWith(encodeSearchEnvelopeWithTs(tri, use, res, 0)), buildToolRegistry(nil), tri, replay)
+	if n := countSearchBlocks(msgs); n != 0 || replay.proactiveCutoff != 2 {
+		t.Errorf("无 ts 信封（有水位）：还原块数=%d(want 0) 水位剥=%d(want 2)", n, replay.proactiveCutoff)
 	}
 	replay = &searchReplayCtx{convID: "c-water"}
 	msgs, _ = convertInputToMessages(itemsWith(encodeSearchEnvelopeWithTs(tri, use, res, time.Now().Add(-5*time.Minute).Unix())), buildToolRegistry(nil), tri, replay)
@@ -585,9 +599,9 @@ func TestConvertInputSearchEnvelopeTimeRules(t *testing.T) {
 }
 
 // TestSearchEnvelopeCutoffLearning 端到端：Responses 口带回放信封 → 上游 400
-// tool_call_id → 兜底剥块重试并学到对话水位；同对话更老的信封下一轮被水位直接剥
-// （上游一发即 200、无搜索块、无 400），比水位新的信封照常还原。[剥N] 计数含
-// 时间规则剥与 400 兜底剥两部分。
+// tool_call_id → 兜底剥块重试并学到对话水位；同对话更老与恰等于水位的信封下一轮
+// 被水位直接剥（上游一发即 200、无搜索块、无 400），比水位新的信封照常还原。
+// [剥N] 计数含水位剥与 400 兜底剥两部分。
 func TestSearchEnvelopeCutoffLearning(t *testing.T) {
 	defer resetSearchCutoffForTest()()
 	resetStats()
@@ -662,16 +676,28 @@ func TestSearchEnvelopeCutoffLearning(t *testing.T) {
 		t.Errorf("第二轮：水位剥后不应带搜索块上行: %s", rawBodies[2])
 	}
 	if n := lastStripped(); n != 2 {
-		t.Errorf("第二轮剥块计数=%d, want 2（时间规则水位剥）", n)
+		t.Errorf("第二轮剥块计数=%d, want 2（水位剥）", n)
+	}
+
+	// 等于水位轮：封入时刻恰等于水位的信封 → 同样水位剥（同龄必死，不撞 400）。
+	doReq(encodeSearchEnvelopeWithTs(tri, use, res, t0))
+	if len(rawBodies) != 4 {
+		t.Fatalf("等于水位轮后上游请求数=%d, want 4（水位剥不撞 400）", len(rawBodies))
+	}
+	if strings.Contains(rawBodies[3], "server_tool_use") || strings.Contains(rawBodies[3], "web_search_tool_result") {
+		t.Errorf("等于水位轮：水位剥后不应带搜索块上行: %s", rawBodies[3])
+	}
+	if n := lastStripped(); n != 2 {
+		t.Errorf("等于水位轮剥块计数=%d, want 2（水位剥）", n)
 	}
 
 	// 第三轮：比水位新的信封 → 照常还原（上行带搜索块，mock 已回 200，不再剥）。
 	doReq(encodeSearchEnvelopeWithTs(tri, use, res, t0+60))
-	if len(rawBodies) != 4 {
-		t.Fatalf("第三轮后上游请求数=%d, want 4", len(rawBodies))
+	if len(rawBodies) != 5 {
+		t.Fatalf("第三轮后上游请求数=%d, want 5", len(rawBodies))
 	}
-	if !strings.Contains(rawBodies[3], "server_tool_use") {
-		t.Errorf("第三轮：新于水位的信封应还原上行: %s", rawBodies[3])
+	if !strings.Contains(rawBodies[4], "server_tool_use") {
+		t.Errorf("第三轮：新于水位的信封应还原上行: %s", rawBodies[4])
 	}
 	if n := lastStripped(); n != 0 {
 		t.Errorf("第三轮剥块计数=%d, want 0（还原被上游收下）", n)

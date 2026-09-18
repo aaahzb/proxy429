@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -459,6 +461,20 @@ func TestAddFinishedTotalMs(t *testing.T) {
 	}
 	if ff.ended.Before(f.start) {
 		t.Errorf("ended=%v 不应早于 start=%v", ff.ended, f.start)
+	}
+}
+
+// TestAddFinishedAttempts 验证完成流归档保留尝试次数（状态码列 [重试N次] 的数据源）：
+// flight.attempt 原样入档，一把过为 1，重试 2 次为 3。
+func TestAddFinishedAttempts(t *testing.T) {
+	f := &flight{id: flights.nextID.Add(1), start: time.Now()}
+	f.attempt.Store(3)
+	addFinished(f)
+	finishedMu.Lock()
+	ff := finished[len(finished)-1]
+	finishedMu.Unlock()
+	if ff.attempts != 3 {
+		t.Errorf("attempts=%d, want 3（重试 2 次）", ff.attempts)
 	}
 }
 
@@ -916,6 +932,56 @@ func TestExtractModel(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestExtractThinkMode 锁定状态页「API」列思考值的 Anthropic 口径：thinking.type=disabled 显 "关"、
+// enabled 显 "开 <budget>"（无预算只显 "开"）、adaptive 无档显 "adaptive"（带档只显档位词——
+// 词汇口径由列颜色承担）、只有 effort 没有 thinking 同样只显档位词、无字段返空。
+func TestExtractThinkMode(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"关思考", `{"model":"m","thinking":{"type":"disabled"}}`, "关"},
+		{"开带预算", `{"model":"m","thinking":{"type":"enabled","budget_tokens":2048}}`, "开 2048"},
+		{"开无预算", `{"thinking":{"type":"enabled"}}`, "开"},
+		{"adaptive 无 effort", `{"thinking":{"type":"adaptive"}}`, "adaptive"},
+		{"adaptive 带 effort 只显档位", `{"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`, "high"},
+		{"仅 output_config 只显档位", `{"output_config":{"effort":"low"}}`, "low"},
+		{"未知 type 原样", `{"thinking":{"type":"future_mode"}}`, "future_mode"},
+		{"无思考字段", `{"model":"m","messages":[]}`, ""},
+		{"thinking 非对象", `{"thinking":true}`, ""},
+		{"非 JSON", `not json`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractThinkMode([]byte(tc.body)); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadConfigThinkingValidation 锁定路由 thinking 参数的取值校验：""/auto/adaptive/budget
+// 合法，其余值加载即报错——配错不会被静默降级成 auto 而继续按客户端 model 名误判思考形态。
+func TestLoadConfigThinkingValidation(t *testing.T) {
+	writeCfg := func(t *testing.T, thinking string) string {
+		body := `{"upstream":"http://x","routes":[{"pattern":"m*","url":"http://y","thinking":"` + thinking + `"}]}`
+		p := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, v := range []string{"", "auto", "adaptive", "budget"} {
+		if _, err := loadConfig(writeCfg(t, v)); err != nil {
+			t.Errorf("thinking=%q 应合法: %v", v, err)
+		}
+	}
+	if _, err := loadConfig(writeCfg(t, "turbo")); err == nil {
+		t.Errorf("thinking=turbo 应报错")
 	}
 }
 

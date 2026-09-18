@@ -23,7 +23,8 @@
       "api": "sk-deepseek-替换成你的key",
       "model": "deepseek-V4-pro",
       "text_only": true,
-      "no_search": true
+      "no_search": true,
+      "thinking": "budget"
     },
     {
       "pattern": "claude-haiku*",
@@ -48,6 +49,13 @@
       "api": "sk-deepseek-替换成你的key",
       "model": "deepseek-V4-pro",
       "url_response_api": "https://api.deepseek.com"
+    },
+    {
+      "pattern": "codex-fable*",
+      "url": "https://api.anthropic.com",
+      "api": "sk-ant-替换成你的key",
+      "model": "claude-fable-5",
+      "thinking": "adaptive"
     }
   ],
   "classifier_route": {
