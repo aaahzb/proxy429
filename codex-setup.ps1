@@ -480,7 +480,7 @@ function Invoke-Proxy429SwitchModel {
     Write-Host ''
     Write-Host 'How to verify:'
     Write-Host "  - the Codex CLI startup banner shows model: $($script:ModelSlug)"
-    Write-Host '  - the proxy web console Status tab shows an in-flight stream whose API column reads [translate] (or [Response] when the route has url_response_api)'
+    Write-Host '  - the proxy web console Status tab shows an in-flight stream whose API column reads [translate]'
     Write-Host ''
     Write-Dim 'Run this script again to switch models (1/2/3) or restore the default config (9).'
 }
@@ -827,7 +827,7 @@ function Invoke-Proxy429Install {
     Write-Host ''
     Write-Host 'How to verify:'
     Write-Host "  - the Codex CLI startup banner shows model: $($script:ModelSlug)"
-    Write-Host '  - the proxy web console Status tab shows an in-flight stream whose API column reads [translate] (or [Response] when the route has url_response_api)'
+    Write-Host '  - the proxy web console Status tab shows an in-flight stream whose API column reads [translate]'
     Write-Host ''
     Write-Dim 'If the Codex log shows "fallback model metadata" or "Unknown model",'
     Write-Dim 'the model catalog was not loaded - please re-run this script.'

@@ -646,7 +646,7 @@ PYTOML
   info ''
   info 'How to verify:'
   info "  - the Codex CLI startup banner shows model: $MODEL_SLUG"
-  info '  - the proxy web console Status tab shows an in-flight stream whose API column reads [translate] (or [Response] when the route has url_response_api)'
+  info '  - the proxy web console Status tab shows an in-flight stream whose API column reads [translate]'
   info ''
   dim 'Run this script again to switch models (1/2/3) or restore the default config (9).'
   exit 0
@@ -1161,7 +1161,7 @@ EOF
   info ''
   info 'How to verify:'
   info "  - the Codex CLI startup banner shows model: $MODEL_SLUG"
-  info '  - the proxy web console Status tab shows an in-flight stream whose API column reads [translate] (or [Response] when the route has url_response_api)'
+  info '  - the proxy web console Status tab shows an in-flight stream whose API column reads [translate]'
   info ''
   dim 'If the Codex log shows "fallback model metadata" or "Unknown model",'
   dim 'the model catalog was not loaded - please re-run this script.'

@@ -64,7 +64,7 @@ type RouteRule struct {
 	TextOnly       bool                 `json:"text_only"`                  // 目标模型仅支持纯文本；请求含图片时改走 multimodal_fallback 兜底
 	NoSearch       bool                 `json:"no_search"`                  // 目标上游不支持搜索；请求带搜索工具时改走 search_fallback 兜底
 	EnhanceSearch  *EnhanceSearchConfig `json:"enhance_search,omitempty"`   // 增强搜索：非 nil 启用。请求带搜索工具时不调主力，改用本 route 上游走 kimi 摘要模式
-	URLResponseAPI string               `json:"url_response_api,omitempty"` // 原生 Responses API 上游 Base URL：非空时 Responses 监听口命中本路由的请求不翻译，原样透传到此（仅影响 Responses 口；Anthropic 口流量不受影响仍走 url）
+	URLResponseAPI string               `json:"url_response_api,omitempty"` // 原生 Responses API 上游 Base URL：非空时 Responses 监听口命中本路由的请求不翻译，原样透传到此（仅影响 Responses 口；Anthropic 口流量不受影响仍走 url）。已实现未实测，故使用文档未提及
 	Thinking       string               `json:"thinking,omitempty"`         // 目标模型的思考形态（仅 Responses 翻译流生效）：""/"auto"=按客户端 model 名查表；"adaptive"=强制 adaptive+effort；"budget"=强制 enabled+budget_tokens
 }
 
