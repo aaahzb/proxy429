@@ -71,6 +71,7 @@ const (
 	bkToolUse
 	bkSearchUse   // server_tool_use：query 可能走 input_json_delta（实测 Kimi 常只给 id/name），stop 补全后才发项
 	bkInstantDone // web_search_tool_result 及未知块：start 时块已完整，add+done 已发
+	bkDropped     // translateNone2Low 剥离的思考块：占位对齐 index，不发事件、不进 items
 )
 
 type blockState struct {
@@ -103,6 +104,7 @@ type anthToRespStream struct {
 	stopReason      string
 	triple          *searchTriple          // 搜索信封归属三元组（路由定案后由 translatingWriter 注入；nil = 不出信封）
 	lastSearchUse   map[string]interface{} // 最近一个 server_tool_use 块（结果块到达时配对封信封）
+	stripThinking   bool                   // translateNone2Low：剥离 thinking/redacted_thinking 块（下游看到关思考响应）
 }
 
 func newAnthToRespStream(emit func(string), model string, reg *toolRegistry) *anthToRespStream {
@@ -233,6 +235,13 @@ func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}
 		// （kimiSearchPreamble、stripSearchQueryEcho）要整块判定（回声行整行删/
 		// 重复裸前言剥光/纯前言丢弃），得等文本岔开前缀（或块收尾）再定。
 	case "thinking", "redacted_thinking":
+		if s.stripThinking {
+			// translateNone2Low：整块剥离——不发事件、不进 items，回收入口预分配的
+			// outputIndex 保持后续块序号连续；delta/stop 见到 bkDropped 直接跳过。
+			bs.kind = bkDropped
+			s.nextOutputIndex--
+			break
+		}
 		if objStr(cb, "type") == "thinking" {
 			bs.kind = bkThinking
 			bs.accum = objStr(cb, "thinking")
@@ -315,6 +324,9 @@ func (s *anthToRespStream) handleBlockDelta(index int, delta map[string]interfac
 	if bs == nil || delta == nil {
 		return
 	}
+	if bs.kind == bkDropped {
+		return // 已剥离的思考块：delta 直接丢弃
+	}
 	switch objStr(delta, "type") {
 	case "text_delta":
 		t := objStr(delta, "text")
@@ -369,6 +381,9 @@ func (s *anthToRespStream) handleBlockStop(index int) {
 		return
 	}
 	delete(s.blocks, index)
+	if bs.kind == bkDropped {
+		return // 已剥离的思考块：不发 done 事件、不进 items
+	}
 	switch bs.kind {
 	case bkText:
 		if bs.heldText {
@@ -527,11 +542,12 @@ func (s *anthToRespStream) buildFinalResponse() map[string]interface{} {
 // 主管线写什么这里都能接：200+SSE → 状态机实时翻译；200+JSON（上游对流式请求回了
 // 非流式）→ 缓冲后整转；非 200 → 缓冲错误体转 Responses 错误 JSON。
 type translatingWriter struct {
-	dst          http.ResponseWriter
-	clientStream bool
-	model        string
-	reg          *toolRegistry
-	triple       *searchTriple // 搜索信封归属三元组（主 handler 路由定案后经 setSearchTriple 注入）
+	dst           http.ResponseWriter
+	clientStream  bool
+	model         string
+	reg           *toolRegistry
+	triple        *searchTriple // 搜索信封归属三元组（主 handler 路由定案后经 setSearchTriple 注入）
+	stripThinking bool          // translateNone2Low 升级流：非流式整转（finishBuffered）剥离思考块；流式由 conv.stripThinking 承担
 
 	header http.Header
 	status int
@@ -717,7 +733,7 @@ func (tw *translatingWriter) finishBuffered() {
 		writeResponsesError(tw.dst, http.StatusBadGateway, "api_error", "invalid upstream JSON: "+err.Error())
 		return
 	}
-	respObj := anthropicToResponsesObject(msg, tw.model, tw.reg, tw.triple)
+	respObj := anthropicToResponsesObject(msg, tw.model, tw.reg, tw.triple, tw.stripThinking)
 	if !tw.clientStream {
 		b, _ := json.Marshal(respObj)
 		tw.writeDstHeader(http.StatusOK, "application/json")

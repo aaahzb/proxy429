@@ -214,7 +214,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// auto：fable-5 表内 → adaptive + effort 映射（high→high）。
-	out, _, err := responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "")
+	out, _, _, err := responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "", false)
 	if err != nil {
 		t.Fatalf("auto err: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// budget 强制：同为 fable-5 别名，路由声明 budget → enabled+16000（压顶），无 output_config。
-	out, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "budget")
+	out, _, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "budget", false)
 	if err != nil {
 		t.Fatalf("budget err: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// adaptive 强制：gpt-5-codex 不在表内，路由声明 adaptive → adaptive+effort high。
-	out, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "high"), nil, nil, "adaptive")
+	out, _, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "high"), nil, nil, "adaptive", false)
 	if err != nil {
 		t.Fatalf("adaptive err: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// 强制 adaptive + 显式关（effort none）→ disabled（cannotDisable 被覆盖，允许关）。
-	out, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "adaptive")
+	out, _, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "adaptive", false)
 	if err != nil {
 		t.Fatalf("adaptive none err: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// budget 强制 + 显式关 → disabled。
-	out, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "none"), nil, nil, "budget")
+	out, _, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "none"), nil, nil, "budget", false)
 	if err != nil {
 		t.Fatalf("budget none err: %v", err)
 	}
@@ -373,7 +373,7 @@ func TestAnthropicToResponsesObject(t *testing.T) {
 			"input_tokens": 77, "output_tokens": 9, "cache_read_input_tokens": 11,
 		},
 	}
-	out := anthropicToResponsesObject(msg, "gpt-5-codex", nil, nil)
+	out := anthropicToResponsesObject(msg, "gpt-5-codex", nil, nil, false)
 	if out["id"] != "resp_msg_1" || out["object"] != "response" || out["status"] != "completed" {
 		t.Errorf("骨架: id=%v object=%v status=%v", out["id"], out["object"], out["status"])
 	}
@@ -698,7 +698,7 @@ func TestAnthropicToResponsesObjectDropsEmptySearch(t *testing.T) {
 		},
 		"usage": map[string]interface{}{"input_tokens": 1, "output_tokens": 1},
 	}
-	out := anthropicToResponsesObject(msg, "k3-256k", nil, nil)
+	out := anthropicToResponsesObject(msg, "k3-256k", nil, nil, false)
 	output := asArr(out["output"])
 	if len(output) != 1 {
 		t.Fatalf("output 数=%d, want 1（空搜索三连全丢）: %v", len(output), output)
@@ -725,7 +725,7 @@ func TestAnthropicToResponsesObjectKeepsRealSearch(t *testing.T) {
 		},
 		"usage": map[string]interface{}{"input_tokens": 1, "output_tokens": 1},
 	}
-	out := anthropicToResponsesObject(msg, "k3-256k", nil, nil)
+	out := anthropicToResponsesObject(msg, "k3-256k", nil, nil, false)
 	output := asArr(out["output"])
 	// 回声文本已删：web_search_call(调用) + web_search_call(来源) + message(答案) = 3
 	if len(output) != 3 {

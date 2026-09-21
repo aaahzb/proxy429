@@ -46,6 +46,14 @@ type ctxKeyThinkT struct{}
 
 var ctxKeyThink ctxKeyThinkT
 
+// ctxKeyNone2Low 是内部请求 context 的键：translateNone2Low 升级标记——翻译口把
+// 下游的关思考请求悄悄升级为 low 思考发上游（回传剥离思考块，下游无感知）。
+// 主 handler 据此给 flight 打 [off->low] 徽标，并在上游 400 拒 thinking 时
+// 回退关思考重试一次。
+type ctxKeyNone2LowT struct{}
+
+var ctxKeyNone2Low ctxKeyNone2LowT
+
 // ctxKeyTranslated 的取值：flight.translated 同款三态——
 // translatedResponses 表示 Responses 请求被翻译成 Anthropic 走主管线（API 列 [translate]）；
 // translatedResponsesRaw 表示命中路由配了 url_response_api，Responses 原文透传不翻译（API 列 [Response]）。
@@ -232,7 +240,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	if rr := matchRouteRule(c, origModel); rr != nil {
 		thinkStyle = rr.Thinking
 	}
-	anth, reg, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle)
+	anth, reg, upgraded, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle, c.TranslateNone2Low)
 	if err != nil {
 		writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -257,6 +265,9 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	r2 := r.Clone(r.Context())
 	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyTranslated, translatedResponses))
 	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeySearchReplay, replay))
+	if upgraded {
+		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyNone2Low, true))
+	}
 	if convID != "" {
 		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyConvID, convID))
 	}
@@ -275,6 +286,10 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tw := newTranslatingWriter(w, clientStream, origModel, reg)
+	// translateNone2Low 升级流：回传剥离思考块（流式由 conv 状态机剥离、非流式由
+	// finishBuffered 整转剥离），下游看到的仍是关思考响应；usage 不碰，如实透传。
+	tw.stripThinking = upgraded
+	tw.conv.stripThinking = upgraded
 	handler(tw, r2)
 	tw.finish()
 }
@@ -315,7 +330,8 @@ func isMeaningfulText(s string) bool { return strings.TrimSpace(s) != "" }
 // 对照 cc-switch responses_request_to_anthropic。返回的工具注册表记录 custom/
 // namespace/tool_search 工具的原始身份，响应翻译（流式与非流式）据此拆包。
 func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, *toolRegistry, error) {
-	return responsesToAnthropicTriple(body, nil, nil, "")
+	out, reg, _, err := responsesToAnthropicTriple(body, nil, nil, "", false)
+	return out, reg, err
 }
 
 // responsesToAnthropicTriple 同 responsesToAnthropic，额外带本请求的路由预测三元组
@@ -324,7 +340,11 @@ func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, 
 // 模型思考形态 thinkStyle（""/"auto"=按客户端 model 名查表；"adaptive"=强制 adaptive；
 // "budget"=强制 enabled+budget_tokens——路由 thinking 参数，解决路由目标模型与客户端
 // 别名的思考能力不一致，如客户端叫 claude-fable-5 实际路由到只支持 budget 的 Kimi）。
-func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx, thinkStyle string) (map[string]interface{}, *toolRegistry, error) {
+// none2Low=true（配置 translateNone2Low）时：下游显式关思考（effort none/off/disabled）
+// 的请求被悄悄升级为 low 思考发上游，返回的 upgraded=true（回传侧剥离思考块，下游
+// 无感知；usage 如实透传）。动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview
+// 无思考版」——开着 low 让 K3 不被降级路由到 K2.8。
+func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx, thinkStyle string, none2Low bool) (map[string]interface{}, *toolRegistry, bool, error) {
 	result := map[string]interface{}{}
 	if model := objStr(body, "model"); model != "" {
 		result["model"] = model
@@ -367,7 +387,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	case []interface{}:
 		msgs, err = convertInputToMessages(inp, reg, reqTriple, replay)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 	}
 
@@ -377,12 +397,12 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	msgs = dropEmptyMessages(msgs)
 	msgs = ensureLeadingUserMessage(msgs)
 	if len(msgs) == 0 {
-		return nil, nil, fmt.Errorf("cannot convert request: empty messages")
+		return nil, nil, false, fmt.Errorf("cannot convert request: empty messages")
 	}
 	trimTrailingAssistantText(msgs)
 	msgs = dropEmptyMessages(msgs)
 	if len(msgs) == 0 {
-		return nil, nil, fmt.Errorf("cannot convert request: empty messages")
+		return nil, nil, false, fmt.Errorf("cannot convert request: empty messages")
 	}
 	result["messages"] = msgs
 
@@ -420,14 +440,41 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	historyValid := trailingTurnSupportsThinking(msgs)
 	thinkingEnabled := false
 	budget := effortToThinkingBudget(effort)
+	// upgraded：translateNone2Low 生效标记——下游关思考被悄悄升级为 low 发上游，
+	// 回传侧据此剥离思考块（主 handler 打 [off->low] 徽标、上游 400 拒时回退重试）。
+	upgraded := false
+	// upgradeNoneToLow 把关思考升级为 low：adaptive 模型给 thinking:adaptive+effort:low；
+	// budget 模型给 enabled+2048（压顶 maxTokens/2，容不下 1024 下限则放弃升级保持关闭）。
+	// thinkingEnabled 打开后 temperature/top_p 不透传（与正常 thinking 路径同规则）。
+	upgradeNoneToLow := func() bool {
+		if adaptiveModel {
+			result["thinking"] = map[string]interface{}{"type": "adaptive"}
+			result["output_config"] = map[string]interface{}{"effort": "low"}
+			thinkingEnabled = true
+			return true
+		}
+		budget = effortToThinkingBudget("low")
+		if ceiling := maxTokens / 2; budget > ceiling {
+			budget = ceiling
+		}
+		if budget < 1024 {
+			return false
+		}
+		thinkingEnabled = true // budget 模型的 thinking 字段由 switch 后的统一尾巴写
+		return true
+	}
 	switch {
 	case !historyValid:
 		// 工具续轮缺签名 thinking 块可回放：关不掉的模型直接报错（照抄 cc-switch 文案），
 		// 能关的 adaptive 模型显式关闭，其余模型不开 thinking（budget 路径一并跳过）。
+		// none2Low 升级在本分支同样生效（工具续推是 Codex 的主要请求形态）：上游若拒
+		// 「无思考历史却开思考」，主 handler 一次性 400 兜底回退为关思考重发。
 		if cannotDisable {
-			return nil, nil, fmt.Errorf("Anthropic model requires thinking, but the tool history has no signed thinking block to replay")
+			return nil, nil, false, fmt.Errorf("Anthropic model requires thinking, but the tool history has no signed thinking block to replay")
 		}
-		if adaptiveShouldThink {
+		if none2Low && explicitlyDisabled {
+			upgraded = upgradeNoneToLow()
+		} else if adaptiveShouldThink {
 			result["thinking"] = map[string]interface{}{"type": "disabled"}
 		}
 	case adaptiveShouldThink && (!explicitlyDisabled || cannotDisable):
@@ -438,9 +485,15 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		} else if explicitlyDisabled && cannotDisable {
 			// Fable/Mythos 关不掉 thinking：用 low 表达 Codex 显式的 none。
 			result["output_config"] = map[string]interface{}{"effort": "low"}
+			upgraded = none2Low // 下游本就想关思考：开启 translateNone2Low 时回传侧剥离思考块
 		}
 	case explicitlyDisabled:
-		result["thinking"] = map[string]interface{}{"type": "disabled"}
+		if none2Low {
+			upgraded = upgradeNoneToLow()
+		}
+		if !upgraded {
+			result["thinking"] = map[string]interface{}{"type": "disabled"}
+		}
 	case budget > 0:
 		// budget 上限压到 max_tokens 的一半（给可见回答留空间），不足 1024 下限则不开。
 		if ceiling := maxTokens / 2; budget > ceiling {
@@ -474,10 +527,11 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			// 不悄悄弱化 required/指定选择。对照 cc-switch 398-425。
 			if t := objStr(mapped, "type"); thinkingEnabled && (t == "any" || t == "tool") {
 				if cannotDisable {
-					return nil, nil, fmt.Errorf("Anthropic model requires adaptive thinking and cannot honor a forced tool_choice")
+					return nil, nil, false, fmt.Errorf("Anthropic model requires adaptive thinking and cannot honor a forced tool_choice")
 				}
 				result["thinking"] = map[string]interface{}{"type": "disabled"}
 				delete(result, "output_config")
+				upgraded = false // 思考已被关掉：上游不会再产思考块，回传侧无需剥离
 				if v, ok := body["temperature"]; ok {
 					result["temperature"] = v
 				}
@@ -496,7 +550,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			tc["disable_parallel_tool_use"] = true
 		}
 	}
-	return result, reg, nil
+	return result, reg, upgraded, nil
 }
 
 // responsesSystemText 提取 system/developer 消息项的文本（content 为字符串或 parts 数组）。
@@ -1541,7 +1595,9 @@ func buildResponsesUsage(usage map[string]interface{}) map[string]interface{} {
 // model 参数是客户端原始 model 名（管线回传时已被改写回原名的场景之外兜底用）。
 // reg 是请求侧建立的工具注册表：tool_use 块据此还原 custom/namespace/tool_search 身份。
 // triple 是搜索信封的归属三元组（nil = 不出搜索信封，如 Anthropic 口直接调用）。
-func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *toolRegistry, triple *searchTriple) map[string]interface{} {
+// stripThinking=true（translateNone2Low 升级流）时丢弃 thinking/redacted_thinking 块
+// （不产 reasoning 项）；usage 不受影响，如实透传。
+func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *toolRegistry, triple *searchTriple, stripThinking bool) map[string]interface{} {
 	id := objStr(msg, "id")
 	var responseID string
 	switch {
@@ -1599,6 +1655,9 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 			}
 			output = append(output, toolCallItemFromRegistry(reg, itemID, "completed", callID, name, args))
 		case "thinking", "redacted_thinking":
+			if stripThinking {
+				continue // translateNone2Low：剥离思考块，下游看到的是关思考响应
+			}
 			flushText()
 			if enc := encodeThinkingEnvelope(blk); enc != "" {
 				item := map[string]interface{}{

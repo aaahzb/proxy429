@@ -10,17 +10,17 @@
 
 ## 提交 C — translateNone2Low（仅 Responses 翻译口）
 动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」，不想让 K3 被路由到 K2.8。
-- [ ] Config 加 `TranslateNone2Low bool \`json:"translateNone2Low"\``（默认 false）；config.example.json 同步加；config_example_test.go 字段清单同步
-- [ ] responses.go：responsesToAnthropicTriple 加 none2Low 参数与 upgraded 返回；升级逻辑覆盖 historyValid 与 !historyValid 两条路径（被打回实现只覆盖前者，工具续推不可达是致命缺陷）
+- [x] Config 加 `TranslateNone2Low bool \`json:"translateNone2Low"\``（默认 false）；config.example.json 同步加；config_example_test.go 字段清单同步
+- [x] responses.go：responsesToAnthropicTriple 加 none2Low 参数与 upgraded 返回；升级逻辑覆盖 historyValid 与 !historyValid 两条路径（被打回实现只覆盖前者，工具续推不可达是致命缺陷）
   - adaptive 模型：thinking={type:adaptive} + output_config.effort="low"
   - budget 模型：thinking={type:enabled, budget_tokens:2048}（受 maxTokens/2 上限、<1024 则不升级）
   - tool_choice 冲突分支要把 upgraded 复位为 false
-- [ ] main.go：ctxKeyNone2Low 透传；handler 里升级流 f.think="off->low"；一次性 400 回退：错误体含 thinking 字样时用文本级手术把 thinking 改回 disabled、删 output_config，attempt-- 重发（仿 search-strip 回退）
-- [ ] responses_stream.go：anthToRespStream 剥离思考块（bkDropped：不分配 outputIndex、不发事件、回滚）；usage 不动，如实透传
-- [ ] responses.go：anthropicToResponsesObject 非流式重建也剥离 thinking/redacted_thinking
-- [ ] logview.go：apiCell 双色徽标 [off->low]：off=#c586c0（[translate] 同色）、箭头 #9a9a9a、low=#d97757（Anthropic 橙）
-- [ ] 测试：升级形状（adaptive/budget）、!historyValid 升级、流式+非流式剥离、usage 保留
-- [ ] 文档：应用内文档中英两版、docs/使用说明.md、README.md
+- [x] main.go：ctxKeyNone2Low 透传；handler 里升级流 f.think="off->low"；一次性 400 回退：错误体含 thinking 字样时用文本级手术把 thinking 改回 disabled、删 output_config，attempt-- 重发（仿 search-strip 回退）
+- [x] responses_stream.go：anthToRespStream 剥离思考块（bkDropped：不分配 outputIndex、不发事件、回滚）；usage 不动，如实透传
+- [x] responses.go：anthropicToResponsesObject 非流式重建也剥离 thinking/redacted_thinking
+- [x] logview.go：apiCell 双色徽标 [off->low]：off=#c586c0（[translate] 同色）、箭头 #9a9a9a、low=#d97757（Anthropic 橙）
+- [x] 测试：升级形状（adaptive/budget）、!historyValid 升级、流式+非流式剥离、usage 保留
+- [x] 文档：应用内文档中英两版、docs/使用说明.md、README.md
 
 ## 提交 D — 双链路报文查看（下游↔代理 / 代理↔上游）
 - [ ] flight 加 reqDown/reqDownTrunc/contentDown/fullContentDown + purgeFull/finishedFlight 镜像；仅当与上行侧有差异时才存（翻译流恒存；原生流被改写或 convertAlltoStream 重建才存）

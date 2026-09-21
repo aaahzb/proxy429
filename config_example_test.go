@@ -69,7 +69,7 @@ func TestConfigCoversAllStructFields(t *testing.T) {
 		"upstream_header_timeout_s", "ping_interval_s", "log_request_detail",
 		"log_file", "recent_sample_window", "routes", "classifier_route",
 		"fast_route", "multimodal_fallback", "search_fallback",
-		"convertAlltoStream", "responses_listen",
+		"convertAlltoStream", "translateNone2Low", "responses_listen",
 	} {
 		if exempt[f] {
 			continue

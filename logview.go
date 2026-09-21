@@ -1259,7 +1259,11 @@ function apiCell(translated, think){
   else if(translated){ name = '[translate]'; color = '#c586c0'; }
   else { name = '[Anthropic]'; color = '#d97757'; }
   var html = '<span style="color:'+color+'">'+name+'</span>';
-  if(think){
+  if(think === 'off->low'){
+    // translateNone2Low 升级流双色徽标：off 用翻译紫（下游口径：它发的是关思考），
+    // low 用 Anthropic 橙（上游口径：实际发给上游的 low 思考）。
+    html += '<span style="color:#c586c0">[off</span><span style="color:#9a9a9a">-&gt;</span><span style="color:#d97757">low]</span>';
+  } else if(think){
     var tc = translated==='responses-raw' ? '#2bbf8a' : '#d97757';
     html += '<span style="color:'+tc+'">['+esc(think)+']</span>';
   }
@@ -2538,6 +2542,12 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <td style="padding:6px 8px;vertical-align:top">仅 Responses 翻译流生效（透传不翻译、Anthropic 口不改写）；别名命中 adaptive 表但目标是 Kimi 等 budget 上游时配 "budget" 纠正</td>
       </tr>
       <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>translateNone2Low</code></td>
+      <td style="padding:6px 8px;vertical-align:top">顶层</td>
+      <td style="padding:6px 8px;vertical-align:top">Responses 翻译口的关思考请求悄悄升级为 low 思考发上游，回传剥离思考块让下游无感知（usage 如实透传）</td>
+      <td style="padding:6px 8px;vertical-align:top">默认 false。动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」——开着 low 避免 K3 被降级路由；上游拒 thinking 时自动回退关思考重试一次；API 列显双色徽标 [off-&gt;low]</td>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
       <td style="padding:6px 8px;vertical-align:top"><code>multimodal_fallback</code></td>
       <td style="padding:6px 8px;vertical-align:top">顶层</td>
       <td style="padding:6px 8px;vertical-align:top">图片兜底上游</td>
@@ -2643,6 +2653,12 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <td style="padding:6px 8px;vertical-align:top">routes[] entry</td>
       <td style="padding:6px 8px;vertical-align:top">Declares the target model's thinking shape: auto (default, looked up by client model name) / adaptive / budget</td>
       <td style="padding:6px 8px;vertical-align:top">Only applies to Responses translated streams (pass-through doesn't translate, Anthropic port isn't rewritten); when an alias hits the adaptive table but the target is a budget upstream like Kimi, set "budget" to correct it</td>
+      </tr>
+      <tr style="border-bottom:1px solid #2a2a2a">
+      <td style="padding:6px 8px;vertical-align:top"><code>translateNone2Low</code></td>
+      <td style="padding:6px 8px;vertical-align:top">Top level</td>
+      <td style="padding:6px 8px;vertical-align:top">Silently upgrades thinking-off requests at the Responses translation port to low thinking upstream, stripping thinking blocks on the way back so the client sees no difference (usage stays truthful)</td>
+      <td style="padding:6px 8px;vertical-align:top">Default false. Motivation: Kimi's docs state that with thinking off, K3-series requests are routed to the K2.8 Preview (no-thinking) model — low thinking avoids that downgrade. One automatic retry with thinking off if the upstream rejects thinking. The API column shows a two-tone [off-&gt;low] badge</td>
       </tr>
       <tr style="border-bottom:1px solid #2a2a2a">
       <td style="padding:6px 8px;vertical-align:top"><code>multimodal_fallback</code></td>

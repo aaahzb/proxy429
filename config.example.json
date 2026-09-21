@@ -15,6 +15,7 @@
   "log_file": "",
   "recent_sample_window": 20,
   "convertAlltoStream": false,
+  "translateNone2Low": false,
   "responses_listen": "127.0.0.1:8081",
   "routes": [
     {

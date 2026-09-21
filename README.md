@@ -23,6 +23,13 @@ providers.
   envelope in the response; follow-up questions read the previous search
   content directly without re-searching (translation path only — Claude
   Code runs its own independent search).
+- **Silent low-thinking upgrade** (`"translateNone2Low": true`, Responses
+  translation port only): thinking-off requests are quietly upgraded to low
+  thinking upstream, and thinking blocks are stripped on the way back so the
+  client still sees a thinking-off response (usage stays truthful). Avoids
+  Kimi's documented "thinking off routes K3-series to the K2.8 Preview
+  no-thinking model" downgrade; one automatic retry with thinking off if the
+  upstream rejects thinking. The console shows a two-tone `[off->low]` badge.
 - **Live observability**: a local web console showing in-flight streams,
   token and cache-hit telemetry, and per-request diagnostics. The console
   UI is bilingual (中文/English): it follows the system language on first
@@ -109,6 +116,10 @@ observability. Also: [使用说明](docs/使用说明.md) ·
   保持有效。
 - **搜索信封**：web 搜索结果封进加密信封随响应返回，后续提问直接读上次
   搜索内容、不再重搜（仅限翻译场景——Claude Code 会独立开一个代理搜索）。
+- **关思考悄悄升级 low**（`"translateNone2Low": true`，仅 Responses 翻译口）：
+  下游关思考的翻译请求自动改成 low 思考发上游，回传剥离思考块，下游无感知、
+  用量如实透传。规避 Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」
+  的 K3 降级；上游拒思考时自动回退关思考重试一次。控制台显双色徽标 [off->low]。
 - 实时可观测性：本地网页控制台显示在途流、token 与缓存命中统计、逐请求
   诊断。控制台界面中英双语：首次运行跟随系统语言，网页里可切换，
   选择经 `ui_lang` 配置项持久记忆。

@@ -51,6 +51,7 @@ type Config struct {
 	SearchFallback             *SearchRoute     `json:"search_fallback,omitempty"`     // 搜索兜底路由；请求带搜索工具却命中 no_search 上游时改走此处；空则不启用
 	SearchDebugDir             string           `json:"search_debug_dir,omitempty"`    // 搜索调试目录；非空时把搜索摘要各步请求/响应 raw 写入该目录，便于排查
 	ConvertAllToStream         bool             `json:"convertAlltoStream"`            // 全局流式化：开启后所有非流式请求改为流式发上游，收集完整流后重建非流式 JSON 一次性返回（客户端无感知，网页可监控吐字/首字/tok/s）
+	TranslateNone2Low          bool             `json:"translateNone2Low"`             // Responses 翻译口：下游关思考的请求悄悄升级为 low 思考发上游、回传剥离思考块（下游无感知，usage 如实透传）；默认 false。动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」，开 low 避免 K3 被降级路由
 	ResponsesListen            string           `json:"responses_listen"`              // OpenAI Responses API 监听口（如 127.0.0.1:8081）；空不启用。把 Responses 协议请求翻译成 Anthropic 走主管线，供 Codex CLI 等工具接入。保存/重载即动态启停
 	UILang                     string           `json:"ui_lang,omitempty"`             // 网页控制台语言："zh"/"en"；空 = 跟随操作系统语言（探测不到用英文）。网页顶栏切换语言时写回本字段并热生效
 }
@@ -2356,6 +2357,17 @@ func setTopLevelJSONValue(body []byte, key string, rawValue []byte) ([]byte, boo
 	return out, true
 }
 
+// disableThinkingInBody 把请求体顶层 thinking 改为 {"type":"disabled"} 并删除
+// output_config：translateNone2Low 升级被上游 400 拒后的一次性回退手术
+// （下游本来要的就是关思考，回退语义无损）。文本级编辑，其余字段原样保留。
+func disableThinkingInBody(body []byte) ([]byte, bool) {
+	nb, ok := setTopLevelJSONValue(body, "thinking", []byte(`{"type":"disabled"}`))
+	if !ok {
+		return nil, false
+	}
+	return setTopLevelJSONValue(nb, "output_config", nil)
+}
+
 // isClassifierRequest 判断 body 是否为分类器请求（system 字段前缀匹配）。
 // 与 maybeRewriteClassifier 共用同一判定，但只判定不改写；供路由决策使用。
 // 独立于 ClassifierThinkingDisabled：即使未开 thinking 改写，分类器路由仍可生效。
@@ -2519,7 +2531,7 @@ func extractConvID(body []byte) string {
 // extractThinkMode 提取 Anthropic 格式请求体里的思考配置，供状态页「API」列思考值显示
 // 实际发给上游的形态（调用点在分类器关思考改写之后；翻译口传进来的是映射后的 body）。
 // 值取最短形态（词汇口径由列颜色承担，不靠前缀文字）：
-// thinking.type=disabled → "关"；enabled → "开 <budget_tokens>"（无预算只显 "开"）；
+// thinking.type=disabled → "off"；enabled → "on <budget_tokens>"（无预算只显 "on"）；
 // adaptive 无档 → "adaptive"，带 output_config.effort → 只显档位词（"high"/"max"…）；
 // 只有 output_config.effort 没有 thinking → 同样只显档位词；未知 type 原样显示。
 // 无 thinking/output_config 字段返回空（列显 -）。
@@ -3684,6 +3696,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 //   - delta 事件只往已知字段追加：text_delta->text、thinking_delta->thinking、
 //     signature_delta->signature、input_json_delta->input（tool_use 参数，收完解析成对象）；
 //   - usage 合并：message_start 打底、message_delta 覆盖（后值语义，与统计逻辑一致）。
+//
 // 参数 w：客户端响应写入器；resp/head/br：上游响应（head 为 peekHead 已读的字节，需先处理）；
 // f：本次 flight。返回 (是否完整收到 message_stop, 输出 token 数)。
 // 流不完整时未向客户端写任何字节，调用方可安全整体重试（重发流式请求、重收一次流）。
@@ -3905,6 +3918,7 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 //	A. 上游 HTTP 状态码本身就是 429/5xx；
 //	B. 状态码 200，但错误藏在 SSE 响应体里（event:error / rate_limit 等）；
 //	C. 正常响应，直接透传。
+//
 // countTokensPath 是 Anthropic 的 token 计数端点：Claude Code 定期调它做上下文长度估算，
 // 响应只有 {"input_tokens":N}，不生成内容。这类流照转上游，仅打标记便于网页区分。
 const countTokensPath = "/v1/messages/count_tokens"
@@ -3957,6 +3971,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if v, ok := r.Context().Value(ctxKeyThink).(string); ok {
 		f.think = v
 	}
+	// translateNone2Low 升级标记（Responses 翻译口把关思考悄悄升成 low 发上游）：
+	// API 列显双色徽标 [off->low]；转发循环里上游 400 拒 thinking 时回退关思考重试一次。
+	none2LowUpgraded, _ := r.Context().Value(ctxKeyNone2Low).(bool)
 	// Responses 翻译口带来的搜索还原上下文：水位主动剥块计数进 flight（[剥N] 显示）；
 	// replay 指针留在 flight 上，400 兜底剥块时取还原时刻学对话水位
 	// （见转发循环的 tool_call_id 分支）。
@@ -4025,6 +4042,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// 已在上面由 ctx 带上，这里不覆盖。
 	if f.think == "" {
 		f.think = extractThinkMode(body)
+	}
+	// 升级流的思考值覆盖为 [off->low]（extractThinkMode 看到的是升级后的 low，
+	// 体现不出「下游关、上游开」的悄悄升级语义）。
+	if none2LowUpgraded {
+		f.think = "off->low"
 	}
 
 	// 1.6 路由匹配。
@@ -4387,6 +4409,23 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					stats.addModelRetry(f.realModel())
 					body = nb
 					searchStripped = true
+					attempt--
+					resp.Body.Close()
+					continue
+				}
+			}
+			// translateNone2Low 升级被上游拒（如无思考历史却开思考）：把 thinking 改回
+			// 关闭立即重试一次——下游本来要的就是关思考，语义无损；不烧退避预算
+			// （attempt--，与搜索剥块兜底同款）。回退后上游收到的即是关思考，响应
+			// 不会有思考块，回传侧剥离自然无事可做；徽标也回退为如实显示。
+			if none2LowUpgraded && bytes.Contains(head, []byte("thinking")) {
+				if nb, ok := disableThinkingInBody(body); ok {
+					log.Printf("[fallback] #%d upstream rejected the low-thinking upgrade (HTTP %d); reverted to thinking-off and retried", f.id, resp.StatusCode)
+					stats.statusRetries.Add(1)
+					stats.addModelRetry(f.realModel())
+					body = nb
+					none2LowUpgraded = false
+					f.think = extractThinkMode(body)
 					attempt--
 					resp.Body.Close()
 					continue
