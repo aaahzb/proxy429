@@ -31,10 +31,12 @@ providers.
   no-thinking model" downgrade. The same protection covers the other door: a
   tool-continuation whose history has no signed thinking block to replay would
   make the proxy disable thinking itself (same K2.8 routing) — with this flag
-  it tries low instead, and does NOT strip the returned thinking blocks so the
-  history heals on the next turn. One automatic retry with thinking off if the
+  it sends the downstream's requested effort instead (low as floor when none
+  was given), and does NOT strip the returned thinking blocks so the history
+  heals on the next turn. One automatic retry with thinking off if the
   upstream rejects thinking. The console shows a two-tone `[off->low]` badge
-  for the quiet upgrade (the history fallback shows `low` as-is).
+  for the quiet upgrade (the history fallback shows the requested effort
+  as-is).
 - **Live observability**: a local web console showing in-flight streams,
   token and cache-hit telemetry, and per-request diagnostics. The stream
   viewer records request/response bodies per link side — proxy↔upstream
@@ -132,9 +134,9 @@ observability. Also: [使用说明](docs/使用说明.md) ·
   用量如实透传。规避 Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」
   的 K3 降级。另一扇门同样罩住：工具续轮历史不可回放、而下游又没发关思考
   （Codex 的 effort 列表没有 none 档，最低就是 low）时，代理兜底本会自行关思考
-  ——同样触发 K2.8 路由——开着本参数改试 low 发上游，且不剥思考块，块随回传
-  带回签名、下一轮历史自愈。上游拒思考时自动回退关思考重试一次。控制台对
-  悄悄升级显双色徽标 [off->low]，历史兜底试 low 如实显示 low。
+  ——同样触发 K2.8 路由——开着本参数改为按下游所请档位发（没给/不认识 → low
+  保底），且不剥思考块，块随回传带回签名、下一轮历史自愈。上游拒思考时自动回退
+  关思考重试一次。控制台对悄悄升级显双色徽标 [off->low]，历史兜底如实显示所请档位。
 - 实时可观测性：本地网页控制台显示在途流、token 与缓存命中统计、逐请求
   诊断。流查看器的请求体/返回体按链路侧分存——代理↔上游（代理实发/实收）
   与 下游↔代理（客户端实发/实收），仅两侧有差异的流才双存（翻译流恒不同，

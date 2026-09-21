@@ -139,13 +139,14 @@ func TestNone2LowUpgradeToolContinuation(t *testing.T) {
 	}
 }
 
-// TestNone2LowTryLowOnInvalidHistory 锁定 #11/#12 实况的修复：工具续轮历史不可回放、
-// 下游又【没有】显式关思考（effort=max——Codex config 常态，enabled-reasoning-efforts
-// 根本没有 none 档）时，代理的兜底不再是自行关思考（关 = Kimi 把 K3 路由 K2.8 无思考版），
-// translateNone2Low 开着就改试 low：budget 路由 enabled/2048、adaptive 路由（用户配置
-// 的 k3-256k 路由形状）adaptive+effort:low。n2l=n2lTryLow 而非 n2lStealth——下游本来就要
-// 思考，回传侧不得剥思考块（块要随回传带回签名，下一轮历史自愈）。开关关着保持旧行为。
-func TestNone2LowTryLowOnInvalidHistory(t *testing.T) {
+// TestNone2LowTryOnInvalidHistory 锁定 #11/#12 实况的修复：工具续轮历史不可回放、下游又
+// 【没有】显式关思考（effort=max——Codex config 常态，enabled-reasoning-efforts 根本没有
+// none 档）时，代理的兜底不再是自行关思考（关 = Kimi 把 K3 路由 K2.8 无思考版），
+// translateNone2Low 开着就按下游所请档位原样发：budget 路由给对应预算（max→16384 压顶
+// max_tokens/2=16000）、adaptive 路由（用户配置的 k3-256k 路由形状）output_config.effort=
+// 所请档位；没给/不认识 → low 保底。n2l=n2lTryOn 而非 n2lStealth——下游本来就要思考，回传
+// 侧不得剥思考块（块要随回传带回签名，下一轮历史自愈）。开关关着保持旧行为。
+func TestNone2LowTryOnInvalidHistory(t *testing.T) {
 	mk := func(model, effort string) map[string]interface{} {
 		return map[string]interface{}{
 			"model": model,
@@ -159,45 +160,60 @@ func TestNone2LowTryLowOnInvalidHistory(t *testing.T) {
 		}
 	}
 
-	// budget 路由 + effort max + 历史不可回放 + 开 → 试 low（非隐式升级）。
+	// budget 路由 + effort max + 历史不可回放 + 开 → 按所请发（非隐式升级）。
 	out, _, n2l, err := responsesToAnthropicTriple(mk("gpt-5-codex", "max"), nil, nil, "", true)
 	if err != nil {
-		t.Fatalf("trylow budget err: %v", err)
+		t.Fatalf("tryon budget err: %v", err)
 	}
-	if n2l != n2lTryLow {
-		t.Errorf("trylow budget: n2l=%d, want n2lTryLow", n2l)
+	if n2l != n2lTryOn {
+		t.Errorf("tryon budget: n2l=%d, want n2lTryOn", n2l)
 	}
 	th := asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
-		t.Errorf("trylow budget: thinking=%v, want enabled/2048", th)
+	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+		t.Errorf("tryon budget: thinking=%v, want enabled/16000（16384 压顶 32000/2）", th)
 	}
 	if out["temperature"] != nil {
-		t.Errorf("trylow 开了 thinking，temperature 应丢弃: %v", out["temperature"])
+		t.Errorf("tryon 开了 thinking，temperature 应丢弃: %v", out["temperature"])
 	}
 
-	// adaptive 路由（用户 k3-256k 路由的 thinkStyle 形状）+ effort max → adaptive+low。
+	// adaptive 路由（用户 k3-256k 路由的 thinkStyle 形状）+ effort max → 所请档位 max。
 	out, _, n2l, err = responsesToAnthropicTriple(mk("fable", "max"), nil, nil, "adaptive", true)
 	if err != nil {
-		t.Fatalf("trylow adaptive err: %v", err)
+		t.Fatalf("tryon adaptive err: %v", err)
 	}
-	if n2l != n2lTryLow {
-		t.Errorf("trylow adaptive: n2l=%d, want n2lTryLow", n2l)
+	if n2l != n2lTryOn {
+		t.Errorf("tryon adaptive: n2l=%d, want n2lTryOn", n2l)
+	}
+	th = asObj(out["thinking"])
+	if objStr(th, "type") != "adaptive" || objStr(asObj(out["output_config"]), "effort") != "max" {
+		t.Errorf("tryon adaptive: thinking=%v output_config=%v, want adaptive/max", th, out["output_config"])
+	}
+
+	// adaptive 路由 + 下游没给档位（reasoning 缺席）→ low 保底，仍是兜底开思考。
+	noEffort := mk("fable", "")
+	delete(noEffort, "reasoning")
+	out, _, n2l, err = responsesToAnthropicTriple(noEffort, nil, nil, "adaptive", true)
+	if err != nil {
+		t.Fatalf("tryon 保底 err: %v", err)
+	}
+	if n2l != n2lTryOn {
+		t.Errorf("tryon 保底: n2l=%d, want n2lTryOn", n2l)
 	}
 	th = asObj(out["thinking"])
 	if objStr(th, "type") != "adaptive" || objStr(asObj(out["output_config"]), "effort") != "low" {
-		t.Errorf("trylow adaptive: thinking=%v output_config=%v, want adaptive/low", th, out["output_config"])
+		t.Errorf("tryon 保底: thinking=%v output_config=%v, want adaptive/low", th, out["output_config"])
 	}
 
 	// 对照：开关关着 → 保持 cc-switch 兜底，显式关思考发上游。
 	out, _, n2l, err = responsesToAnthropicTriple(mk("fable", "max"), nil, nil, "adaptive", false)
 	if err != nil {
-		t.Fatalf("trylow 对照 err: %v", err)
+		t.Fatalf("tryon 对照 err: %v", err)
 	}
 	if n2l != n2lNone {
-		t.Errorf("trylow 对照: n2l=%d, want n2lNone", n2l)
+		t.Errorf("tryon 对照: n2l=%d, want n2lNone", n2l)
 	}
 	if objStr(asObj(out["thinking"]), "type") != "disabled" {
-		t.Errorf("trylow 对照: thinking=%v, want disabled", out["thinking"])
+		t.Errorf("tryon 对照: thinking=%v, want disabled", out["thinking"])
 	}
 }
 
@@ -453,10 +469,10 @@ func TestNone2LowFallbackRetry(t *testing.T) {
 	}
 }
 
-// TestNone2LowTryLowNoStrip 端到端锁定 #11/#12 修复：工具续轮 + effort max（下游没关
-// 思考）+ 开关开 → 上游收到试 low（enabled/2048），且回传【不剥】思考块——下游本来就要
-// 思考，块随回传带回签名让下一轮历史自愈（区别于隐式升级流的关思考下游）。
-func TestNone2LowTryLowNoStrip(t *testing.T) {
+// TestNone2LowTryOnNoStrip 端到端锁定 #11/#12 修复：工具续轮 + effort max（下游没关
+// 思考）+ 开关开 → 上游按所请档位收到 enabled/16000，且回传【不剥】思考块——下游本来
+// 就要思考，块随回传带回签名让下一轮历史自愈（区别于隐式升级流的关思考下游）。
+func TestNone2LowTryOnNoStrip(t *testing.T) {
 	resetStats()
 	var gotBody map[string]interface{}
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -496,10 +512,10 @@ func TestNone2LowTryLowNoStrip(t *testing.T) {
 		t.Fatalf("客户端状态=%d, want 200: %s", resp.StatusCode, raw)
 	}
 
-	// 上游收到的是试 low（enabled/2048），不是关思考。
+	// 上游收到的是按所请档位的开思考（enabled/16000），不是关思考。
 	th := asObj(gotBody["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
-		t.Errorf("上游 thinking=%v, want enabled/2048（试 low）", th)
+	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+		t.Errorf("上游 thinking=%v, want enabled/16000（所请 max 压顶 32000/2）", th)
 	}
 
 	// 回传不剥：输出里必须带 reasoning 项（思考块如实回到下游）。
@@ -514,6 +530,6 @@ func TestNone2LowTryLowNoStrip(t *testing.T) {
 		}
 	}
 	if !foundReasoning {
-		t.Errorf("试 low 不得剥思考块: output=%v", out["output"])
+		t.Errorf("兜底开思考不得剥思考块: output=%v", out["output"])
 	}
 }

@@ -2611,8 +2611,8 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <tr style="border-bottom:1px solid #333">
       <td style="padding:6px 8px;vertical-align:top"><code>translateNone2Low</code></td>
       <td style="padding:6px 8px;vertical-align:top">顶层</td>
-      <td style="padding:6px 8px;vertical-align:top">Responses 翻译口的关思考请求悄悄升级为 low 思考发上游，回传剥离思考块让下游无感知（usage 如实透传）；工具续轮历史不可回放、下游又没关思考时，代理兜底的自行关思考同样改试 low（不剥思考块，带回签名让下轮历史自愈）</td>
-      <td style="padding:6px 8px;vertical-align:top">默认 false。动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」——开着 low 避免 K3 被降级路由；上游拒 thinking 时自动回退关思考重试一次；悄悄升级显双色徽标 [off-&gt;low]，历史兜底试 low 如实显示 low</td>
+      <td style="padding:6px 8px;vertical-align:top">Responses 翻译口的关思考请求悄悄升级为 low 思考发上游，回传剥离思考块让下游无感知（usage 如实透传）；工具续轮历史不可回放、下游又没关思考时，代理兜底的自行关思考改为按下游所请档位发（没给/不认识 → low 保底；不剥思考块，带回签名让下轮历史自愈）</td>
+      <td style="padding:6px 8px;vertical-align:top">默认 false。动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」——开着思考避免 K3 被降级路由；上游拒 thinking 时自动回退关思考重试一次；悄悄升级显双色徽标 [off-&gt;low]，历史兜底如实显示所请档位</td>
       </tr>
       <tr style="border-bottom:1px solid #333">
       <td style="padding:6px 8px;vertical-align:top"><code>multimodal_fallback</code></td>
@@ -2724,8 +2724,8 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <tr style="border-bottom:1px solid #2a2a2a">
       <td style="padding:6px 8px;vertical-align:top"><code>translateNone2Low</code></td>
       <td style="padding:6px 8px;vertical-align:top">Top level</td>
-      <td style="padding:6px 8px;vertical-align:top">Silently upgrades thinking-off requests at the Responses translation port to low thinking upstream, stripping thinking blocks on the way back so the client sees no difference (usage stays truthful). Also covers the other door: a tool-continuation whose history has no signed thinking block would make the proxy disable thinking itself (same K2.8 routing) — with this flag it tries low instead and does NOT strip the returned blocks, so the history heals next turn</td>
-      <td style="padding:6px 8px;vertical-align:top">Default false. Motivation: Kimi's docs state that with thinking off, K3-series requests are routed to the K2.8 Preview (no-thinking) model — low thinking avoids that downgrade. One automatic retry with thinking off if the upstream rejects thinking. The quiet upgrade shows a two-tone [off-&gt;low] badge; the history fallback shows low as-is</td>
+      <td style="padding:6px 8px;vertical-align:top">Silently upgrades thinking-off requests at the Responses translation port to low thinking upstream, stripping thinking blocks on the way back so the client sees no difference (usage stays truthful). Also covers the other door: a tool-continuation whose history has no signed thinking block would make the proxy disable thinking itself (same K2.8 routing) — with this flag it sends the downstream's requested effort instead (low as floor when none was given) and does NOT strip the returned blocks, so the history heals next turn</td>
+      <td style="padding:6px 8px;vertical-align:top">Default false. Motivation: Kimi's docs state that with thinking off, K3-series requests are routed to the K2.8 Preview (no-thinking) model — keeping thinking on avoids that downgrade. One automatic retry with thinking off if the upstream rejects thinking. The quiet upgrade shows a two-tone [off-&gt;low] badge; the history fallback shows the requested effort as-is</td>
       </tr>
       <tr style="border-bottom:1px solid #2a2a2a">
       <td style="padding:6px 8px;vertical-align:top"><code>multimodal_fallback</code></td>

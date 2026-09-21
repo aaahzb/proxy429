@@ -57,6 +57,20 @@ max（codex config model_reasoning_effort="max"，enabled-reasoning-efforts 无 
 - [x] 文档同步：README 中英、docs/使用说明.md、应用内文档配置表（logview.go 中英两版）
 - [x] gofmt/vet/test 全绿 + build.sh 重出 release（含跨平台矩阵）
 
+## 提交 G — 历史兜底不按 low 而是按下游所请档位发（用户拍板：下游要什么给什么）
+背景：提交 F 把 !historyValid 兜底从"自行关思考"改成"固定试 low"。用户质疑：为何不按下游
+的思考模式原样发、被拒再退？分析：400 拒绝风险与档位无关（拒的是"无签名历史却开思考"），
+兜底同样罩住；若历史不可回放是持续性原因（#11→#12 连发即旧代码自我永续的征兆；根因未查清
+前），固定 low 会永远卡在 low，按所请档位发则每轮拿到下游真正要的。按所请发严格更优。
+- [x] responses.go：n2lTryLow 改名 n2lTryOn（兜底开思考）；新增 tryRequestedThinking 闭包——
+  adaptive 给 output_config.effort=下游档位（没给/不认识→low 保底），budget 给对应预算
+  （没给/不认识→2048，压顶 maxTokens/2、容不下 1024 下限则放弃）；!historyValid 的非显式
+  关分支改用它，n2l=n2lTryOn；隐式升级（下游显式关→low+剥离）路径不动
+- [x] 测试：#11/#12 形状（工具续轮+effort max）→ budget 路由 enabled/16000、adaptive 路由
+  output_config.effort="max"；无 reasoning 字段 → low 保底；端到端不剥用例期望同步
+- [x] 文档同步：README 中英、docs/使用说明.md、应用内文档表（logview.go 中英）、main.go Config 注释
+- [x] gofmt/vet/test 全绿 + build.sh 重出 release（含跨平台矩阵）
+
 ## 收尾
 - [x] go build ./... 与 go test ./... 全绿（含旧测试签名更新）
 - [x] README.md / docs 同步（用户全局规则）

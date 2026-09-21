@@ -48,7 +48,7 @@ var ctxKeyThink ctxKeyThinkT
 
 // ctxKeyNone2Low 是内部请求 context 的键：translateNone2Low 升级模式（int，见下）。
 // 主 handler 据此给 flight 打 [off->low] 徽标（仅 n2lStealth），并在上游 400 拒
-// thinking 时回退关思考重试一次（n2lStealth 与 n2lTryLow 都罩）。
+// thinking 时回退关思考重试一次（n2lStealth 与 n2lTryOn 都罩）。
 type ctxKeyNone2LowT struct{}
 
 var ctxKeyNone2Low ctxKeyNone2LowT
@@ -57,8 +57,9 @@ var ctxKeyNone2Low ctxKeyNone2LowT
 const (
 	n2lNone    = 0 // 未升级
 	n2lStealth = 1 // 隐式升级：下游显式关思考 → low 发上游；回传剥离思考块（下游无感知）+ [off->low] 徽标
-	n2lTryLow  = 2 // 试 low：工具续轮历史不可回放时代理本要自行关思考（关 = Kimi 把 K3 路由 K2.8 无思考版），
-	// 开关开着就改试 low；不剥思考块——下游本来就要思考，块随回传带回签名，下一轮历史自愈
+	n2lTryOn   = 2 // 兜底开思考：工具续轮历史不可回放——代理本要自行关思考（关 = Kimi 把 K3 路由 K2.8
+	// 无思考版），开关开着就改按下游所请档位发（没给/不认识 → low 保底）；不剥思考块——下游
+	// 本来就要思考，块随回传带回签名，下一轮历史自愈
 )
 
 // ctxKeyReqDown 是内部请求 context 的键：Responses 翻译口把下游请求体原文
@@ -306,7 +307,8 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	tw := newTranslatingWriter(w, clientStream, origModel, reg)
 	// translateNone2Low 隐式升级流（下游显式关思考→low）：回传剥离思考块（流式由 conv
 	// 状态机剥离、非流式由 finishBuffered 整转剥离），下游看到的仍是关思考响应；usage
-	// 不碰，如实透传。试 low（历史兜底）不剥：下游本来就要思考，块随回传带回签名。
+	// 不碰，如实透传。历史兜底开思考（按下游所请档位）不剥：下游本来就要思考，块随回传
+	// 带回签名。
 	tw.stripThinking = n2l == n2lStealth
 	tw.conv.stripThinking = n2l == n2lStealth
 	handler(tw, r2)
@@ -368,9 +370,11 @@ func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, 
 // ① 下游显式关思考（effort none/off/disabled）→ low 发上游，n2l=n2lStealth（回传侧剥离
 // 思考块，下游无感知；usage 如实透传）；② 工具续轮历史不可回放（trailingTurnSupportsThinking
 // =false）——代理的兜底本是显式关思考，而关思考恰会触发 Kimi 把 K3 路由到 K2.8 无思考版
-// （正是本参数要防的事），故同样改试 low，n2l=n2lTryLow（不剥思考块：下游本来就要思考，
-// 块随回传带回签名，下一轮历史自愈；上游拒则主 handler 400 兜底回退关思考重发）。
-// 动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」——开着 low 让 K3 不被降级。
+// （正是本参数要防的事）。开关开着时不再降档：按下游所请档位原样发（没给/不认识 → low
+// 保底），n2l=n2lTryOn（不剥思考块：块随回传带回签名，下一轮历史自愈；上游拒则主 handler
+// 400 兜底回退关思考重发——拒绝与档位无关，拒的是「无签名历史却开思考」，故所请档位照发、
+// 被拒再退是安全的）。
+// 动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」——开着思考让 K3 不被降级。
 func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx, thinkStyle string, none2Low bool) (map[string]interface{}, *toolRegistry, int, error) {
 	result := map[string]interface{}{}
 	if model := objStr(body, "model"); model != "" {
@@ -490,15 +494,43 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		thinkingEnabled = true // budget 模型的 thinking 字段由 switch 后的统一尾巴写
 		return true
 	}
+	// tryRequestedThinking 按下游所请档位开思考（历史兜底分支用）：adaptive 模型给
+	// output_config.effort = 下游档位（没给/不认识 → low 保底）；budget 模型给对应预算
+	//（没给/不认识 → 2048；压顶 maxTokens/2，容不下 1024 下限则放弃）。
+	tryRequestedThinking := func() bool {
+		if adaptiveModel {
+			e := adaptiveEffort
+			if e == "" {
+				e = "low" // 下游没给档位：low 保底，保持 K3 在思考路径上
+			}
+			result["thinking"] = map[string]interface{}{"type": "adaptive"}
+			result["output_config"] = map[string]interface{}{"effort": e}
+			thinkingEnabled = true
+			return true
+		}
+		b := effortToThinkingBudget(effort)
+		if b <= 0 {
+			b = effortToThinkingBudget("low")
+		}
+		if ceiling := maxTokens / 2; b > ceiling {
+			b = ceiling
+		}
+		if b < 1024 {
+			return false
+		}
+		budget = b
+		thinkingEnabled = true // budget 模型的 thinking 字段由 switch 后的统一尾巴写
+		return true
+	}
 	switch {
 	case !historyValid:
 		// 工具续轮缺签名 thinking 块可回放：关不掉的模型直接报错（照抄 cc-switch 文案）。
-		// 能关时——translateNone2Low 开着就不再自行关思考（关 = Kimi 把 K3 路由到
-		// K2.8 无思考版，正是本参数要防的事，#11/#12 实况），一律试 low 发上游；上游若
-		// 拒「无思考历史却开思考」，主 handler 一次性 400 兜底回退为关思考重发。下游显式
-		// 关思考走隐式升级（回传剥思考块）；下游本就要思考（effort 非关档）走试 low（不剥：
-		// 块随回传带回签名，下一轮历史自愈）。开关关着保持 cc-switch 行为：能关的 adaptive
-		// 模型显式关闭，其余模型不开 thinking（budget 路径一并跳过）。
+		// translateNone2Low 开着就不再自行关思考（关 = Kimi 把 K3 路由到 K2.8 无思考版，
+		// 正是本参数要防的事，#11/#12 实况）：下游显式关思考走隐式升级（升 low、回传剥
+		// 思考块）；下游本就要思考（effort 非关档，Codex 常态——它的档位表没有 none）按
+		// 所请档位发（不剥：块随回传带回签名，下一轮历史自愈）——上游拒「无思考历史却开
+		// 思考」与档位无关，主 handler 一次性 400 兜底回退关思考重发。开关关着保持
+		// cc-switch 行为：能关的 adaptive 模型显式关闭，其余模型不开 thinking。
 		if cannotDisable {
 			return nil, nil, n2lNone, fmt.Errorf("Anthropic model requires thinking, but the tool history has no signed thinking block to replay")
 		}
@@ -508,8 +540,8 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 				n2l = n2lStealth
 			}
 		case none2Low:
-			if upgradeNoneToLow() {
-				n2l = n2lTryLow
+			if tryRequestedThinking() {
+				n2l = n2lTryOn
 			}
 		case adaptiveShouldThink:
 			result["thinking"] = map[string]interface{}{"type": "disabled"}
