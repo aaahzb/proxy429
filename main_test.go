@@ -944,9 +944,9 @@ func TestExtractThinkMode(t *testing.T) {
 		body string
 		want string
 	}{
-		{"关思考", `{"model":"m","thinking":{"type":"disabled"}}`, "关"},
-		{"开带预算", `{"model":"m","thinking":{"type":"enabled","budget_tokens":2048}}`, "开 2048"},
-		{"开无预算", `{"thinking":{"type":"enabled"}}`, "开"},
+		{"关思考", `{"model":"m","thinking":{"type":"disabled"}}`, "off"},
+		{"开带预算", `{"model":"m","thinking":{"type":"enabled","budget_tokens":2048}}`, "on 2048"},
+		{"开无预算", `{"thinking":{"type":"enabled"}}`, "on"},
 		{"adaptive 无 effort", `{"thinking":{"type":"adaptive"}}`, "adaptive"},
 		{"adaptive 带 effort 只显档位", `{"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`, "high"},
 		{"仅 output_config 只显档位", `{"output_config":{"effort":"low"}}`, "low"},

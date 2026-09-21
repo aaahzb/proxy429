@@ -24,7 +24,9 @@ providers.
   content directly without re-searching (translation path only — Claude
   Code runs its own independent search).
 - **Live observability**: a local web console showing in-flight streams,
-  token and cache-hit telemetry, and per-request diagnostics.
+  token and cache-hit telemetry, and per-request diagnostics. The console
+  UI is bilingual (中文/English): it follows the system language on first
+  run and remembers your choice via the `ui_lang` config key.
 - **Model hijacking**: route any model name (e.g., `fable`) to any upstream
   model, with a system-tray right-click menu to switch routes on the fly.
 - **Cross-platform tray app** (Windows / macOS / Linux), single binary,
@@ -108,7 +110,8 @@ observability. Also: [使用说明](docs/使用说明.md) ·
 - **搜索信封**：web 搜索结果封进加密信封随响应返回，后续提问直接读上次
   搜索内容、不再重搜（仅限翻译场景——Claude Code 会独立开一个代理搜索）。
 - 实时可观测性：本地网页控制台显示在途流、token 与缓存命中统计、逐请求
-  诊断。
+  诊断。控制台界面中英双语：首次运行跟随系统语言，网页里可切换，
+  选择经 `ui_lang` 配置项持久记忆。
 - **模型劫持**：把任意模型名（如 `fable`）路由到任意上游模型，系统托盘
   右键菜单一键切换路由。
 - 跨平台托盘应用（Windows / macOS / Linux），单二进制，~40% 测试代码。

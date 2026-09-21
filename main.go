@@ -52,6 +52,7 @@ type Config struct {
 	SearchDebugDir             string           `json:"search_debug_dir,omitempty"`    // 搜索调试目录；非空时把搜索摘要各步请求/响应 raw 写入该目录，便于排查
 	ConvertAllToStream         bool             `json:"convertAlltoStream"`            // 全局流式化：开启后所有非流式请求改为流式发上游，收集完整流后重建非流式 JSON 一次性返回（客户端无感知，网页可监控吐字/首字/tok/s）
 	ResponsesListen            string           `json:"responses_listen"`              // OpenAI Responses API 监听口（如 127.0.0.1:8081）；空不启用。把 Responses 协议请求翻译成 Anthropic 走主管线，供 Codex CLI 等工具接入。保存/重载即动态启停
+	UILang                     string           `json:"ui_lang,omitempty"`             // 网页控制台语言："zh"/"en"；空 = 跟随操作系统语言（探测不到用英文）。网页顶栏切换语言时写回本字段并热生效
 }
 
 // RouteRule 定义一条模型路由：命中的请求改走指定上游，并替换 model 名与 API key。
@@ -181,17 +182,22 @@ func loadConfig(path string) (*Config, error) {
 	if c.RecentSampleWindow <= 0 {
 		c.RecentSampleWindow = 20 // 默认统计最近 20 次请求的首字延迟与 token/s
 	}
+	switch c.UILang {
+	case "", "zh", "en":
+	default:
+		return nil, fmt.Errorf("ui_lang must be \"zh\" or \"en\" (empty = follow system), got %q", c.UILang)
+	}
 	if c.Upstream == "" && !hasCatchAllRoute(c.Routes) {
-		log.Printf("[配置] 警告：upstream 为空且 routes 无 pattern:\"*\" 兜底，未命中路由的请求将直接 502")
+		log.Printf("[config] warning: upstream is empty and routes has no pattern:\"*\" catch-all; unmatched requests will get 502")
 	}
 	for i := range c.Routes {
 		if isReservedRoutePattern(c.Routes[i].Pattern) {
-			log.Printf("[配置] 警告：第 %d 条路由 pattern 全字撞保留名 %q（Codex 菜单保留名：* 兜底=Fallback、fast 通道=fast_route），该路由不生效，请改名", i+1, c.Routes[i].Pattern)
+			log.Printf("[config] warning: route #%d pattern exactly matches reserved name %q (Codex menu reserved names: * catch-all=Fallback, fast lane=fast_route); this route is disabled, please rename it", i+1, c.Routes[i].Pattern)
 		}
 		switch c.Routes[i].Thinking {
 		case "", "auto", "adaptive", "budget":
 		default:
-			return nil, fmt.Errorf("第 %d 条路由（pattern %q）的 thinking 值 %q 非法：只支持 auto / adaptive / budget", i+1, c.Routes[i].Pattern, c.Routes[i].Thinking)
+			return nil, fmt.Errorf("route #%d (pattern %q) has invalid thinking value %q: only auto / adaptive / budget are supported", i+1, c.Routes[i].Pattern, c.Routes[i].Thinking)
 		}
 	}
 	return &c, nil
@@ -248,7 +254,7 @@ func readActiveConfigState(dir string) string {
 func writeActiveConfigState(path string) {
 	statePath := filepath.Join(filepath.Dir(path), activeConfigStateFile)
 	if err := os.WriteFile(statePath, []byte(filepath.Base(path)), 0644); err != nil {
-		log.Printf("[配置] 写状态文件失败: %v", err)
+		log.Printf("[config] failed to write state file: %v", err)
 	}
 }
 
@@ -297,7 +303,7 @@ func resolveConfigPath(flagPath string) string {
 	if dir != "." {
 		if mkErr := os.MkdirAll(dir, 0755); mkErr == nil {
 			if wErr := os.WriteFile(defaultPath, configExampleBytes, 0644); wErr == nil {
-				log.Printf("[配置] 首次运行，已生成默认配置: %s", defaultPath)
+				log.Printf("[config] first run; default config created: %s", defaultPath)
 			}
 		}
 	}
@@ -331,12 +337,13 @@ func clearStats(c *Config) {
 func reloadConfig() error {
 	c, err := loadConfig(currentConfigPath())
 	if err != nil {
-		log.Printf("[重载] 失败: %v", err)
+		log.Printf("[reload] failed: %v", err)
 		return err
 	}
 	cfg.Store(c)
+	applyUILang(c.UILang) // 网页控制台语言随配置热生效
 	reconcileResponsesServer(c.ResponsesListen) // Responses 口随配置动态启停
-	log.Printf("[重载] 配置已重新加载: http://%s -> %s (最多重试 %d 次, 分类器关thinking=%v)",
+	log.Printf("[reload] config reloaded: http://%s -> %s (max retries %d, classifier thinking-off=%v)",
 		c.Listen, c.Upstream, c.MaxRetries, c.ClassifierThinkingDisabled)
 	return nil
 }
@@ -346,7 +353,7 @@ func reloadConfig() error {
 func switchConfig(newPath string) error {
 	c, err := loadConfig(newPath)
 	if err != nil {
-		log.Printf("[切换] 加载 %s 失败: %v", newPath, err)
+		log.Printf("[switch] failed to load %s: %v", newPath, err)
 		return err
 	}
 	configMu.Lock()
@@ -354,10 +361,11 @@ func switchConfig(newPath string) error {
 	configMu.Unlock()
 	writeActiveConfigState(newPath)
 	cfg.Store(c)
+	applyUILang(c.UILang) // 网页控制台语言随配置切换热生效
 	reconcileResponsesServer(c.ResponsesListen) // Responses 口随配置动态启停
 	// 通知托盘重建「切换配置」子菜单刷新勾选（网页端发起的切换不走托盘点击路径）
 	notifyTrayCfgChanged()
-	log.Printf("[切换] 已切换到 %s：http://%s -> %s (最多重试 %d 次)",
+	log.Printf("[switch] switched to %s: http://%s -> %s (max retries %d)",
 		filepath.Base(newPath), c.Listen, c.Upstream, c.MaxRetries)
 	return nil
 }
@@ -1082,7 +1090,7 @@ func addFinished(f *flight) {
 	finished = append(finished, ff)
 	trimFinishedLocked()
 	finishedMu.Unlock()
-	log.Printf("[完成流] #%d 存档 %d 字节 stage=%d", f.id, len(content), ff.stage)
+	log.Printf("[flight] #%d archived %d bytes stage=%d", f.id, len(content), ff.stage)
 }
 
 // convKeyOf 返回该流的会话缓存锚定键；无会话标识（count_tokens 探针、裸 API 无 metadata）返回空。
@@ -2276,7 +2284,7 @@ func maybeRewriteClassifier(body []byte) []byte {
 	if len(newBody) == len(body) && bytes.Equal(newBody, body) {
 		return body
 	}
-	log.Printf("[改写] 命中分类器请求，关闭 thinking (body %d->%d字节)", len(body), len(newBody))
+	log.Printf("[rewrite] classifier signature hit; thinking disabled (body %d->%d bytes)", len(body), len(newBody))
 	stats.classifierRewrites.Add(1) // 实时状态行计数：分类器关 thinking 次数
 	return newBody
 }
@@ -2286,7 +2294,7 @@ func maybeRewriteClassifier(body []byte) []byte {
 func logRequestDetail(r *http.Request, body []byte) {
 	var p map[string]interface{}
 	if err := json.Unmarshal(body, &p); err != nil {
-		log.Printf("[详情] %s %s (非JSON)", r.Method, r.URL.Path)
+		log.Printf("[detail] %s %s (non-JSON)", r.Method, r.URL.Path)
 		return
 	}
 	stream, _ := p["stream"].(bool)
@@ -2320,7 +2328,7 @@ func logRequestDetail(r *http.Request, body []byte) {
 			}
 		}
 	}
-	log.Printf("[详情] %s %s stream=%v tools=%d %v sys=%q 图片=%v 搜索=%v", r.Method, r.URL.Path, stream, tools, toolNames, sysPrefix, hasImage(body), hasWebSearch(body))
+	log.Printf("[detail] %s %s stream=%v tools=%d %v sys=%q image=%v search=%v", r.Method, r.URL.Path, stream, tools, toolNames, sysPrefix, hasImage(body), hasWebSearch(body))
 }
 
 // locateModel 定位请求体顶层 "model" 字段的字符串值区间。
@@ -2426,12 +2434,12 @@ func extractThinkMode(body []byte) string {
 			}
 			switch t.Type {
 			case "disabled":
-				mode = "关"
+				mode = "off"
 			case "enabled":
 				if t.Budget > 0 {
-					mode = fmt.Sprintf("开 %d", t.Budget)
+					mode = fmt.Sprintf("on %d", t.Budget)
 				} else {
-					mode = "开"
+					mode = "on"
 				}
 			default:
 				mode = t.Type // adaptive 及未知类型原样显示
@@ -2672,7 +2680,7 @@ func searchPostFlight(url, api string, reqBody []byte, f *flight, stream bool, m
 			}
 			stats.addModelUsage(realModel, f.inTokens, f.cacheRead, f.cacheCreation, f.outTokens)
 			f.firstByteMs = tFirstByte.Sub(tSend).Milliseconds()
-			log.Printf("[单流] #%d 搜索step1 首字 %.2fs %d+%d/%d tok",
+			log.Printf("[flight] #%d search step1 TTFT %.2fs %d+%d/%d tok",
 				f.id, float64(f.firstByteMs)/1000, f.inTokens, f.cacheRead, f.outTokens)
 		}
 		return m, data, nil
@@ -2750,7 +2758,7 @@ func searchPostFlight(url, api string, reqBody []byte, f *flight, stream bool, m
 			if streamMs > 0 {
 				f.tps = float64(lastOutput) / (float64(streamMs) / 1000.0)
 			}
-			log.Printf("[单流] #%d 搜索step2 首字 %.2fs 流式 %.2fs %d tok %.1f tok/s",
+			log.Printf("[flight] #%d search step2 TTFT %.2fs stream %.2fs %d tok %.1f tok/s",
 				f.id, float64(f.firstByteMs)/1000, float64(streamMs)/1000, lastOutput, f.tps)
 		}
 		realModel := model
@@ -2845,7 +2853,7 @@ func searchParseSummaries(r2 map[string]any, n int) []string {
 // 参数 fid：流 ID；tag：阶段标签；r：响应 map。
 func logSearchResponse(fid uint64, tag string, r map[string]any) {
 	if e, ok := r["error"]; ok {
-		log.Printf("[搜索摘要debug] #%d %s 响应含 error=%v", fid, tag, e)
+		log.Printf("[searchsum-debug] #%d %s response contains error=%v", fid, tag, e)
 	}
 	stop, _ := r["stop_reason"].(string)
 	model, _ := r["model"].(string)
@@ -2866,13 +2874,13 @@ func logSearchResponse(fid uint64, tag string, r map[string]any) {
 			}
 		}
 	}
-	log.Printf("[搜索摘要debug] #%d %s model=%s stop=%s blocks=%v", fid, tag, model, stop, blockTypes)
+	log.Printf("[searchsum-debug] #%d %s model=%s stop=%s blocks=%v", fid, tag, model, stop, blockTypes)
 	if text != "" {
 		preview := text
 		if len(preview) > 500 {
-			preview = preview[:500] + "...(截断)"
+			preview = preview[:500] + "...(truncated)"
 		}
-		log.Printf("[搜索摘要debug] #%d %s 文本:\n%s", fid, tag, preview)
+		log.Printf("[searchsum-debug] #%d %s text:\n%s", fid, tag, preview)
 	}
 }
 
@@ -2891,7 +2899,7 @@ func searchDebugWrite(fid uint64, tag string, data []byte) {
 	os.MkdirAll(dir, 0755)
 	fname := fmt.Sprintf("%s%c#%d_%s", dir, os.PathSeparator, fid, tag)
 	if err := os.WriteFile(fname, data, 0644); err != nil {
-		log.Printf("[搜索摘要debug] #%d 写 %s 失败: %v", fid, tag, err)
+		log.Printf("[searchsum-debug] #%d failed to write %s: %v", fid, tag, err)
 	}
 }
 
@@ -3068,7 +3076,7 @@ func startSSEKeepalive(w http.ResponseWriter, f *flight, reason string) http.Flu
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	writeSSEPing(w, flusher, f)
-	log.Printf("[保活] #%d 重试中(%s)，开启 SSE ping 保活", f.id, reason)
+	log.Printf("[keepalive] #%d retrying (%s); SSE ping keepalive on", f.id, reason)
 	return flusher
 }
 
@@ -3086,7 +3094,7 @@ func sleepWithPing(ctx context.Context, w http.ResponseWriter, flusher http.Flus
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[保活] #%d 客户端已断开，停止重试", f.id)
+			log.Printf("[keepalive] #%d client disconnected; stopping retries", f.id)
 			return false
 		case <-ticker.C:
 			if flusher != nil {
@@ -3127,24 +3135,24 @@ func searchAndRespond(w http.ResponseWriter, body []byte, sf *SearchRoute, f *fl
 	// step1：搜索（非流式），拿 server_tool_use + web_search_tool_result。
 	step1Body, err := searchStep1Body(body, sf)
 	if err != nil {
-		log.Printf("[搜索摘要] #%d step1 构造失败: %v", fid, err)
+		log.Printf("[searchsum] #%d step1 build failed: %v", fid, err)
 		return false
 	}
 	searchDebugWrite(fid, "step1_req.json", step1Body)
-	step1F := newSearchSubFlight("搜索step1·" + sf.Model)
+	step1F := newSearchSubFlight("search-step1·" + sf.Model)
 	step1F.think = extractThinkMode(step1Body) // 状态页「API」列思考值 = 实际发给上游的配置
 	r1, r1Raw, err := searchPostFlight(sf.URL, sf.API, step1Body, step1F, false, sf.Model)
 	flights.unregister(step1F.id)
 	addFinished(step1F)
 	if err != nil {
-		log.Printf("[搜索摘要] #%d step1 失败: %v", fid, err)
+		log.Printf("[searchsum] #%d step1 failed: %v", fid, err)
 		return false
 	}
 	searchDebugWrite(fid, "step1_resp.json", r1Raw)
 	logSearchResponse(fid, "step1", r1)
 	toolUseID, results, err := searchExtractResults(r1)
 	if err != nil || len(results) == 0 {
-		log.Printf("[搜索摘要] #%d step1 无搜索结果 (results=%d err=%v)", fid, len(results), err)
+		log.Printf("[searchsum] #%d step1 no search results (results=%d err=%v)", fid, len(results), err)
 		return false
 	}
 
@@ -3198,12 +3206,12 @@ func searchAndRespond(w http.ResponseWriter, body []byte, sf *SearchRoute, f *fl
 		thinking bool
 		label    string
 	}{
-		{sf.SummaryLevel, sf.SummaryThinking, "总结step2"},
-		{"mid", false, "总结step2降级mid"},
+		{sf.SummaryLevel, sf.SummaryThinking, "summary-step2"},
+		{"mid", false, "summary-step2-fallback-mid"},
 	} {
 		step2Body, instr, err := searchStep2Body(r1, body, sf, att.level, att.thinking)
 		if err != nil {
-			log.Printf("[搜索摘要] #%d %s 构造失败: %v", fid, att.label, err)
+			log.Printf("[searchsum] #%d %s build failed: %v", fid, att.label, err)
 			continue
 		}
 		searchDebugWrite(fid, att.label+"_req.json", step2Body)
@@ -3214,7 +3222,7 @@ func searchAndRespond(w http.ResponseWriter, body []byte, sf *SearchRoute, f *fl
 		flights.unregister(step2F.id)
 		addFinished(step2F)
 		if err != nil {
-			log.Printf("[搜索摘要] #%d %s 失败: %v", fid, att.label, err)
+			log.Printf("[searchsum] #%d %s failed: %v", fid, att.label, err)
 			continue
 		}
 		searchDebugWrite(fid, att.label+"_resp.sse", r2Raw)
@@ -3232,13 +3240,13 @@ func searchAndRespond(w http.ResponseWriter, body []byte, sf *SearchRoute, f *fl
 		if summaryText != "" {
 			break
 		}
-		log.Printf("[搜索摘要] #%d %s 摘要为空，尝试下一档", fid, att.label)
+		log.Printf("[searchsum] #%d %s empty summary; trying next level", fid, att.label)
 	}
 
 	// 发正式内容：停 ping，独占写 w。摘要为空则只返回 step1 搜索结果（无 text 块）。
 	stopPing()
 	if summaryText == "" {
-		log.Printf("[搜索摘要] #%d 摘要全失败，返回 step1 搜索结果（无摘要文本）", fid)
+		log.Printf("[searchsum] #%d all summary attempts failed; returning step1 search results (no summary text)", fid)
 	}
 	msgID := fmt.Sprintf("msg_proxy_%d", fid)
 	// writeSSE 写一个 SSE 事件并 flush，同时 tee 到 flight + 全局流量统计。
@@ -3320,7 +3328,7 @@ func searchAndRespond(w http.ResponseWriter, body []byte, sf *SearchRoute, f *fl
 	})
 	writeSSE("message_stop", map[string]any{"type": "message_stop"})
 	f.delivered.Store(true) // 合成流已完整写完
-	log.Printf("[搜索摘要] #%d 完成：results=%d summary=%d字节", fid, len(results), len(summaryText))
+	log.Printf("[searchsum] #%d done: results=%d summary=%d bytes", fid, len(results), len(summaryText))
 	return true
 }
 
@@ -3429,9 +3437,9 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 			stats.addModelUsage(realModel, f.inTokens, f.cacheRead, f.cacheCreation, f.outTokens)
 		}
 		if interrupted {
-			log.Printf("[中断] #%d response状态 %d 大小 %s（流未完成，usage 不计入聚合）", f.id, f.status, humanBytes(f.bytes.Load()))
+			log.Printf("[interrupted] #%d response status %d size %s (stream incomplete; usage excluded from aggregates)", f.id, f.status, humanBytes(f.bytes.Load()))
 		} else {
-			log.Printf("[完成] #%d response状态 %d 大小 %s 缓存命中 %s", f.id, f.status, humanBytes(f.bytes.Load()), cacheHitRate(f.cacheRead, f.inTokens, f.cacheCreation))
+			log.Printf("[done] #%d response status %d size %s cache-hit %s", f.id, f.status, humanBytes(f.bytes.Load()), cacheHitRate(f.cacheRead, f.inTokens, f.cacheCreation))
 		}
 		stats.mu.Lock()
 		stats.active--
@@ -3462,7 +3470,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 					f.upstreamModel = actualModel
 				}
 				if !f.modelLogged.Swap(true) {
-					log.Printf("[改写] #%d 响应流 model 回改 %s → %s", f.id, actualModel, f.origModel)
+					log.Printf("[rewrite] #%d response stream model rewritten back %s -> %s", f.id, actualModel, f.origModel)
 				}
 			}
 		}
@@ -3700,7 +3708,7 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 	if !complete {
 		// 未完整收完的流不计入聚合（只有 message_start 的预估 usage），回滚后供整体重试
 		rollbackUsageStats(lastInput, lastCacheRead, lastCacheCreation, lastOutput)
-		log.Printf("[流式化] #%d 上游流未完整收完（未见 message_stop），不写客户端，供整体重试", f.id)
+		log.Printf("[streamify] #%d upstream stream incomplete (no message_stop); nothing written to client, whole request retried", f.id)
 		return false, lastOutput
 	}
 
@@ -3750,7 +3758,7 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 	if f.targetModel != "" && f.targetModel != f.origModel {
 		msgObj["model"] = f.origModel
 		if f.upstreamModel != "" && !f.modelLogged.Swap(true) {
-			log.Printf("[改写] #%d 响应流 model 回改 %s -> %s", f.id, f.upstreamModel, f.origModel)
+			log.Printf("[rewrite] #%d response stream model rewritten back %s -> %s", f.id, f.upstreamModel, f.origModel)
 		}
 	}
 	out, err := json.Marshal(msgObj)
@@ -3764,7 +3772,7 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 	f.cacheCreation = lastCacheCreation
 	f.outTokens = lastOutput
 	stats.addModelUsage(f.realModel(), f.inTokens, f.cacheRead, f.cacheCreation, f.outTokens)
-	log.Printf("[完成] #%d response状态 %d 大小 %s 缓存命中 %s", f.id, f.status, humanBytes(f.bytes.Load()), cacheHitRate(f.cacheRead, f.inTokens, f.cacheCreation))
+	log.Printf("[done] #%d response status %d size %s cache-hit %s", f.id, f.status, humanBytes(f.bytes.Load()), cacheHitRate(f.cacheRead, f.inTokens, f.cacheCreation))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -3777,7 +3785,7 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 	f.appendContent(out) // tee 重建后的非流式 JSON，供网页对照回传形态
 	// 组装 JSON 已一次性写完=完整送达（499 改记只看没送完的流）
 	f.delivered.Store(true)
-	log.Printf("[流式化] #%d 流已收完，非流式 JSON 一次性返回客户端 (%d 输出 tokens)", f.id, lastOutput)
+	log.Printf("[streamify] #%d stream complete; non-streaming JSON returned to client in one piece (%d output tokens)", f.id, lastOutput)
 	return true, lastOutput
 }
 
@@ -3847,7 +3855,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		f.searchReplay = v
 		if v.proactiveCutoff > 0 {
 			f.searchStripped.Store(int32(v.proactiveCutoff))
-			log.Printf("[剥块] #%d 对话水位剥 %d 个回放搜索块", f.id, v.proactiveCutoff)
+			log.Printf("[strip] #%d conversation watermark stripped %d replayed search blocks", f.id, v.proactiveCutoff)
 		}
 	}
 	// count_tokens 探针打标记：完成流的原始内容只有 {"input_tokens":N}，
@@ -3866,7 +3874,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// 1. 缓冲请求体，以便重试时重放。
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("[请求] #%d %s %s 读取body失败: %v", f.id, r.Method, r.URL.Path, err)
+		log.Printf("[request] #%d %s %s failed to read body: %v", f.id, r.Method, r.URL.Path, err)
 		http.Error(w, "read body failed", http.StatusBadGateway)
 		return
 	}
@@ -3888,11 +3896,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		modelPart = " model=" + origModel
 	}
 	if f.translated == translatedResponsesRaw {
-		modelPart += " [透传:responses]"
+		modelPart += " [direct:responses]"
 	} else if f.translated != "" {
-		modelPart += " [翻译:" + f.translated + "]"
+		modelPart += " [translate:" + f.translated + "]"
 	}
-	log.Printf("[请求] #%d %s %s%s (body=%d字节) 来自 %s", f.id, r.Method, r.URL.Path, modelPart, len(body), r.RemoteAddr)
+	log.Printf("[request] #%d %s %s%s (body=%d bytes) from %s", f.id, r.Method, r.URL.Path, modelPart, len(body), r.RemoteAddr)
 
 	// 1.5 命中分类器请求就关掉 thinking，让分类快速返回。
 	// isClassifier 同时供路由决策：分类器路由优先于 model 路由。
@@ -3929,7 +3937,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			body = replaceModelValue(body, cr.Model)
 			targetModel = cr.Model
 		}
-		log.Printf("[路由] #%d 分类器 %s → %s (model %s → %s)", f.id, origModel, cr.URL, origModel, cr.Model)
+		log.Printf("[route] #%d classifier %s -> %s (model %s -> %s)", f.id, origModel, cr.URL, origModel, cr.Model)
 		f.routeReason.Store(routeClassifier)
 		f.convAnchor = "classifier"
 	} else if c.FastRoute != nil && isFastRequest(body, r) {
@@ -3943,7 +3951,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			targetModel = fr.Model
 		}
 		body = removeSpeedField(body)
-		log.Printf("[路由] #%d fast %s → %s (model %s → %s)", f.id, origModel, fr.URL, origModel, fr.Model)
+		log.Printf("[route] #%d fast %s -> %s (model %s -> %s)", f.id, origModel, fr.URL, origModel, fr.Model)
 		f.routeReason.Store(routeFast)
 		f.convAnchor = "fast"
 	} else if len(c.Routes) > 0 && origModel != "" {
@@ -3963,7 +3971,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				if f.responsesRaw() {
 					if rr.URLResponseAPI == "" {
 						// 预检时有、现在没了——只可能是配置热重载把字段删了；明说 502 不静默错路。
-						log.Printf("[错误] #%d Responses 透传请求命中路由 %q 但其 url_response_api 已消失（配置热重载？），无法转发", f.id, rr.Pattern)
+						log.Printf("[error] #%d Responses passthrough request hit route %q but its url_response_api is gone (config hot-reloaded?); cannot forward", f.id, rr.Pattern)
 						http.Error(w, "route lost url_response_api mid-request", http.StatusBadGateway)
 						return
 					}
@@ -3973,7 +3981,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 						body = replaceModelValue(body, rr.Model)
 						targetModel = rr.Model
 					}
-					log.Printf("[路由] #%d %s -> %s (Responses 原生透传, model %s -> %s)", f.id, origModel, rr.URLResponseAPI, origModel, rr.Model)
+					log.Printf("[route] #%d %s -> %s (Responses native passthrough, model %s -> %s)", f.id, origModel, rr.URLResponseAPI, origModel, rr.Model)
 					f.routeReason.Store(routePattern)
 					break
 				}
@@ -3990,7 +3998,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 							targetModel = model
 						}
 						f.routeReason.Store(reason)
-						log.Printf("[路由] #%d %s %s -> %s (model %s -> %s)", f.id, label, origModel, url, origModel, model)
+						log.Printf("[route] #%d %s %s -> %s (model %s -> %s)", f.id, label, origModel, url, origModel, model)
 					}
 					sf := c.SearchFallback
 					mf := c.MultimodalFallback
@@ -4000,15 +4008,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 						if sf.SummaryMode {
 							searchSummaryMode = true
 							f.routeReason.Store(routeSearch)
-							log.Printf("[路由] #%d 搜索摘要模式 %s -> %s (model %s -> %s)", f.id, origModel, sf.URL, origModel, sf.Model)
+							log.Printf("[route] #%d search-summary mode %s -> %s (model %s -> %s)", f.id, origModel, sf.URL, origModel, sf.Model)
 							break
 						}
-						applyFB(sf.URL, sf.API, sf.Model, "搜索兜底", routeSearch)
+						applyFB(sf.URL, sf.API, sf.Model, "search-fallback", routeSearch)
 						break
 					}
 					// 纯图片（无搜索）：有 multimodal_fallback 走 mf；搜索请求不落 mf（没 sf 则降级透传）。
 					if needImage && mf != nil && !needSearch {
-						applyFB(mf.URL, mf.API, mf.Model, "图片兜底", routeMultimodal)
+						applyFB(mf.URL, mf.API, mf.Model, "image-fallback", routeMultimodal)
 						break
 					}
 					// 降级：搜索无 sf、或纯图片无 mf，透传原 route（由上游处理，可能报错）。
@@ -4019,7 +4027,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					body = replaceModelValue(body, rr.Model)
 					targetModel = rr.Model
 				}
-				log.Printf("[路由] #%d %s -> %s (model %s -> %s)", f.id, origModel, rr.URL, origModel, rr.Model)
+				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.id, origModel, rr.URL, origModel, rr.Model)
 				f.routeReason.Store(routePattern)
 				// 增强搜索：route 支持搜索（no_search:false）且配了 enhance_search，请求带搜索工具时，
 				// 不调主力，改用本 route 上游走 kimi 摘要模式（等价于 no_search 走 search_fallback.summary_mode，
@@ -4034,7 +4042,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 						SummaryLevel:    rr.EnhanceSearch.SummaryLevel,
 						SummaryThinking: rr.EnhanceSearch.SummaryThinking,
 					}
-					log.Printf("[路由] #%d 增强搜索 %s -> %s (model %s)", f.id, origModel, rr.URL, rr.Model)
+					log.Printf("[route] #%d enhanced search %s -> %s (model %s)", f.id, origModel, rr.URL, rr.Model)
 				}
 				break // 有序：第一个命中即止
 			}
@@ -4054,7 +4062,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if sf != nil && searchAndRespond(w, body, sf, f, origModel) {
 			return
 		}
-		log.Printf("[搜索摘要] #%d 失败，降级整请求转走 %s", f.id, func() string {
+		log.Printf("[searchsum] #%d failed; falling back to routing the whole request to %s", f.id, func() string {
 			if sf != nil {
 				return sf.URL
 			}
@@ -4074,7 +4082,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// upstream 允许留空（有 pattern:"*" 兜底时默认 upstream 用不到）；走到这里仍为空
 	// 说明既没命中路由也没配默认 upstream，重试无意义，直接 502 明说原因。
 	if upstream == "" {
-		log.Printf("[错误] #%d 未命中任何路由且默认 upstream 为空，无法转发", f.id)
+		log.Printf("[error] #%d no route matched and default upstream is empty; cannot forward", f.id)
 		http.Error(w, "no route matched and upstream is empty", http.StatusBadGateway)
 		return
 	}
@@ -4108,7 +4116,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if stream, ok := getBoolField(body, "stream"); !ok || !stream {
 			body = forceStreamTrue(body)
 			convertToStream = true
-			log.Printf("[流式化] #%d 非流式请求已改为流式发上游 (stream:%v → true)", f.id, stream)
+			log.Printf("[streamify] #%d non-streaming request sent upstream as streaming (stream:%v -> true)", f.id, stream)
 		}
 	}
 
@@ -4133,7 +4141,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		upReq, err := http.NewRequestWithContext(ctx, r.Method, upstream+upPath, bytes.NewReader(body))
 		if err != nil {
-			log.Printf("[错误] 构造上游请求失败: %v", err)
+			log.Printf("[error] failed to build upstream request: %v", err)
 			http.Error(w, "build request failed", http.StatusBadGateway)
 			return
 		}
@@ -4166,7 +4174,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 		// 情况 0：网络层错误。
 		if err != nil {
-			log.Printf("[尝试 %d] #%d 请求错误: %v", attempt+1, f.id, err)
+			log.Printf("[attempt %d] #%d request error: %v", attempt+1, f.id, err)
 			// 双击图标中断（ctx 取消）不重试，直接结束。
 			if ctx.Err() != nil {
 				if headersSent {
@@ -4178,14 +4186,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			if attempt < c.MaxRetries && time.Now().Before(deadline) {
 				wait := computeBackoff(nil, attempt)
 				if !time.Now().Add(wait).After(deadline) {
-					log.Printf("[重试] 等待 %v 后重试 (剩余预算 %v)", wait, time.Until(deadline).Round(time.Millisecond))
+					log.Printf("[retry] waiting %v before retry (budget left %v)", wait, time.Until(deadline).Round(time.Millisecond))
 					stats.statusRetries.Add(1) // 实时状态行计数：重试次数（网络错误/超时）
 					stats.addModelRetry(f.realModel())
 					f.attempt.Store(int32(attempt + 2)) // 退避期间把尝试序号推进到下一次
 					f.attemptStart.Store(0)             // 退避中：尝试未发出，黄灯旁显示 [退避中]
 					if !headersSent && !convertToStream {
 						// convertToStream 的客户端期待非流式响应，不能发 SSE 保活（会污染），静默等待。
-						flusher = startSSEKeepalive(w, f, "网络错误")
+						flusher = startSSEKeepalive(w, f, "network error")
 						headersSent = true
 					}
 					if !sleepWithPing(ctx, w, flusher, wait, pingInterval, f) {
@@ -4195,7 +4203,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			// 超时/网络错误重试用尽：透传 503 给 Claude Code 自行重试（SDK 内置 5xx 重试）。
-			log.Printf("[透传] 超过超时等待时间或重试用尽，透传 503 给客户端自行处理: %v", err)
+			log.Printf("[passthrough] timed out or retries exhausted; passing 503 through to the client: %v", err)
 			if headersSent {
 				writeSSEError(w, flusher, "upstream timeout/error: "+err.Error(), f)
 				return
@@ -4205,14 +4213,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 无条件打印状态码，方便诊断到底收到了什么。
-		log.Printf("[尝试 %d] 上游响应状态码: %d", attempt+1, resp.StatusCode)
+		log.Printf("[attempt %d] upstream response status: %d", attempt+1, resp.StatusCode)
 
 		// 情况 A：HTTP 状态码本身就要求重试（真正的 429/5xx）。
 		if shouldRetry(resp.StatusCode) {
 			if attempt < c.MaxRetries && time.Now().Before(deadline) {
 				wait := computeBackoff(resp, attempt)
 				if !time.Now().Add(wait).After(deadline) {
-					log.Printf("[重试] 状态码 %d，等待 %v 后重试 (剩余预算 %v)", resp.StatusCode, wait, time.Until(deadline).Round(time.Millisecond))
+					log.Printf("[retry] status %d; waiting %v before retry (budget left %v)", resp.StatusCode, wait, time.Until(deadline).Round(time.Millisecond))
 					stats.statusRetries.Add(1) // 实时状态行计数：重试次数（状态码）
 					stats.addModelRetry(f.realModel())
 					f.attempt.Store(int32(attempt + 2)) // 退避期间把尝试序号推进到下一次
@@ -4220,7 +4228,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					resp.Body.Close()
 					if !headersSent && !convertToStream {
 						// convertToStream 的客户端期待非流式响应，不能发 SSE 保活（会污染），静默等待。
-						flusher = startSSEKeepalive(w, f, fmt.Sprintf("状态码 %d", resp.StatusCode))
+						flusher = startSSEKeepalive(w, f, fmt.Sprintf("status %d", resp.StatusCode))
 						headersSent = true
 					}
 					if !sleepWithPing(ctx, w, flusher, wait, pingInterval, f) {
@@ -4229,7 +4237,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			log.Printf("[透传] 次数或预算用尽，透传状态码 %d", resp.StatusCode)
+			log.Printf("[passthrough] attempts or budget exhausted; passing through status %d", resp.StatusCode)
 			if headersSent {
 				resp.Body.Close()
 				writeSSEError(w, flusher, fmt.Sprintf("upstream status %d", resp.StatusCode), f)
@@ -4263,9 +4271,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 							}
 						}
 						learnSearchCutoff(f.searchReplay.convID, oldest)
-						water = fmt.Sprintf("，对话水位记为 %s", oldest.Format("01-02 15:04:05"))
+						water = fmt.Sprintf(", conversation watermark learned as %s", oldest.Format("01-02 15:04:05"))
 					}
-					log.Printf("[兜底] #%d 上游不认搜索回放 id (HTTP %d)，剥掉 %d 个搜索块重试%s", f.id, resp.StatusCode, n, water)
+					log.Printf("[fallback] #%d upstream rejected the replayed search id (HTTP %d); stripped %d search blocks and retried%s", f.id, resp.StatusCode, n, water)
 					stats.statusRetries.Add(1)
 					stats.addModelRetry(f.realModel())
 					body = nb
@@ -4275,11 +4283,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			log.Printf("[错误] 状态码 200 但响应体含错误: %s", firstLine(head))
+			log.Printf("[error] status 200 but response body contains an error: %s", firstLine(head))
 			if attempt < c.MaxRetries && time.Now().Before(deadline) {
 				wait := computeBackoff(resp, attempt)
 				if !time.Now().Add(wait).After(deadline) {
-					log.Printf("[重试] 等待 %v 后重试 (剩余预算 %v)", wait, time.Until(deadline).Round(time.Millisecond))
+					log.Printf("[retry] waiting %v before retry (budget left %v)", wait, time.Until(deadline).Round(time.Millisecond))
 					stats.statusRetries.Add(1) // 实时状态行计数：重试次数（200 体内错误）
 					stats.addModelRetry(f.realModel())
 					f.attempt.Store(int32(attempt + 2)) // 退避期间把尝试序号推进到下一次
@@ -4287,7 +4295,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					resp.Body.Close()
 					if !headersSent && !convertToStream {
 						// convertToStream 的客户端期待非流式响应，不能发 SSE 保活（会污染），静默等待。
-						flusher = startSSEKeepalive(w, f, "体内错误")
+						flusher = startSSEKeepalive(w, f, "in-body error")
 						headersSent = true
 					}
 					if !sleepWithPing(ctx, w, flusher, wait, pingInterval, f) {
@@ -4296,7 +4304,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			log.Printf("[透传] 次数或预算用尽，透传体内错误")
+			log.Printf("[passthrough] attempts or budget exhausted; passing through the in-body error")
 			if headersSent {
 				resp.Body.Close()
 				writeSSEError(w, flusher, "upstream stream error after retries", f)
@@ -4307,7 +4315,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 情况 C：正常响应，透传。记录首字延迟 / 流式时长 / output_tokens 入滑动窗口。
-		log.Printf("[响应] 正常透传 (共尝试 %d 次)", attempt+1)
+		log.Printf("[response] passed through normally (%d attempts)", attempt+1)
 		// 配了 fast_route 就在所有正常响应里注入假的 fast 限流 headers，
 		// 让 Claude Code 的 /fast 预检认为 fast 模式可用。
 		if c.FastRoute != nil {
@@ -4334,12 +4342,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				}
 				f.firstByteMs = firstByteMs
 				f.tps = tps
-				log.Printf("[单流] #%d 首字 %.2fs 流式 %.2fs %d tok %.1f tok/s",
+				log.Printf("[flight] #%d TTFT %.2fs stream %.2fs %d tok %.1f tok/s",
 					f.id, float64(firstByteMs)/1000, float64(streamMs)/1000, out, tps)
 				return
 			}
 			// 流中途断开：客户端尚未收到任何内容，退避后整体重试（重发流式请求、重收一次流）。
-			log.Printf("[流式化] #%d 上游流未收完，重试", f.id)
+			log.Printf("[streamify] #%d upstream stream incomplete; retrying", f.id)
 			stats.statusRetries.Add(1)
 			stats.addModelRetry(f.realModel())
 			if attempt < c.MaxRetries && time.Now().Before(deadline) {
@@ -4354,7 +4362,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			// 重试用尽：客户端期待非流式 JSON，透传 502 让其自行处理。
-			log.Printf("[透传] 次数或预算用尽，非流式化流未收完，透传 502")
+			log.Printf("[passthrough] attempts or budget exhausted; streamified flow incomplete, passing through 502")
 			http.Error(w, "upstream stream interrupted after retries", http.StatusBadGateway)
 			return
 		}
@@ -4371,23 +4379,24 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		f.firstByteMs = firstByteMs
 		f.tps = tps
-		log.Printf("[单流] #%d 首字 %.2fs 流式 %.2fs %d tok %.1f tok/s",
+		log.Printf("[flight] #%d TTFT %.2fs stream %.2fs %d tok %.1f tok/s",
 			f.id, float64(firstByteMs)/1000, float64(streamMs)/1000, out, tps)
 		return
 	}
 }
 
 func main() {
-	configPath := flag.String("config", "", "配置文件路径（留空则按 ./config.json -> 用户配置目录 顺序查找）")
+	configPath := flag.String("config", "", "config file path (empty = look up ./config.json then the user config dir)")
 	flag.Parse()
 	configFilePath = resolveConfigPath(*configPath)
 
 	c, err := loadConfig(configFilePath)
 	if err != nil {
-		log.Fatalf("读取 %s 失败: %v", configFilePath, err)
+		log.Fatalf("failed to read %s: %v", configFilePath, err)
 	}
 	cfg.Store(c)
 	stats.resetSampleCap(c.RecentSampleWindow) // 初始化"最近X次"延迟/吞吐滑动窗口容量
+	applyUILang(c.UILang) // 首次启动：配置有 ui_lang 用之，否则跟随系统语言
 	// flight 注册表与日志缓冲区始终初始化（handler 总会 register flight，map 不能为 nil）。
 	flights.m = make(map[uint64]*flight)
 	logBuf.lines = make([]string, 0, maxLogBuf)
@@ -4408,14 +4417,14 @@ func main() {
 	if c.LogFile != "" {
 		if f, err := os.OpenFile(c.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 			logOut = io.MultiWriter(logOut, f)
-			log.Printf("[日志] 同时写入文件 %s", c.LogFile)
+			log.Printf("[log] also writing to file %s", c.LogFile)
 		} else {
-			log.Printf("[日志] 打开日志文件 %s 失败: %v", c.LogFile, err)
+			log.Printf("[log] failed to open log file %s: %v", c.LogFile, err)
 		}
 	}
 	log.SetOutput(logOut)
 
-	log.Printf("代理启动 v%s: 监听 http://%s -> 转发到 %s (最多重试 %d 次, 分类器关thinking=%v)",
+	log.Printf("proxy started v%s: listening http://%s -> forwarding to %s (max retries %d, classifier thinking-off=%v)",
 		Version, c.Listen, c.Upstream, c.MaxRetries, c.ClassifierThinkingDisabled)
 
 	// HTTP 服务放 goroutine：托盘事件循环（systray.Run）必须占主线程（macOS 要求 UI 在主线程），
@@ -4463,6 +4472,7 @@ func runServer(c *Config) {
 	http.HandleFunc(recentFlightsPath, recentFlightsHandler)
 	http.HandleFunc(finishedCapPath, finishedCapHandler)
 	http.HandleFunc(fullStorePath, fullStoreHandler)
+	http.HandleFunc(uiLangPath, uiLangHandler)
 	http.HandleFunc("/", handler)
 	err := http.ListenAndServe(c.Listen, nil)
 	log.Fatal(err)

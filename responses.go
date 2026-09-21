@@ -85,7 +85,7 @@ func reconcileResponsesServer(listen string) {
 		_ = responsesSrv.srv.Close()
 		responsesSrv.srv = nil
 		responsesSrv.addr = ""
-		log.Printf("[Responses] 监听口已随配置变更关闭")
+		log.Printf("[Responses] listener closed after config change")
 	}
 	if listen == "" {
 		return
@@ -95,16 +95,16 @@ func reconcileResponsesServer(listen string) {
 	mux.HandleFunc("/responses", responsesHandler)
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
-		log.Printf("[Responses] 监听 %s 失败: %v（Responses API 功能禁用，主代理不受影响）", listen, err)
+		log.Printf("[Responses] listen %s failed: %v (Responses API disabled; main proxy unaffected)", listen, err)
 		return
 	}
 	srv := &http.Server{Handler: mux}
 	responsesSrv.srv = srv
 	responsesSrv.addr = listen
-	log.Printf("[Responses] OpenAI Responses API 监听 http://%s（请求翻译成 Anthropic 走主管线）", listen)
+	log.Printf("[Responses] OpenAI Responses API listening on http://%s (requests translated to Anthropic via the main pipeline)", listen)
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("[Responses] 服务退出: %v", err)
+			log.Printf("[Responses] server exited: %v", err)
 		}
 	}()
 }

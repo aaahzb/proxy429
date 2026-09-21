@@ -49,7 +49,7 @@ func onReady() {
 
 	// 「查看日志」：用默认浏览器打开本地控制台页（状态/日志/配置，关标签页即隐藏，不影响代理）。
 	// 配置编辑与重载已移入该网页，故托盘菜单只保留「查看日志」和「退出」两项，跨平台一致。
-	mLogs := systray.AddMenuItem("查看日志", "")
+	mLogs := systray.AddMenuItem(trayText("查看日志", "Open console"), "")
 	go func() {
 		for range mLogs.ClickedCh {
 			openLogViewer()
@@ -59,7 +59,7 @@ func onReady() {
 	// 「切换配置」：子菜单列出当前配置目录下所有 .json 文件，点击即时切换并重载。
 	// 当前配置打勾；切换失败（配置坏）则保持旧配置，勾选不变。网页端发起的切换经
 	// trayCfgSwitched 通知自动重建；「刷新列表」用于直接往目录丢配置文件后手动重建。
-	mSwitch := systray.AddMenuItem("切换配置", "")
+	mSwitch := systray.AddMenuItem(trayText("切换配置", "Switch config"), "")
 	var cfgItems []*systray.MenuItem
 	// 先声明再赋值：闭包内部会调用 rebuildCfgMenu 重建菜单，短变量声明的作用域从语句结束才开始，
 	// 直接 rebuildCfgMenu := func(){...rebuildCfgMenu()...} 会因变量尚未在作用域而编译失败。
@@ -78,7 +78,7 @@ func onReady() {
 				for range it.ClickedCh {
 					full := filepath.Join(filepath.Dir(currentConfigPath()), fname)
 					if err := switchConfig(full); err != nil {
-						log.Printf("[切换] %s 失败: %v", fname, err)
+						log.Printf("[switch] %s failed: %v", fname, err)
 						continue
 					}
 					for _, x := range cfgItems {
@@ -88,7 +88,7 @@ func onReady() {
 				}
 			}(item, n)
 		}
-		refreshItem := mSwitch.AddSubMenuItem("刷新列表", "")
+		refreshItem := mSwitch.AddSubMenuItem(trayText("刷新列表", "Refresh list"), "")
 		cfgItems = append(cfgItems, refreshItem)
 		go func() {
 			for range refreshItem.ClickedCh {
@@ -111,7 +111,7 @@ func onReady() {
 
 	systray.AddSeparator()
 
-	mQuit := systray.AddMenuItem("退出代理", "")
+	mQuit := systray.AddMenuItem(trayText("退出代理", "Quit proxy"), "")
 	go func() {
 		for range mQuit.ClickedCh {
 			systray.Quit()
@@ -204,6 +204,14 @@ func trayTip(active, waiting int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// trayText 按当前界面语言选托盘菜单文案（与网页控制台同一 uiLang 开关）。
+func trayText(zh, en string) string {
+	if currentUILang() == "en" {
+		return en
+	}
+	return zh
 }
 
 // ---- 状态灯图标生成（跨平台，纯 Go 无 cgo/无 GDI） ----

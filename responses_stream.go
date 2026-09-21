@@ -651,7 +651,7 @@ func (tw *translatingWriter) handleSSEBlock(block []byte) {
 	}
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(strings.Join(dataLines, "\n")), &data); err != nil {
-		log.Printf("[Responses] SSE data 解析失败（event=%s）: %v", event, err)
+		log.Printf("[Responses] failed to parse SSE data (event=%s): %v", event, err)
 		return
 	}
 	tw.conv.handleEvent(event, data)
