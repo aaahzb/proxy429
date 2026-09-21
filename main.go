@@ -51,7 +51,6 @@ type Config struct {
 	SearchFallback             *SearchRoute     `json:"search_fallback,omitempty"`     // 搜索兜底路由；请求带搜索工具却命中 no_search 上游时改走此处；空则不启用
 	SearchDebugDir             string           `json:"search_debug_dir,omitempty"`    // 搜索调试目录；非空时把搜索摘要各步请求/响应 raw 写入该目录，便于排查
 	ConvertAllToStream         bool             `json:"convertAlltoStream"`            // 全局流式化：开启后所有非流式请求改为流式发上游，收集完整流后重建非流式 JSON 一次性返回（客户端无感知，网页可监控吐字/首字/tok/s）
-	TranslateNone2Low          bool             `json:"translateNone2Low"`             // 仅 Responses 翻译流生效：请求关思考（reasoning.effort=none/off/disabled）时改发 low 思考给上游，回传时剥离思考块——下游看来仍是关思考。默认 false
 	ResponsesListen            string           `json:"responses_listen"`              // OpenAI Responses API 监听口（如 127.0.0.1:8081）；空不启用。把 Responses 协议请求翻译成 Anthropic 走主管线，供 Codex CLI 等工具接入。保存/重载即动态启停
 	UILang                     string           `json:"ui_lang,omitempty"`             // 网页控制台语言："zh"/"en"；空 = 跟随操作系统语言（探测不到用英文）。网页顶栏切换语言时写回本字段并热生效
 }
@@ -3917,11 +3916,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// 已在上面由 ctx 带上，这里不覆盖。
 	if f.think == "" {
 		f.think = extractThinkMode(body)
-	}
-	// translateNone2Low 升级的流：思考值显示 "off->low"（原始关思考 + 升级后的 low），
-	// 而非翻译后 body 里的 low/on 2048——让状态页一眼看出这是被升级的关思考请求。
-	if r.Context().Value(ctxKeyNone2Low) == true {
-		f.think = "off->low"
 	}
 
 	// 1.6 路由匹配。

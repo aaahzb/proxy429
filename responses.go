@@ -46,13 +46,6 @@ type ctxKeyThinkT struct{}
 
 var ctxKeyThink ctxKeyThinkT
 
-// ctxKeyNone2Low 是内部请求 context 的键：translateNone2Low 把本请求的关思考升级成 low
-// 时置 true——主 handler 据此把 flight 思考值记为 "off->low"（而非翻译后 body 的 low），
-// translatingWriter 据此在回传时剥离思考块（下游看来仍是关思考）。
-type ctxKeyNone2LowT struct{}
-
-var ctxKeyNone2Low ctxKeyNone2LowT
-
 // ctxKeyTranslated 的取值：flight.translated 同款三态——
 // translatedResponses 表示 Responses 请求被翻译成 Anthropic 走主管线（API 列 [translate]）；
 // translatedResponsesRaw 表示命中路由配了 url_response_api，Responses 原文透传不翻译（API 列 [Response]）。
@@ -239,7 +232,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	if rr := matchRouteRule(c, origModel); rr != nil {
 		thinkStyle = rr.Thinking
 	}
-	anth, reg, noneUpgraded, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle, c.TranslateNone2Low)
+	anth, reg, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle)
 	if err != nil {
 		writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -264,9 +257,6 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	r2 := r.Clone(r.Context())
 	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyTranslated, translatedResponses))
 	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeySearchReplay, replay))
-	if noneUpgraded {
-		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyNone2Low, true))
-	}
 	if convID != "" {
 		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyConvID, convID))
 	}
@@ -284,7 +274,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		r2.Header.Set("X-Api-Key", v)
 	}
 
-	tw := newTranslatingWriter(w, clientStream, origModel, reg, noneUpgraded)
+	tw := newTranslatingWriter(w, clientStream, origModel, reg)
 	handler(tw, r2)
 	tw.finish()
 }
@@ -325,8 +315,7 @@ func isMeaningfulText(s string) bool { return strings.TrimSpace(s) != "" }
 // 对照 cc-switch responses_request_to_anthropic。返回的工具注册表记录 custom/
 // namespace/tool_search 工具的原始身份，响应翻译（流式与非流式）据此拆包。
 func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, *toolRegistry, error) {
-	m, reg, _, err := responsesToAnthropicTriple(body, nil, nil, "", false)
-	return m, reg, err
+	return responsesToAnthropicTriple(body, nil, nil, "")
 }
 
 // responsesToAnthropicTriple 同 responsesToAnthropic，额外带本请求的路由预测三元组
@@ -335,12 +324,8 @@ func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, 
 // 模型思考形态 thinkStyle（""/"auto"=按客户端 model 名查表；"adaptive"=强制 adaptive；
 // "budget"=强制 enabled+budget_tokens——路由 thinking 参数，解决路由目标模型与客户端
 // 别名的思考能力不一致，如客户端叫 claude-fable-5 实际路由到只支持 budget 的 Kimi）。
-// none2Low 为 true 且请求显式关思考（reasoning.effort=none/off/disabled）时，把 thinking
-// 改成 low 思考发给上游（而非 disabled），并返回 upgraded=true——回传侧据此剥离思考块，
-// 下游看来仍是关思考。仅 Responses 翻译流开启（translateNone2Low 配置）。
-func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx, thinkStyle string, none2Low bool) (map[string]interface{}, *toolRegistry, bool, error) {
+func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx, thinkStyle string) (map[string]interface{}, *toolRegistry, error) {
 	result := map[string]interface{}{}
-	noneUpgraded := false
 	if model := objStr(body, "model"); model != "" {
 		result["model"] = model
 	}
@@ -382,7 +367,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	case []interface{}:
 		msgs, err = convertInputToMessages(inp, reg, reqTriple, replay)
 		if err != nil {
-			return nil, nil, false, err
+			return nil, nil, err
 		}
 	}
 
@@ -392,12 +377,12 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	msgs = dropEmptyMessages(msgs)
 	msgs = ensureLeadingUserMessage(msgs)
 	if len(msgs) == 0 {
-		return nil, nil, false, fmt.Errorf("cannot convert request: empty messages")
+		return nil, nil, fmt.Errorf("cannot convert request: empty messages")
 	}
 	trimTrailingAssistantText(msgs)
 	msgs = dropEmptyMessages(msgs)
 	if len(msgs) == 0 {
-		return nil, nil, false, fmt.Errorf("cannot convert request: empty messages")
+		return nil, nil, fmt.Errorf("cannot convert request: empty messages")
 	}
 	result["messages"] = msgs
 
@@ -440,7 +425,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		// 工具续轮缺签名 thinking 块可回放：关不掉的模型直接报错（照抄 cc-switch 文案），
 		// 能关的 adaptive 模型显式关闭，其余模型不开 thinking（budget 路径一并跳过）。
 		if cannotDisable {
-			return nil, nil, false, fmt.Errorf("Anthropic model requires thinking, but the tool history has no signed thinking block to replay")
+			return nil, nil, fmt.Errorf("Anthropic model requires thinking, but the tool history has no signed thinking block to replay")
 		}
 		if adaptiveShouldThink {
 			result["thinking"] = map[string]interface{}{"type": "disabled"}
@@ -453,38 +438,9 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		} else if explicitlyDisabled && cannotDisable {
 			// Fable/Mythos 关不掉 thinking：用 low 表达 Codex 显式的 none。
 			result["output_config"] = map[string]interface{}{"effort": "low"}
-			// translateNone2Low：这种「关不掉只能发 low」的 none 也算升级——
-			// 标记后回传剥离思考块、状态页显 off->low。
-			if none2Low {
-				noneUpgraded = true
-			}
 		}
 	case explicitlyDisabled:
-		if none2Low {
-			// translateNone2Low：关思考请求改发 low 思考给上游，回传时剥离思考块，
-			// 下游看来仍是关思考。adaptive 模型用 effort:low，budget 模型用最小预算 2048。
-			noneUpgraded = true
-			if adaptiveModel {
-				thinkingEnabled = true
-				result["thinking"] = map[string]interface{}{"type": "adaptive"}
-				result["output_config"] = map[string]interface{}{"effort": "low"}
-			} else {
-				lowBudget := int64(2048)
-				if ceiling := maxTokens / 2; lowBudget > ceiling {
-					lowBudget = ceiling
-				}
-				if lowBudget >= 1024 {
-					thinkingEnabled = true
-					budget = lowBudget // 交给末尾 thinkingEnabled && !adaptiveModel 统一设 enabled+budget_tokens
-				} else {
-					// max_tokens 太小连最小预算都放不下：退回升不了级，按关思考处理。
-					noneUpgraded = false
-					result["thinking"] = map[string]interface{}{"type": "disabled"}
-				}
-			}
-		} else {
-			result["thinking"] = map[string]interface{}{"type": "disabled"}
-		}
+		result["thinking"] = map[string]interface{}{"type": "disabled"}
 	case budget > 0:
 		// budget 上限压到 max_tokens 的一半（给可见回答留空间），不足 1024 下限则不开。
 		if ceiling := maxTokens / 2; budget > ceiling {
@@ -518,7 +474,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			// 不悄悄弱化 required/指定选择。对照 cc-switch 398-425。
 			if t := objStr(mapped, "type"); thinkingEnabled && (t == "any" || t == "tool") {
 				if cannotDisable {
-					return nil, nil, false, fmt.Errorf("Anthropic model requires adaptive thinking and cannot honor a forced tool_choice")
+					return nil, nil, fmt.Errorf("Anthropic model requires adaptive thinking and cannot honor a forced tool_choice")
 				}
 				result["thinking"] = map[string]interface{}{"type": "disabled"}
 				delete(result, "output_config")
@@ -540,7 +496,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			tc["disable_parallel_tool_use"] = true
 		}
 	}
-	return result, reg, noneUpgraded, nil
+	return result, reg, nil
 }
 
 // responsesSystemText 提取 system/developer 消息项的文本（content 为字符串或 parts 数组）。
@@ -1585,9 +1541,7 @@ func buildResponsesUsage(usage map[string]interface{}) map[string]interface{} {
 // model 参数是客户端原始 model 名（管线回传时已被改写回原名的场景之外兜底用）。
 // reg 是请求侧建立的工具注册表：tool_use 块据此还原 custom/namespace/tool_search 身份。
 // triple 是搜索信封的归属三元组（nil = 不出搜索信封，如 Anthropic 口直接调用）。
-// noneUpgraded：translateNone2Low 升级的流——剥离 thinking/redacted_thinking 块（不进 output），
-// 下游看来仍是关思考。
-func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *toolRegistry, triple *searchTriple, noneUpgraded bool) map[string]interface{} {
+func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *toolRegistry, triple *searchTriple) map[string]interface{} {
 	id := objStr(msg, "id")
 	var responseID string
 	switch {
@@ -1645,10 +1599,6 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 			}
 			output = append(output, toolCallItemFromRegistry(reg, itemID, "completed", callID, name, args))
 		case "thinking", "redacted_thinking":
-			if noneUpgraded {
-				// translateNone2Low：升级 low 产生的思考块剥离，不进 output。
-				continue
-			}
 			flushText()
 			if enc := encodeThinkingEnvelope(blk); enc != "" {
 				item := map[string]interface{}{

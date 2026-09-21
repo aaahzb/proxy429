@@ -214,7 +214,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// auto：fable-5 表内 → adaptive + effort 映射（high→high）。
-	out, _, _, err := responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "", false)
+	out, _, err := responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "")
 	if err != nil {
 		t.Fatalf("auto err: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// budget 强制：同为 fable-5 别名，路由声明 budget → enabled+16000（压顶），无 output_config。
-	out, _, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "budget", false)
+	out, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "budget")
 	if err != nil {
 		t.Fatalf("budget err: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// adaptive 强制：gpt-5-codex 不在表内，路由声明 adaptive → adaptive+effort high。
-	out, _, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "high"), nil, nil, "adaptive", false)
+	out, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "high"), nil, nil, "adaptive")
 	if err != nil {
 		t.Fatalf("adaptive err: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// 强制 adaptive + 显式关（effort none）→ disabled（cannotDisable 被覆盖，允许关）。
-	out, _, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "adaptive", false)
+	out, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "adaptive")
 	if err != nil {
 		t.Fatalf("adaptive none err: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// budget 强制 + 显式关 → disabled。
-	out, _, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "none"), nil, nil, "budget", false)
+	out, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "none"), nil, nil, "budget")
 	if err != nil {
 		t.Fatalf("budget none err: %v", err)
 	}
@@ -373,7 +373,7 @@ func TestAnthropicToResponsesObject(t *testing.T) {
 			"input_tokens": 77, "output_tokens": 9, "cache_read_input_tokens": 11,
 		},
 	}
-	out := anthropicToResponsesObject(msg, "gpt-5-codex", nil, nil, false)
+	out := anthropicToResponsesObject(msg, "gpt-5-codex", nil, nil)
 	if out["id"] != "resp_msg_1" || out["object"] != "response" || out["status"] != "completed" {
 		t.Errorf("骨架: id=%v object=%v status=%v", out["id"], out["object"], out["status"])
 	}
@@ -698,7 +698,7 @@ func TestAnthropicToResponsesObjectDropsEmptySearch(t *testing.T) {
 		},
 		"usage": map[string]interface{}{"input_tokens": 1, "output_tokens": 1},
 	}
-	out := anthropicToResponsesObject(msg, "k3-256k", nil, nil, false)
+	out := anthropicToResponsesObject(msg, "k3-256k", nil, nil)
 	output := asArr(out["output"])
 	if len(output) != 1 {
 		t.Fatalf("output 数=%d, want 1（空搜索三连全丢）: %v", len(output), output)
@@ -725,7 +725,7 @@ func TestAnthropicToResponsesObjectKeepsRealSearch(t *testing.T) {
 		},
 		"usage": map[string]interface{}{"input_tokens": 1, "output_tokens": 1},
 	}
-	out := anthropicToResponsesObject(msg, "k3-256k", nil, nil, false)
+	out := anthropicToResponsesObject(msg, "k3-256k", nil, nil)
 	output := asArr(out["output"])
 	// 回声文本已删：web_search_call(调用) + web_search_call(来源) + message(答案) = 3
 	if len(output) != 3 {
@@ -930,7 +930,7 @@ func TestConvertInputMediaFallback(t *testing.T) {
 // TestTranslatingWriterNonStream 验证 stream:false 客户端拿到一次性 Responses JSON。
 func TestTranslatingWriterNonStream(t *testing.T) {
 	rec := httptest.NewRecorder()
-	tw := newTranslatingWriter(rec, false, "gpt-5-codex", nil, false)
+	tw := newTranslatingWriter(rec, false, "gpt-5-codex", nil)
 	tw.Header().Set("Content-Type", "text/event-stream")
 	tw.WriteHeader(200)
 	if _, err := tw.Write([]byte(testSSEAllBlocks())); err != nil {
@@ -957,7 +957,7 @@ func TestTranslatingWriterNonStream(t *testing.T) {
 // TestTranslatingWriterStreamSplitWrite 验证流式客户端 + 残行跨 Write 的解析。
 func TestTranslatingWriterStreamSplitWrite(t *testing.T) {
 	rec := httptest.NewRecorder()
-	tw := newTranslatingWriter(rec, true, "gpt-5-codex", nil, false)
+	tw := newTranslatingWriter(rec, true, "gpt-5-codex", nil)
 	tw.Header().Set("Content-Type", "text/event-stream")
 	tw.WriteHeader(200)
 	// 把一个完整 SSE 块从中间劈开分两次写，模拟残行。
@@ -1139,163 +1139,5 @@ func TestReconcileResponsesServer(t *testing.T) {
 	reconcileResponsesServer("") // 停用
 	if err := get(addr2); err == nil {
 		t.Fatal("停用后地址应已关闭")
-	}
-}
-
-// ---- translateNone2Low：关思考请求悄悄升级 low，回传剥离思考块、usage 如实 ----
-
-// TestTranslateNone2LowUpgrade 验证翻译侧：translateNone2Low 开启时，显式关思考
-// （reasoning.effort=none）被升级成 low 思考发上游，upgraded 标记为 true；
-// 关闭时仍是 disabled、不升级。
-func TestTranslateNone2LowUpgrade(t *testing.T) {
-	mk := func(model, effort string) map[string]interface{} {
-		return map[string]interface{}{
-			"model":     model,
-			"input":     "hi",
-			"reasoning": map[string]interface{}{"effort": effort},
-		}
-	}
-
-	// budget 模型（gpt-5-codex 不在 adaptive 表）：none + none2Low → enabled+2048，upgraded=true。
-	out, _, up, err := responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "", true)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if !up {
-		t.Errorf("budget none2Low 应 upgraded=true")
-	}
-	th := asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
-		t.Errorf("budget none2Low thinking=%v, want enabled/2048", th)
-	}
-
-	// adaptive 模型（fable-5）：none + none2Low → adaptive + effort low，upgraded=true。
-	out, _, up, err = responsesToAnthropicTriple(mk("claude-fable-5", "none"), nil, nil, "", true)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if !up {
-		t.Errorf("adaptive none2Low 应 upgraded=true")
-	}
-	if objStr(asObj(out["thinking"]), "type") != "adaptive" || objStr(asObj(out["output_config"]), "effort") != "low" {
-		t.Errorf("adaptive none2Low: thinking=%v output_config=%v, want adaptive/low", out["thinking"], out["output_config"])
-	}
-
-	// none2Low 关闭：none 仍 → disabled，upgraded=false。
-	out, _, up, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "", false)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if up {
-		t.Errorf("none2Low 关闭不应 upgraded")
-	}
-	if objStr(asObj(out["thinking"]), "type") != "disabled" {
-		t.Errorf("none2Low 关闭 none 应 disabled: %v", out["thinking"])
-	}
-
-	// 非关思考请求（high）即使开 none2Low 也不升级。
-	_, _, up, err = responsesToAnthropicTriple(mk("gpt-5-codex", "high"), nil, nil, "", true)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if up {
-		t.Errorf("high 请求不应被 none2Low 升级")
-	}
-}
-
-// TestTranslateNone2LowStripObject 验证非流式响应：升级流的 thinking 块被剥离
-// （不进 output），但 usage 里的 reasoning_tokens 如实保留。
-func TestTranslateNone2LowStripObject(t *testing.T) {
-	msg := map[string]interface{}{
-		"id":          "msg_1",
-		"model":       "k3-256k",
-		"stop_reason": "end_turn",
-		"content": []interface{}{
-			map[string]interface{}{"type": "thinking", "thinking": "想", "signature": "sig"},
-			map[string]interface{}{"type": "text", "text": "答案"},
-		},
-		"usage": map[string]interface{}{
-			"input_tokens": 77, "output_tokens": 9, "cache_read_input_tokens": 11,
-			"output_tokens_details": map[string]interface{}{"thinking_tokens": 5},
-		},
-	}
-	out := anthropicToResponsesObject(msg, "k3-256k", nil, nil, true)
-	output := asArr(out["output"])
-	for _, it := range output {
-		if objStr(asObj(it), "type") == "reasoning" {
-			t.Errorf("升级流不应有 reasoning 项: %v", it)
-		}
-	}
-	if len(output) != 1 || objStr(asObj(output[0]), "type") != "message" {
-		t.Errorf("升级流 output 应只剩 message: %v", output)
-	}
-	usage := asObj(out["usage"])
-	if toInt64(asObj(usage["output_tokens_details"])["reasoning_tokens"]) != 5 {
-		t.Errorf("reasoning_tokens 应如实保留 5: %v", usage)
-	}
-	if toInt64(usage["output_tokens"]) != 9 {
-		t.Errorf("output_tokens 应=9: %v", usage)
-	}
-}
-
-// TestTranslateNone2LowStripStream 验证流式响应：升级流的思考块不发 reasoning 事件、
-// 不占 output index（后续文本块 index 连续），usage 如实。
-func TestTranslateNone2LowStripStream(t *testing.T) {
-	var events []string
-	conv := newAnthToRespStream(func(ev string) { events = append(events, ev) }, "gpt-5-codex", nil)
-	conv.noneUpgraded = true
-	sse := `event: message_start
-data: {"type":"message_start","message":{"id":"msg_1","model":"k3-256k","usage":{"input_tokens":10,"output_tokens":1}}}
-
-event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
-
-event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"想"}}
-
-event: content_block_stop
-data: {"type":"content_block_stop","index":0}
-
-event: content_block_start
-data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
-
-event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"答"}}
-
-event: content_block_stop
-data: {"type":"content_block_stop","index":1}
-
-event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9,"output_tokens_details":{"thinking_tokens":5}}}
-
-event: message_stop
-data: {"type":"message_stop"}
-
-`
-	feedSSEToConv(conv, sse)
-	if !conv.completed {
-		t.Fatalf("流未完成")
-	}
-	joined := strings.Join(events, "")
-	// 思考块被剥离：不应有 reasoning 项或 reasoning_summary 事件。
-	// （usage 里的 reasoning_tokens 是如实保留的，不在此判据内。）
-	for _, bad := range []string{"reasoning_summary", `"type":"reasoning"`} {
-		if strings.Contains(joined, bad) {
-			t.Errorf("升级流不应发 %s 事件:\n%s", bad, joined)
-		}
-	}
-	if !strings.Contains(joined, `"output_index":0`) {
-		t.Errorf("文本块应占 output_index 0（思考块已回退）:\n%s", joined)
-	}
-	final := conv.buildFinalResponse()
-	output := asArr(final["output"])
-	for _, it := range output {
-		if objStr(asObj(it), "type") == "reasoning" {
-			t.Errorf("升级流 final 不应有 reasoning 项: %v", it)
-		}
-	}
-	usage := asObj(final["usage"])
-	if toInt64(asObj(usage["output_tokens_details"])["reasoning_tokens"]) != 5 {
-		t.Errorf("流式 reasoning_tokens 应如实保留 5: %v", usage)
 	}
 }
