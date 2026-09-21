@@ -183,12 +183,16 @@ type flightInfo struct {
 	Translated   string `json:"translated"`            // 翻译口来源（"responses"=翻译 / "responses-raw"=原生透传[已实现未实测，文档未提及]），API 列显示 [translate]/[Response]
 	CountTokens  bool   `json:"countTokens,omitempty"` // count_tokens 探针流，model 列显示 [count_tokens] 前缀
 	SearchPrompt string `json:"searchPrompt,omitempty"`
-	ReqTrunc     bool   `json:"reqTrunc,omitempty"` // 请求体被截断只剩前 256KB（下载按钮置灰）
-	HasFull      bool   `json:"hasFull,omitempty"`  // 仍持有完整输出副本（下载输出/交互式JSON 可用）
-	StageMs      int64  `json:"stageMs"`            // 当前灯色已持续的毫秒数（状态灯旁显示，灯色变化才清零）
-	Tools        string `json:"tools,omitempty"`    // 工具调用标签（"[Read*1][Edit*3]"，无工具省略；随转发实时累积）
-	Stripped     int    `json:"stripped,omitempty"` // 剥掉的回放搜索块总数（对话水位+400 兜底；0 省略），model 列红标 [剥N]
-	Think        string `json:"think,omitempty"`    // 实际发给上游的思考配置最短形态（"关"/"开 N"/"adaptive"/档位词；口径由列颜色承担），空=未带思考字段（列显 -）
+	ReqTrunc     bool   `json:"reqTrunc,omitempty"`     // 请求体被截断只剩前 256KB（下载按钮置灰）
+	HasFull      bool   `json:"hasFull,omitempty"`      // 仍持有完整输出副本（下载输出/交互式JSON 可用）
+	StageMs      int64  `json:"stageMs"`                // 当前灯色已持续的毫秒数（状态灯旁显示，灯色变化才清零）
+	Tools        string `json:"tools,omitempty"`        // 工具调用标签（"[Read*1][Edit*3]"，无工具省略；随转发实时累积）
+	Stripped     int    `json:"stripped,omitempty"`     // 剥掉的回放搜索块总数（对话水位+400 兜底；0 省略），model 列红标 [剥N]
+	Think        string `json:"think,omitempty"`        // 实际发给上游的思考配置最短形态（"关"/"开 N"/"adaptive"/档位词；口径由列颜色承担），空=未带思考字段（列显 -）
+	ReqDown      bool   `json:"reqDown,omitempty"`      // 已记录下游侧（下游→代理）请求体（与上行侧有差异才记录；查看器可切链路侧）
+	RespDown     bool   `json:"respDown,omitempty"`     // 已记录下游侧（代理→下游）回传内容（翻译流恒有、重建 JSON 流有）
+	ReqDownTrunc bool   `json:"reqDownTrunc,omitempty"` // 下游侧请求体被截断只剩前 256KB（切到下游侧后下载置灰）
+	HasFullDown  bool   `json:"hasFullDown,omitempty"`  // 仍持有下游侧完整输出副本（下游侧的下载输出/交互式JSON 可用）
 }
 
 // logData 是 /__logs/data 返回的 JSON：最近日志 + 全量状态计数 + 在途流列表。
@@ -266,6 +270,10 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 			Stripped:     int(f.searchStripped.Load()), // 水位剥块在流建立时即入账，400 兜底随转发增补
 			ReqTrunc:     f.reqTrunc(),
 			HasFull:      f.hasFullContent(),
+			ReqDown:      f.hasReqDown(),
+			RespDown:     f.hasContentDown(),
+			ReqDownTrunc: f.reqDownTrunc(),
+			HasFullDown:  f.hasFullContentDown(),
 			StageMs:      f.stageMs(),
 			Think:        f.think,
 		})
@@ -693,6 +701,22 @@ func clearLogsHandler(w http.ResponseWriter, r *http.Request) {
 
 // flightHandler 返回指定在途流最近透传的内容（SSE 原文），供网页点击在途流查看。
 // 流不存在（已结束）返回 404。限本机访问。
+// pickFlightSide 按查看器请求的链路侧（side=up|down）挑记录：双链路记录里下游侧
+// 仅在与上游侧有差异时才存（翻译流恒存），缺侧回退另一侧；返回值二是实际侧，
+// 经 X-Proxy429-Side 头告知调用方（查看器据此显示回退提示）。
+func pickFlightSide(side string, up, down []byte) ([]byte, string) {
+	if side == "down" {
+		if len(down) > 0 {
+			return down, "down"
+		}
+		return up, "up"
+	}
+	if len(up) > 0 {
+		return up, "up"
+	}
+	return down, "down"
+}
+
 func flightHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -703,6 +727,7 @@ func flightHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
+	side := r.URL.Query().Get("side") // up=代理↔上游（默认）/ down=下游↔代理
 	if r.URL.Query().Get("full") == "1" {
 		// 下载输出原文：完整内容只在「储存完整结构体」开启时记录。
 		if !fullStore.Load() {
@@ -712,51 +737,59 @@ func flightHandler(w http.ResponseWriter, r *http.Request) {
 		flights.mu.RLock()
 		f0, ok0 := flights.m[id]
 		flights.mu.RUnlock()
-		var full []byte
+		var up, down []byte
 		if ok0 {
-			full = f0.snapshotFullContent()
+			up = f0.snapshotFullContent()
+			down = f0.snapshotFullContentDown()
 		} else {
 			finishedMu.Lock()
 			for _, ff := range finished {
 				if ff.id == id {
-					full = ff.fullContent
+					up = ff.fullContent
+					down = ff.fullContentDown
 					break
 				}
 			}
 			finishedMu.Unlock()
 		}
+		full, served := pickFlightSide(side, up, down)
 		if len(full) == 0 {
 			http.Error(w, "no full output recorded for this stream (started before the switch was on, or no proxied content)", http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Proxy429-Side", served)
 		_, _ = w.Write(full)
 		return
 	}
 	flights.mu.RLock()
 	f, ok := flights.m[id]
 	flights.mu.RUnlock()
-	var content []byte
+	var up, down []byte
 	if ok {
-		content = f.snapshotContent()
+		up = f.snapshotContent()
+		down = f.snapshotContentDown()
 	} else {
 		// 不在途：查最近完成流存档（content 是静态快照）。
 		finishedMu.Lock()
 		for _, ff := range finished {
 			if ff.id == id {
-				content = ff.content
+				up = ff.content
+				down = ff.contentDown
 				break
 			}
 		}
 		finishedMu.Unlock()
-		if content == nil {
+		if up == nil && down == nil {
 			http.Error(w, "stream already finished or does not exist", http.StatusNotFound)
 			return
 		}
 	}
+	content, served := pickFlightSide(side, up, down)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Proxy429-Side", served)
 	_, _ = w.Write(content)
 }
 
@@ -775,26 +808,31 @@ func flightReqHandler(w http.ResponseWriter, r *http.Request) {
 	flights.mu.RLock()
 	f, ok := flights.m[id]
 	flights.mu.RUnlock()
-	var body []byte
+	var up, down []byte
 	if ok {
-		body = f.snapshotReqBody()
+		up = f.snapshotReqBody()
+		down = f.snapshotReqDown()
 	} else {
 		// 不在途：查最近完成流存档（reqBody 是静态快照）。
 		finishedMu.Lock()
 		for _, ff := range finished {
 			if ff.id == id {
-				body = ff.reqBody
+				up = ff.reqBody
+				down = ff.reqDown
 				break
 			}
 		}
 		finishedMu.Unlock()
 	}
+	// side=up（默认，代理→上游实发体）/ side=down（下游→代理原文，仅被改写/翻译流存），缺侧回退。
+	body, served := pickFlightSide(r.URL.Query().Get("side"), up, down)
 	if body == nil {
 		http.Error(w, "stream does not exist or no request body recorded", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Proxy429-Side", served)
 	_, _ = w.Write(body)
 }
 
@@ -885,6 +923,10 @@ func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 			"stripped":      ff.searchStripped,
 			"reqTrunc":      ff.reqTruncated,
 			"hasFull":       ff.fullContent != nil,
+			"reqDown":       ff.reqDown != nil,
+			"respDown":      ff.contentDown != nil,
+			"reqDownTrunc":  ff.reqDownTruncated,
+			"hasFullDown":   ff.fullContentDown != nil,
 		})
 	}
 	finishedMu.Unlock()
@@ -1074,7 +1116,7 @@ const logViewerHTML = `<!DOCTYPE html>
   <div>在途流 <label style="margin-left:8px;color:#9a9a9a;font-weight:normal"><input type="checkbox" id="autoTrackChk" checked>自动跟踪最新</label> <label style="color:#9a9a9a;font-weight:normal">最多显示 <input type="number" id="maxFlightsInput" min="1" max="20" value="3" style="width:40px;background:#1e1e1e;color:#d4d4d4;border:1px solid #333;border-radius:3px;padding:2px 4px;font:inherit"> 个</label></div>
   <table id="flights"><thead><tr><th></th><th>#</th><th>model</th><th>API<span class="thq" title="协议来源：橙 [Anthropic] = Anthropic 口原生流量、紫 [translate] = Responses 口翻译成 Anthropic。名后 [值] = 实际发给上游的思考配置最短形态，其颜色 = 词汇口径（思考是针对上游的：上游收到的都是 Anthropic 格式）——橙 = Anthropic thinking（直连原样或翻译映射后）。值：关 = thinking 关或 effort none/off；开 N = enabled+budget_tokens N；adaptive = 自适应无档；low/high/max 等档位词 = adaptive 的 effort；无 [值] = 请求体未带思考字段">?</span></th><th>字节</th><th>状态</th></tr></thead><tbody></tbody></table>
   <div id="flightViewWrap" style="display:none;margin-top:8px">
-    <div>流 #<span id="flightViewId"></span> <span id="flightViewKind">输出</span> <button id="flightViewWhatBtn" class="ghost" style="display:none">看请求体</button> <button id="flightViewRawBtn" class="ghost">显示原始</button> <button id="flightViewDlBtn" class="ghost" style="display:none">下载请求体</button> <button id="flightViewDlOutBtn" class="ghost" style="display:none">下载输出</button> <button id="flightViewTreeBtn" class="ghost" style="display:none">交互式JSON</button> <button id="flightViewClose" class="ghost">关闭</button></div>
+    <div>流 #<span id="flightViewId"></span> <span id="flightViewKind">输出</span> <button id="flightViewWhatBtn" class="ghost" style="display:none">看请求体</button> <button id="flightViewSideBtn" class="ghost" style="display:none">链路:代理↔上游</button><span id="flightViewSideNote" style="color:#d7ba7d"></span> <button id="flightViewRawBtn" class="ghost">显示原始</button> <button id="flightViewDlBtn" class="ghost" style="display:none">下载请求体</button> <button id="flightViewDlOutBtn" class="ghost" style="display:none">下载输出</button> <button id="flightViewTreeBtn" class="ghost" style="display:none">交互式JSON</button> <button id="flightViewClose" class="ghost">关闭</button></div>
     <div id="flightView" style="max-height:300px;overflow:auto;background:#1e1e1e;border:1px solid #333;padding:8px"></div>
   </div>
   <div style="margin-top:10px">最近完成的流</div>
@@ -1192,7 +1234,8 @@ let maxFlights = 3; // 自动跟踪多流模式下最多并排显示多少个在
 let flightViewRaw = false; // 查看区显示模式：false=解析文本，true=原始 SSE
 let flightEnded = false; // 选中的流是否已结束（结束后停止拉取，保留最后内容）
 let flightViewWhat = 'resp'; // 手选单流查看内容：'resp'=输出流，'req'=下游请求体（仅手选单流可切）
-let lastReqRaw = ''; // 当前选中流的下游请求体原文缓存（切到 req 时拉一次；请求体静态不变）
+let lastReqRaw = ''; // 当前选中流当前链路侧的请求体缓存（切到 req 或切链路侧时拉一次；请求体静态不变）
+let flightViewSide = 'up'; // 查看链路侧：'up'=代理↔上游（默认观测面），'down'=下游↔代理；请求体/输出共用，点「链路」按钮切换
 let fullStoreOn = false; // 「储存完整结构体」开关（以服务端为准）：开=可下载完整请求体/输出
 let flightFlags = {}; // 流 id -> {rt: 请求体被截断, hf: 仍持有完整输出}，poll 时在途/完成两表下发，用于置灰下载按钮
 let flightViewTree = false; // 单流交互式 JSON 树视图：true=查看区显示可折叠树（点击时的静态快照，poll 不刷新）
@@ -1493,24 +1536,34 @@ function parseSSEHTML(raw){
 // 请求体被截断（rt）的不能当完整版下载，无完整输出副本（!hf）的不能下载输出。
 function updateFlightViewChrome(){
   var whatBtn = document.getElementById('flightViewWhatBtn');
+  var sideBtn = document.getElementById('flightViewSideBtn');
+  var sideNote = document.getElementById('flightViewSideNote');
   var dlBtn = document.getElementById('flightViewDlBtn');
   var dlOutBtn = document.getElementById('flightViewDlOutBtn');
   var treeBtn = document.getElementById('flightViewTreeBtn');
   var fl = flightFlags[selectedFlight] || {};
+  var down = flightViewSide==='down';
   if(selectedFlight){
     whatBtn.style.display = '';
     whatBtn.textContent = flightViewWhat==='req' ? '看输出' : '看请求体';
-    document.getElementById('flightViewKind').textContent = flightViewWhat==='req' ? '请求体' : '输出';
+    sideBtn.style.display = '';
+    sideBtn.textContent = down ? '链路:下游↔代理' : '链路:代理↔上游';
+    // 类型标签带链路侧后缀：请求体[代理→上游] / 输出[上游→代理] / 请求体[下游→代理] / 输出[代理→下游]
+    var kind = flightViewWhat==='req' ? '请求体' : '输出';
+    kind += down ? (flightViewWhat==='req' ? '[下游→代理]' : '[代理→下游]') : (flightViewWhat==='req' ? '[代理→上游]' : '[上游→代理]');
+    document.getElementById('flightViewKind').textContent = kind;
     dlBtn.style.display = fullStoreOn ? '' : 'none';
-    dlBtn.disabled = fl.rt === true;
+    dlBtn.disabled = down ? fl.rdt === true : fl.rt === true;
     dlBtn.title = dlBtn.disabled ? '该流请求体只剩截断版（前 256KB），完整版未记录或已清空' : '';
     dlOutBtn.style.display = fullStoreOn ? '' : 'none';
-    dlOutBtn.disabled = fl.hf === false;
+    dlOutBtn.disabled = down ? fl.hfd === false : fl.hf === false;
     dlOutBtn.title = dlOutBtn.disabled ? '该流未记录完整输出（开启前已开始/已清空/无透传内容）' : '';
     treeBtn.style.display = fullStoreOn ? '' : 'none';
     treeBtn.textContent = flightViewTree ? '退出交互' : '交互式JSON';
   } else {
     whatBtn.style.display = 'none';
+    sideBtn.style.display = 'none';
+    sideNote.textContent = '';
     dlBtn.style.display = 'none';
     dlOutBtn.style.display = 'none';
     treeBtn.style.display = 'none';
@@ -1523,7 +1576,7 @@ function updateFlightViewChrome(){
 function renderReqBody(){
   var fv = document.getElementById('flightView');
   var full = lastReqRaw;
-  var rt = (flightFlags[selectedFlight]||{}).rt === true;
+  var rt = (flightViewSide==='down' ? (flightFlags[selectedFlight]||{}).rdt : (flightFlags[selectedFlight]||{}).rt) === true; // 截断标记按当前链路侧取
   var overCap = new TextEncoder().encode(full).length >= 262144;
   var note = '';
   if(rt) note = '（请求体超长，仅保留前 256KB）\n';
@@ -1629,7 +1682,9 @@ function selectFlight(id){
   lastRaw = '';
   flightViewWhat = 'resp'; // 新手选默认看输出；请求体点「看请求体」再拉
   lastReqRaw = '';
+  flightViewSide = 'up'; // 双链路默认 代理↔上游 侧；点「链路」按钮切 下游↔代理 侧
   flightViewTree = false;
+  document.getElementById('flightViewSideNote').textContent = '';
   var fv = document.getElementById('flightView');
   fv.innerHTML = '';
   fv.style.display = 'block';
@@ -1694,7 +1749,7 @@ async function poll(){
     if(document.getElementById('clsModal').style.display !== 'none') refreshClsModal();
     // 在途流
     const fs = d.flights || [];
-    fs.forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull}; });
+    fs.forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull, rd:!!f.reqDown, sd:!!f.respDown, rdt:!!f.reqDownTrunc, hfd:!!f.hasFullDown}; });
     flightsBody.innerHTML = fs.map(f =>
       '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>'+flightDot(f)+attemptTag(f)+' '+fmtStageDur(f.stageMs)+'</td><td>#'+f.id+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools,f.stripped)+apiCell(f.translated,f.think)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+flightStatus(f)+'</td></tr>'
     ).join('');
@@ -1712,8 +1767,10 @@ async function poll(){
       updateFlightViewChrome();
       if(!flightEnded && flightViewWhat==='resp' && !flightViewTree){ // req 模式/交互树看的是静态内容，切回输出前不拉流
         try{
-          const fr = await fetch('/__flight?id='+selectedFlight,{cache:'no-store'});
+          const fr = await fetch('/__flight?id='+selectedFlight+'&side='+flightViewSide,{cache:'no-store'});
           if(fr.ok){
+            // 缺侧回退提示：服务端实际返回侧与请求侧不一致时（该侧无记录）在链路按钮旁提示
+            document.getElementById('flightViewSideNote').textContent = (fr.headers.get('X-Proxy429-Side')||'up') !== flightViewSide ? '（该侧无记录，显示另一侧）' : '';
             const atBottom = fv.scrollTop + fv.clientHeight >= fv.scrollHeight - 2;
             lastRaw = await fr.text();
             if(lastRaw === ''){
@@ -1726,6 +1783,7 @@ async function poll(){
             if(!fs.some(function(x){return x.id===selectedFlight;})) flightEnded = true;
           } else if(fr.status === 404){
             flightEnded = true;
+            document.getElementById('flightViewSideNote').textContent = '';
             var endDiv = document.createElement('div');
             endDiv.className = 'ss-empty';
             endDiv.textContent = '-- 流已结束 --';
@@ -1793,7 +1851,7 @@ async function poll(){
       const rf = await fetch('/__recentflights',{cache:'no-store'});
       if(rf.ok){
         const rfd = await rf.json();
-        (rfd.list||[]).forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull}; });
+        (rfd.list||[]).forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull, rd:!!f.reqDown, sd:!!f.respDown, rdt:!!f.reqDownTrunc, hfd:!!f.hasFullDown}; });
         document.querySelector('#finishedFlights tbody').innerHTML = (rfd.list||[]).map(function(f){
           return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools)+apiCell(f.translated,f.think)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+(f.total||'-')+'</td><td>'+(f.gaveUp?'[重试尽]':(f.status?(f.status===200?'200':'['+f.status+']'):'-'))+(f.attempts>1?'<span style="color:#d7ba7d">[重试'+(f.attempts-1)+'次]</span>':'')+'</td><td>'+(f.hitRate||'-')+(f.stripped>0?'<span style="color:#f48771">[剥'+f.stripped+']</span>':'')+'</td><td>'+(f.cacheAge||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
         }).join('');
@@ -2177,6 +2235,7 @@ document.getElementById('flightViewClose').onclick = () => {
   lastRaw = '';
   flightViewWhat = 'resp';
   lastReqRaw = '';
+  flightViewSide = 'up';
   flightViewTree = false;
   var fv = document.getElementById('flightView');
   fv.innerHTML = '';
@@ -2193,6 +2252,7 @@ document.getElementById('autoTrackChk').onchange = function(){
     lastRaw = '';
     flightViewWhat = 'resp';
     lastReqRaw = '';
+    flightViewSide = 'up';
     flightViewTree = false;
   }
   updateFlightViewChrome();
@@ -2236,17 +2296,7 @@ document.getElementById('flightViewWhatBtn').onclick = async () => {
     flightViewWhat = 'req';
     flightViewTree = false;
     updateFlightViewChrome();
-    fv.textContent = '加载中…';
-    try{
-      const r = await fetch('/__flightreq?id='+selectedFlight,{cache:'no-store'});
-      if(r.ok){
-        lastReqRaw = await r.text();
-        renderReqBody();
-      } else {
-        lastReqRaw = '';
-        fv.textContent = '（'+await r.text()+'）'; // 404: stream does not exist or no request body recorded
-      }
-    }catch(e){ fv.textContent = '（请求体拉取失败）'; }
+    await fetchFlightViewSide();
     updateFlightViewChrome();
   } else {
     flightViewWhat = 'resp';
@@ -2255,6 +2305,47 @@ document.getElementById('flightViewWhatBtn').onclick = async () => {
     // 回到输出视图：用 lastRaw 立即重渲染，未结束的流下一次 poll 继续刷新
     renderRespFromLastRaw();
   }
+};
+// fetchFlightViewSide 按当前 请求体/输出 + 链路侧 拉一次查看区内容（看请求体/切链路侧共用）；
+// 服务端缺侧回退时经 X-Proxy429-Side 头告知实际侧，回退提示显示在链路按钮旁。
+async function fetchFlightViewSide(){
+  if(!selectedFlight) return;
+  var fv = document.getElementById('flightView');
+  var note = document.getElementById('flightViewSideNote');
+  if(flightViewWhat==='req'){
+    fv.textContent = '加载中…';
+    try{
+      const r = await fetch('/__flightreq?id='+selectedFlight+'&side='+flightViewSide,{cache:'no-store'});
+      if(r.ok){
+        note.textContent = (r.headers.get('X-Proxy429-Side')||'up') !== flightViewSide ? '（该侧无记录，显示另一侧）' : '';
+        lastReqRaw = await r.text();
+        renderReqBody();
+      } else {
+        lastReqRaw = '';
+        note.textContent = '';
+        fv.textContent = '（'+await r.text()+'）'; // 404: stream does not exist or no request body recorded
+      }
+    }catch(e){ fv.textContent = '（请求体拉取失败）'; }
+  } else {
+    try{
+      const r = await fetch('/__flight?id='+selectedFlight+'&side='+flightViewSide,{cache:'no-store'});
+      if(r.ok){
+        note.textContent = (r.headers.get('X-Proxy429-Side')||'up') !== flightViewSide ? '（该侧无记录，显示另一侧）' : '';
+        lastRaw = await r.text();
+        renderRespFromLastRaw();
+      }
+    }catch(e){}
+  }
+}
+// 链路侧切换：上游侧=代理↔上游（请求体是实发上游的、输出是上游回来的原始流），
+// 下游侧=下游↔代理（客户端发出/实际收到的）。输出视图立拉一次覆盖 lastRaw，
+// 在途流随后由 poll 按新侧续刷；请求体视图立拉静态内容。
+document.getElementById('flightViewSideBtn').onclick = async () => {
+  if(!selectedFlight) return;
+  flightViewSide = flightViewSide==='up' ? 'down' : 'up';
+  document.getElementById('flightViewSideNote').textContent = '';
+  updateFlightViewChrome();
+  await fetchFlightViewSide();
 };
 // ---- 交互式 JSON 树查看（仅「储存完整结构体」开启时按钮可见；默认全部折叠，点键展开）----
 document.getElementById('flightViewTreeBtn').onclick = async () => {
@@ -2273,14 +2364,14 @@ document.getElementById('flightViewTreeBtn').onclick = async () => {
   var text = '', err = '';
   if(flightViewWhat==='req'){
     text = lastReqRaw;
-    if(fl.rt === true) err = '（该流请求体只剩截断版（前 256KB），不是完整 JSON，无法交互查看）';
+    if((flightViewSide==='down' ? fl.rdt : fl.rt) === true) err = '（该流请求体只剩截断版（前 256KB），不是完整 JSON，无法交互查看）';
     else if(!text) err = '（该流未记录请求体，可点「看输出」再点回重试）';
-  } else if(fl.hf === false){
+  } else if((flightViewSide==='down' ? fl.hfd : fl.hf) === false){
     err = '（该流未记录完整输出：开启前已开始/已清空/无透传内容）';
   } else {
     fv.textContent = '加载中…';
     try{
-      const r = await fetch('/__flight?id='+selectedFlight+'&full=1',{cache:'no-store'});
+      const r = await fetch('/__flight?id='+selectedFlight+'&full=1&side='+flightViewSide,{cache:'no-store'});
       if(r.ok) text = await r.text();
       else err = '（'+await r.text()+'）';
     }catch(e){ err = '（完整输出拉取失败）'; }
@@ -2316,17 +2407,18 @@ function saveBlobText(text, base){
 document.getElementById('flightViewDlBtn').onclick = async () => {
   if(!selectedFlight) return;
   try{
-    const r = await fetch('/__flightreq?id='+selectedFlight,{cache:'no-store'});
+    const r = await fetch('/__flightreq?id='+selectedFlight+'&side='+flightViewSide,{cache:'no-store'});
     if(!r.ok){ alert('下载失败: '+await r.text()); return; }
-    saveBlobText(await r.text(), 'flight-'+selectedFlight+'-request');
+    // 文件名带实际返回侧（缺侧回退时按服务端告知的侧命名，不误导）
+    saveBlobText(await r.text(), 'flight-'+selectedFlight+'-request-'+(r.headers.get('X-Proxy429-Side')||flightViewSide));
   }catch(e){ alert('下载失败: '+e); }
 };
 document.getElementById('flightViewDlOutBtn').onclick = async () => {
   if(!selectedFlight) return;
   try{
-    const r = await fetch('/__flight?id='+selectedFlight+'&full=1',{cache:'no-store'});
+    const r = await fetch('/__flight?id='+selectedFlight+'&full=1&side='+flightViewSide,{cache:'no-store'});
     if(!r.ok){ alert('下载失败: '+await r.text()); return; }
-    saveBlobText(await r.text(), 'flight-'+selectedFlight+'-output');
+    saveBlobText(await r.text(), 'flight-'+selectedFlight+'-output-'+(r.headers.get('X-Proxy429-Side')||flightViewSide));
   }catch(e){ alert('下载失败: '+e); }
 };
 // ---- 储存完整结构体开关：POST 服务端，失败回滚勾选 ----
@@ -2593,7 +2685,7 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <li><b>499</b>：状态码列中非 200 的状态码加方括号显示（如 [499]、[400]），一眼挑出异常流。重试/预算用尽时代理会向下游透传兜底 error 事件（overloaded_error），此类流状态码列显 [重试尽]（点击行可回看该兜底事件）。发生过退避重试的流在状态码后追加金色 <code>[重试N次]</code>（N = 重试次数，如 200[重试2次]；[重试尽] 时同样带，可对照 max_retries 看是否打满）。499 口径与上游提供商后台一致——上游响应没发完连接就结束了记 499（最常见是下游主动取消，取消会传导成上游断连；nginx 惯例 client closed request）；上游完整发完后下游才断开的（Codex 收完 response.completed 即关连接）仍记 200。</li>
       </ul>
       <h3>流查看</h3>
-      <p>点击在途流/最近完成流的行可看该流内容：默认看输出（「显示解析/显示原始」切换）；「看请求体」回看导致这个流的下游请求体（JSON 自动美化，非完整 JSON 按原文显示）。浏览一律只给前 256KB。勾选「储存完整结构体」（默认关，重启复位）后，新开始的请求额外记录完整请求体与输出（不设上限，占内存），查看器出现「下载请求体/下载输出」按钮可下载完整文件（JSON 美化后保存，非 JSON 按原文），以及「交互式JSON」按钮——把请求体/输出渲染成可按键折叠展开的 JSON 树（默认全部折叠，点键名行懒展开；输出是 SSE 事件流时解析成事件数组再成树）；取消勾选立即清空已存的完整副本、下载与交互按钮消失。数据残缺的流不会静默当成完整版：请求体只剩截断版的「下载请求体」置灰（悬停见原因），无完整输出副本的「下载输出」置灰，交互式JSON 对这两类直接提示不看。Responses 翻译口的流记录的是翻译成 Anthropic 后的请求体。</p>
+      <p>点击在途流/最近完成流的行可看该流内容：默认看输出（「显示解析/显示原始」切换）；「看请求体」回看导致这个流的请求体（JSON 自动美化，非完整 JSON 按原文显示）。请求体与输出都按链路侧记录、点「链路」按钮切换：默认 代理↔上游 侧（请求体是实际发给上游的，输出是上游回来的原始流）；下游↔代理 侧是客户端发出/实际收到的。只有两侧有差异的流才双存——Responses 翻译流恒不同（下游 Responses、上游 Anthropic 各一份）；convertAlltoStream 重建 JSON 的流下游侧输出是重建后的一次性 JSON；原生流只在请求体被改写（分类器关思考/路由改模型等）时才单独存下游侧请求体——切到无记录的一侧会自动回退另一侧并在按钮旁提示。浏览一律只给前 256KB。勾选「储存完整结构体」（默认关，重启复位）后，新开始的请求额外记录完整请求体与输出（不设上限，占内存），查看器出现「下载请求体/下载输出」按钮可下载完整文件（JSON 美化后保存，非 JSON 按原文；按当前链路侧下载，缺侧回退时文件名按实际返回侧命名），以及「交互式JSON」按钮——把请求体/输出渲染成可按键折叠展开的 JSON 树（默认全部折叠，点键名行懒展开；输出是 SSE 事件流时解析成事件数组再成树）；取消勾选立即清空已存的完整副本、下载与交互按钮消失。数据残缺的流不会静默当成完整版：请求体只剩截断版的「下载请求体」置灰（悬停见原因），无完整输出副本的「下载输出」置灰（均按当前链路侧判定），交互式JSON 对这两类直接提示不看。</p>
       <h3>配置管理</h3>
       <ul>
       <li>配置页可新建 / 重命名 / 删除 / 切换配置文件。</li>
@@ -2701,7 +2793,7 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <li><b>API column</b>: protocol origin + thinking value in one cell. Name = protocol origin: orange <code>[Anthropic]</code> = native Anthropic-port traffic (Claude Code etc.), purple <code>[translate]</code> = Responses port translated to Anthropic via the main pipeline. The <code>[value]</code> after the name = the shortest form of the thinking config <b>actually sent upstream</b> (final state after proxy rewrites like translation mapping and classifier thinking-off), <b>its color = the vocabulary</b> (thinking targets the upstream: upstreams always receive Anthropic format, so a purple name is followed by an orange value) — orange = Anthropic thinking. Values: <code>off</code> = thinking disabled or effort none/off/disabled; <code>on N</code> = enabled + budget_tokens N; <code>adaptive</code> = adaptive without level; <code>low</code>/<code>high</code>/<code>max</code> etc = effort of adaptive; no <code>[value]</code> = the request carried no thinking field. Examples: <code>[translate][on 16384]</code> = Codex sent effort high, translated to an Anthropic upstream; <code>[Anthropic][off]</code> = hit the classifier and the proxy disabled thinking.</li>
       <li><b>499</b>: non-200 status codes in the status column are bracketed (e.g. [499], [400]) to spot abnormal streams at a glance. When retries/budget are exhausted, the proxy forwards a fallback error event (overloaded_error) downstream; such streams show [retries exhausted] in the status column (click the row to replay that fallback event). Streams that went through backoff retries get a gold <code>[retried Nx]</code> after the status code (N = retry count, e.g. 200[retried 2x]; [retries exhausted] carries it too — compare against max_retries to see if it maxed out). The 499 semantics match upstream provider dashboards — the connection ended before the upstream finished sending (most commonly the downstream actively cancelled, and the cancellation propagates into an upstream disconnect; nginx convention: client closed request); when the downstream disconnects only after the upstream finished completely (Codex closes the connection right after response.completed), it's still 200.</li>
       <h3>Stream viewer</h3>
-      <p>Click an in-flight or finished stream's row to view its content: output by default (toggle "Parsed/Raw"); "Request body" replays the downstream request body that caused this stream (JSON pretty-printed, non-complete JSON shown verbatim). Browsing always caps at the first 256KB. With "Store full payloads" on (default off, resets on restart), new requests additionally record the full request body and output (no cap, in memory), and the viewer shows "Download request/Download output" buttons for complete files (JSON pretty-printed, non-JSON verbatim), plus an "Interactive JSON" button — rendering the request body/output as a collapsible JSON tree (all collapsed by default, click a key row to lazily expand; SSE event streams are parsed into an event array first). Unchecking immediately purges stored full copies and the download/interactive buttons disappear. Streams with incomplete data are never silently treated as complete: "Download request" is greyed out when only a truncated request body remains (hover for the reason), "Download output" is greyed out without a full output copy, and Interactive JSON plainly declines both cases. Streams from the Responses translation port record the request body after translation to Anthropic.</p>
+      <p>Click an in-flight or finished stream's row to view its content: output by default (toggle "Parsed/Raw"); "Request body" replays the request body that caused this stream (JSON pretty-printed, non-complete JSON shown verbatim). Request body and output are recorded per link side — toggle with the "Link" button: the default proxy↔upstream side holds the request body actually sent upstream and the raw stream coming back; the client↔proxy side holds what the client sent and actually received. Only streams whose two sides differ are stored twice — Responses translation streams always differ (Responses downstream, Anthropic upstream, one copy each); for convertAlltoStream JSON-rebuilt streams the downstream output is the rebuilt one-shot JSON; direct streams record a separate downstream request body only when the body was rewritten (classifier thinking-off, route model change, etc.) — switching to a side with no record falls back to the other side, with a hint next to the button. Browsing always caps at the first 256KB. With "Store full payloads" on (default off, resets on restart), new requests additionally record the full request body and output (no cap, in memory), and the viewer shows "Download request/Download output" buttons for complete files (JSON pretty-printed, non-JSON verbatim; downloads follow the current link side, and on fallback the file name uses the actually-served side), plus an "Interactive JSON" button — rendering the request body/output as a collapsible JSON tree (all collapsed by default, click a key row to lazily expand; SSE event streams are parsed into an event array first). Unchecking immediately purges stored full copies and the download/interactive buttons disappear. Streams with incomplete data are never silently treated as complete: "Download request" is greyed out when only a truncated request body remains (hover for the reason), "Download output" is greyed out without a full output copy (both judged per current link side), and Interactive JSON plainly declines both cases.</p>
       <h3>Config management</h3>
       <li>The Config tab can create / rename / delete / switch config files.</li>
       <li>While on the Config tab, the file list auto-refreshes every 3 seconds — adding/removing config files needs no manual "refresh list".</li>
@@ -2858,6 +2950,10 @@ var enHTMLRepl = [][2]string{
 	{`'该流未记录完整输出（开启前已开始/已清空/无透传内容）'`, `'No full output recorded for this stream (started before the switch was on / purged / no proxied content)'`},
 	{`flightViewWhat==='req' ? '看输出' : '看请求体'`, `flightViewWhat==='req' ? 'Output' : 'Request body'`},
 	{`flightViewWhat==='req' ? '请求体' : '输出'`, `flightViewWhat==='req' ? 'Request body' : 'Output'`},
+	{`down ? (flightViewWhat==='req' ? '[下游→代理]' : '[代理→下游]') : (flightViewWhat==='req' ? '[代理→上游]' : '[上游→代理]')`, `down ? (flightViewWhat==='req' ? '[client→proxy]' : '[proxy→client]') : (flightViewWhat==='req' ? '[proxy→upstream]' : '[upstream→proxy]')`},
+	{`链路:下游↔代理`, `Link: client↔proxy`},
+	{`链路:代理↔上游`, `Link: proxy↔upstream`},
+	{`（该侧无记录，显示另一侧）`, `(no data for that side, showing the other)`},
 	{`flightViewTree ? '退出交互' : '交互式JSON'`, `flightViewTree ? 'Exit tree' : 'Interactive JSON'`},
 	{`textContent = '输出';`, `textContent = 'Output';`},
 	{`flightViewRaw ? '显示解析' : '显示原始'`, `flightViewRaw ? 'Parsed' : 'Raw'`},

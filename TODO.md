@@ -23,14 +23,14 @@
 - [x] 文档：应用内文档中英两版、docs/使用说明.md、README.md
 
 ## 提交 D — 双链路报文查看（下游↔代理 / 代理↔上游）
-- [ ] flight 加 reqDown/reqDownTrunc/contentDown/fullContentDown + purgeFull/finishedFlight 镜像；仅当与上行侧有差异时才存（翻译流恒存；原生流被改写或 convertAlltoStream 重建才存）
-- [ ] main.go：responsesHandler 原始 raw 经 ctxKeyReqDown 传入；handler 入口留 downBody，原生流 bytes.Equal 对比决定是否存 reqDown；重试循环分发点每次 setReqBody（最后一次为准，覆盖 400 重拆）
-- [ ] responses_stream.go：translatingWriter 加 setDownTap，所有 dst.Write 路径（emit/finish/finishBuffered/错误）都过 tap → appendContentDown；collectStreamToJSON 的重建 JSON tee 改 appendContentDown
-- [ ] logview.go：/__flight 与 /__flightreq 支持 ?side=up|down，缺侧回退另一侧并带 X-Proxy429-Side 头；flightInfo/recentFlights JSON 加 reqDown/respDown/reqDownTrunc/hasFullDown
-- [ ] 查看器 UI：flightViewSide 状态（在途默认 'up'=代理↔上游链路），请求体/返回体各加侧切换按钮，回退提示，下载/交互树随侧走；flightFlags 扩 {rt,hf,rd,sd,rdt,hfd}
-- [ ] EN 翻译表补齐所有新增中文串
-- [ ] 测试：双侧端点回退、side 参数、tap 覆盖全路径
-- [ ] 文档：应用内文档中英两版、docs/使用说明.md、README.md
+- [x] flight 加 reqDown/reqDownTrunc/contentDown/fullContentDown + purgeFull/finishedFlight 镜像；仅当与上行侧有差异时才存（翻译流恒存；原生流被改写或 convertAlltoStream 重建才存）
+- [x] main.go：responsesHandler 原始 raw 经 ctxKeyReqDown 传入；handler 入口留 downBody，原生流 bytes.Equal 对比决定是否存 reqDown；重试循环分发点每次 setReqBody（最后一次为准，覆盖 400 重拆）
+- [x] responses_stream.go：translatingWriter 加 setDownTap，所有 dst.Write 路径（emit/finish/finishBuffered/错误）都过 tap → appendContentDown；collectStreamToJSON 的重建 JSON tee 改 appendContentDown
+- [x] logview.go：/__flight 与 /__flightreq 支持 ?side=up|down，缺侧回退另一侧并带 X-Proxy429-Side 头；flightInfo/recentFlights JSON 加 reqDown/respDown/reqDownTrunc/hasFullDown
+- [x] 查看器 UI：flightViewSide 状态（在途默认 'up'=代理↔上游链路），请求体/返回体各加侧切换按钮，回退提示，下载/交互树随侧走；flightFlags 扩 {rt,hf,rd,sd,rdt,hfd}
+- [x] EN 翻译表补齐所有新增中文串
+- [x] 测试：双侧端点回退、side 参数、tap 覆盖全路径
+- [x] 文档：应用内文档中英两版、docs/使用说明.md、README.md
 
 ## 收尾
 - [ ] go build ./... 与 go test ./... 全绿（含旧测试签名更新）

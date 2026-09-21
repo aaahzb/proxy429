@@ -31,9 +31,14 @@ providers.
   no-thinking model" downgrade; one automatic retry with thinking off if the
   upstream rejects thinking. The console shows a two-tone `[off->low]` badge.
 - **Live observability**: a local web console showing in-flight streams,
-  token and cache-hit telemetry, and per-request diagnostics. The console
-  UI is bilingual (中文/English): it follows the system language on first
-  run and remembers your choice via the `ui_lang` config key.
+  token and cache-hit telemetry, and per-request diagnostics. The stream
+  viewer records request/response bodies per link side — proxy↔upstream
+  (what the proxy actually sent and received) and client↔proxy (what your
+  agent sent and received) — stored separately only when they differ
+  (translation streams always differ; direct streams only when the proxy
+  rewrote the body). The console UI is bilingual (中文/English): it
+  follows the system language on first run and remembers your choice via
+  the `ui_lang` config key.
 - **Model hijacking**: route any model name (e.g., `fable`) to any upstream
   model, with a system-tray right-click menu to switch routes on the fly.
 - **Cross-platform tray app** (Windows / macOS / Linux), single binary,
@@ -121,8 +126,10 @@ observability. Also: [使用说明](docs/使用说明.md) ·
   用量如实透传。规避 Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」
   的 K3 降级；上游拒思考时自动回退关思考重试一次。控制台显双色徽标 [off->low]。
 - 实时可观测性：本地网页控制台显示在途流、token 与缓存命中统计、逐请求
-  诊断。控制台界面中英双语：首次运行跟随系统语言，网页里可切换，
-  选择经 `ui_lang` 配置项持久记忆。
+  诊断。流查看器的请求体/返回体按链路侧分存——代理↔上游（代理实发/实收）
+  与 下游↔代理（客户端实发/实收），仅两侧有差异的流才双存（翻译流恒不同，
+  原生流只在代理改写请求体时才存下游侧）。控制台界面中英双语：首次运行
+  跟随系统语言，网页里可切换，选择经 `ui_lang` 配置项持久记忆。
 - **模型劫持**：把任意模型名（如 `fable`）路由到任意上游模型，系统托盘
   右键菜单一键切换路由。
 - 跨平台托盘应用（Windows / macOS / Linux），单二进制，~40% 测试代码。

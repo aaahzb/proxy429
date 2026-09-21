@@ -558,6 +558,8 @@ type translatingWriter struct {
 	flusher http.Flusher
 
 	headWritten bool // 流式客户端的响应头是否已发
+
+	downFlight *flight // 双链路记录的 flight 引用（主 handler 经 setDownTap 注入），供归档后补刷下游侧存档
 }
 
 const (
@@ -593,6 +595,33 @@ func newTranslatingWriter(dst http.ResponseWriter, clientStream bool, model stri
 }
 
 func (tw *translatingWriter) Header() http.Header { return tw.header }
+
+// tapResponseWriter 包装下游 ResponseWriter：Write 前先把字节 tee 进 flight 的
+// contentDown（代理→下游侧记录），Flush 等其余行为透传原 writer。
+type tapResponseWriter struct {
+	http.ResponseWriter
+	tap func([]byte)
+}
+
+func (t tapResponseWriter) Write(p []byte) (int, error) {
+	t.tap(p)
+	return t.ResponseWriter.Write(p)
+}
+
+// Flush 透传底层 http.Flusher（emit 里的 tw.flusher 仍持原始 dst，不受影响）。
+func (t tapResponseWriter) Flush() {
+	if f, ok := t.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// setDownTap 由主 handler 在 flight 建立后注入下游侧记录点：dst 换成 tap 包装后，
+// emit/finish/finishBuffered/错误写出等所有 dst.Write 路径自然全部被 tee
+// （与 setSearchTriple 同款类型断言注入，Anthropic 口的 writer 没有此方法自然跳过）。
+func (tw *translatingWriter) setDownTap(f *flight) {
+	tw.dst = tapResponseWriter{ResponseWriter: tw.dst, tap: f.appendContentDown}
+	tw.downFlight = f // 供 handler 归档后补尾（finish 产出的下游侧字节刷新进存档）
+}
 
 // setSearchTriple 由主 handler 在路由定案后注入搜索信封的归属三元组（Responses 翻译口
 // 专用；Anthropic 口的 ResponseWriter 没有此方法，handler 的类型断言自然跳过）。

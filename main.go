@@ -644,39 +644,48 @@ const maxLogBuf = 500
 
 // flight 跟踪单个进行中的请求，供网页控制台展示在途流（#id + 耗时/字节）。
 type flight struct {
-	id             uint64       // 递增编号
-	start          time.Time    // 收到下游请求（flight 建立）时间
-	phase          atomic.Int32 // 0=等待响应, 1=已收到响应（开始转发）
-	status         int          // HTTP 状态码（phase=1 时有效）
-	gaveUp         bool         // 重试/预算用尽后已向下游透传兜底错误事件（writeSSEError 置位，status 保持 0 不伪造）；完成流状态码列显 [重试尽]
-	bytes          atomic.Int64 // 已转发字节数
-	origModel      string       // 客户端原始 model；路由改写后用于响应流回改
-	targetModel    string       // 路由改写后的目标 model；非空且≠origModel 时 forward 会回改
-	upstreamModel  string       // 上游响应里实际返回的 model（由 rewriteResponseModel 捕获）；空则未知
-	modelLogged    atomic.Bool  // 是否已打 [改写] 日志，只打一次
-	stage          atomic.Int32 // 当前阶段（stage*），供网页在途流「状态」列展示
-	stageStart     atomic.Int64 // 当前灯色开始时刻（unixnano；灯色由 stage 经 stageColor 映射），网页在状态灯旁显示该灯色已持续的秒数
-	attempt        atomic.Int32 // 当前尝试序号（1 起），stage=stageAttempt 时显示「尝试N」
-	attemptStart   atomic.Int64 // 当前尝试上游请求发出时刻（unixnano）：网页黄灯旁 [尝试N:Xs] 计时起点；0=重试退避中（下一次尝试未发出）
-	routeReason    atomic.Int32 // 本次路由原因（route*），供网页「状态」列附加显示
-	delivered      atomic.Bool  // 响应已完整送达下游（透传读到上游干净 EOF / 组装 JSON 一次性写完 / 合成流写到 message_stop）；499 改记只针对没送完的流——客户端常在收完整流后立刻断连（Codex 尤甚），不算中断
-	contentMu      sync.Mutex
-	content        []byte           // 最近 flightContentCap 字节透传内容（SSE 原文），供网页点击在途流查看
-	reqBody        []byte           // 下游请求体原文（contentMu 同护；「储存完整结构体」关闭时 ≤ flightContentCap 只留前段，开启时不截断），供网页查看"什么请求导致这个流"；翻译口的流存的是翻译成 Anthropic 后的请求体
-	fullContent    []byte           // 完整透传内容（contentMu 同护，仅「储存完整结构体」开启时记录，不设上限），供下载输出原文
-	reqTruncated   bool             // 请求体是否被截断只剩前段（contentMu 同护）：记录时超长且未开完整储存，或关开关时被 purge 截断；供网页置灰下载按钮
-	searchDebug    bool             // 搜索摘要模式：forward 时把主力响应 SSE 追加写入 cfg.SearchDebugDir
-	inTokens       int64            // 本流 input_tokens 累积值（forward 结束时由 lastInput 存入）
-	cacheRead      int64            // 本流 cache_read 累积值
-	cacheCreation  int64            // 本流 cache_creation 累积值（缓存写入，命中率分母的一部分）
-	outTokens      int64            // 本流 output_tokens 累积值
-	firstByteMs    int64            // 本流首字延迟（毫秒），仅正常响应路径记录
-	tps            float64          // 本流流式 tok/s，仅正常响应路径记录
-	searchPrompt   string           // step2 摘要指令文本（仅搜索摘要子流非空），供状态页在途流/完成流最前端显示
-	translated     string           // 翻译口来源标记（"responses"=翻译进来的流，"responses-raw"=route 配 url_response_api 的原生透传流），网页 API 列显示 [translate]/[Response]
-	countTokens    bool             // count_tokens 探针流（countTokensPath），响应只有 {"input_tokens":N}，网页 model 列显示 [count_tokens] 前缀
-	searchStripped atomic.Int32     // 剥掉的回放搜索块总数（对话水位剥+400 兜底剥；网页红标 [剥N]，拆分只写日志）
-	searchReplay   *searchReplayCtx // Responses 翻译口的搜索还原上下文（ctx 带入，仅 handler goroutine 读写）；400 兜底剥块时取还原时刻学对话水位
+	id            uint64       // 递增编号
+	start         time.Time    // 收到下游请求（flight 建立）时间
+	phase         atomic.Int32 // 0=等待响应, 1=已收到响应（开始转发）
+	status        int          // HTTP 状态码（phase=1 时有效）
+	gaveUp        bool         // 重试/预算用尽后已向下游透传兜底错误事件（writeSSEError 置位，status 保持 0 不伪造）；完成流状态码列显 [重试尽]
+	bytes         atomic.Int64 // 已转发字节数
+	origModel     string       // 客户端原始 model；路由改写后用于响应流回改
+	targetModel   string       // 路由改写后的目标 model；非空且≠origModel 时 forward 会回改
+	upstreamModel string       // 上游响应里实际返回的 model（由 rewriteResponseModel 捕获）；空则未知
+	modelLogged   atomic.Bool  // 是否已打 [改写] 日志，只打一次
+	stage         atomic.Int32 // 当前阶段（stage*），供网页在途流「状态」列展示
+	stageStart    atomic.Int64 // 当前灯色开始时刻（unixnano；灯色由 stage 经 stageColor 映射），网页在状态灯旁显示该灯色已持续的秒数
+	attempt       atomic.Int32 // 当前尝试序号（1 起），stage=stageAttempt 时显示「尝试N」
+	attemptStart  atomic.Int64 // 当前尝试上游请求发出时刻（unixnano）：网页黄灯旁 [尝试N:Xs] 计时起点；0=重试退避中（下一次尝试未发出）
+	routeReason   atomic.Int32 // 本次路由原因（route*），供网页「状态」列附加显示
+	delivered     atomic.Bool  // 响应已完整送达下游（透传读到上游干净 EOF / 组装 JSON 一次性写完 / 合成流写到 message_stop）；499 改记只针对没送完的流——客户端常在收完整流后立刻断连（Codex 尤甚），不算中断
+	contentMu     sync.Mutex
+	content       []byte // 最近 flightContentCap 字节透传内容（SSE 原文），供网页点击在途流查看
+	reqBody       []byte // 下游请求体原文（contentMu 同护；「储存完整结构体」关闭时 ≤ flightContentCap 只留前段，开启时不截断），供网页查看"什么请求导致这个流"；翻译口的流存的是翻译成 Anthropic 后的请求体
+	fullContent   []byte // 完整透传内容（contentMu 同护，仅「储存完整结构体」开启时记录，不设上限），供下载输出原文
+	reqTruncated  bool   // 请求体是否被截断只剩前段（contentMu 同护）：记录时超长且未开完整储存，或关开关时被 purge 截断；供网页置灰下载按钮
+
+	// 双链路记录的下游侧（代理↔客户端）：仅当与上游侧（上面 content/reqBody/fullContent）
+	// 有差异时才存——Responses 翻译流恒存（两种协议必然不同），convertAlltoStream 重建
+	// JSON 的流存 contentDown，原生流被改写（分类器关思考/路由改模型等）才存 reqDown；
+	// 全空则两侧同文，端点缺侧回退并经 X-Proxy429-Side 头告知实际返回侧。contentMu 同护。
+	reqDown          []byte           // 下游→代理 请求体原文（截断/完整规则同 reqBody）
+	reqDownTruncated bool             // reqDown 是否被截断只剩前段
+	contentDown      []byte           // 代理→下游 回传内容（≤ flightContentCap 留尾部）
+	fullContentDown  []byte           // 代理→下游 完整回传（仅「储存完整结构体」开启时记录）
+	searchDebug      bool             // 搜索摘要模式：forward 时把主力响应 SSE 追加写入 cfg.SearchDebugDir
+	inTokens         int64            // 本流 input_tokens 累积值（forward 结束时由 lastInput 存入）
+	cacheRead        int64            // 本流 cache_read 累积值
+	cacheCreation    int64            // 本流 cache_creation 累积值（缓存写入，命中率分母的一部分）
+	outTokens        int64            // 本流 output_tokens 累积值
+	firstByteMs      int64            // 本流首字延迟（毫秒），仅正常响应路径记录
+	tps              float64          // 本流流式 tok/s，仅正常响应路径记录
+	searchPrompt     string           // step2 摘要指令文本（仅搜索摘要子流非空），供状态页在途流/完成流最前端显示
+	translated       string           // 翻译口来源标记（"responses"=翻译进来的流，"responses-raw"=route 配 url_response_api 的原生透传流），网页 API 列显示 [translate]/[Response]
+	countTokens      bool             // count_tokens 探针流（countTokensPath），响应只有 {"input_tokens":N}，网页 model 列显示 [count_tokens] 前缀
+	searchStripped   atomic.Int32     // 剥掉的回放搜索块总数（对话水位剥+400 兜底剥；网页红标 [剥N]，拆分只写日志）
+	searchReplay     *searchReplayCtx // Responses 翻译口的搜索还原上下文（ctx 带入，仅 handler goroutine 读写）；400 兜底剥块时取还原时刻学对话水位
 
 	// 会话缓存跟踪（状态页"缓存年龄"列）：路由阶段一次性写入，addFinished 同 goroutine 读取。
 	convID      string // 会话标识（Anthropic 口取 metadata.user_id 内 session_id，Responses 口取 prompt_cache_key）；空则不参与
@@ -933,6 +942,12 @@ func (f *flight) purgeFull() {
 		f.reqBody = f.reqBody[:flightContentCap]
 		f.reqTruncated = true
 	}
+	// 下游侧镜像：完整副本同样清空，下游侧请求体同样截回 cap。
+	f.fullContentDown = nil
+	if len(f.reqDown) > flightContentCap {
+		f.reqDown = f.reqDown[:flightContentCap]
+		f.reqDownTruncated = true
+	}
 	f.contentMu.Unlock()
 }
 
@@ -941,6 +956,102 @@ func (f *flight) reqTrunc() bool {
 	f.contentMu.Lock()
 	defer f.contentMu.Unlock()
 	return f.reqTruncated
+}
+
+// ---- 双链路记录的下游侧（代理↔客户端）----
+// 语义见 flight 结构体字段注释：仅与上游侧有差异的流才记录（翻译流恒记、重建 JSON
+// 流记 contentDown、原生流被改写才记 reqDown），规则与上游侧方法一一镜像。
+
+// appendContentDown 把一段代理→下游字节追加到下游侧内容缓冲（超 cap 留尾部、对齐 SSE 边界）。
+func (f *flight) appendContentDown(data []byte) {
+	f.contentMu.Lock()
+	defer f.contentMu.Unlock()
+	if fullStore.Load() {
+		f.fullContentDown = append(f.fullContentDown, data...)
+	}
+	f.contentDown = append(f.contentDown, data...)
+	if len(f.contentDown) > flightContentCap {
+		f.contentDown = f.contentDown[len(f.contentDown)-flightContentCap:]
+		// 同 appendContent：截断点落在 SSE 行中间时对齐到下一个事件边界。
+		if i := bytes.Index(f.contentDown, []byte("\n\n")); i >= 0 {
+			f.contentDown = f.contentDown[i+2:]
+		}
+	}
+}
+
+// snapshotContentDown 返回下游侧内容缓冲的副本（未记录返回空），供网页端点读取。
+func (f *flight) snapshotContentDown() []byte {
+	f.contentMu.Lock()
+	defer f.contentMu.Unlock()
+	out := make([]byte, len(f.contentDown))
+	copy(out, f.contentDown)
+	return out
+}
+
+// setReqDown 记录下游→代理请求体原文；截断规则同 setReqBody。
+func (f *flight) setReqDown(b []byte) {
+	truncated := false
+	if !fullStore.Load() && len(b) > flightContentCap {
+		b = b[:flightContentCap]
+		truncated = true
+	}
+	f.contentMu.Lock()
+	f.reqDown = b
+	f.reqDownTruncated = truncated
+	f.contentMu.Unlock()
+}
+
+// snapshotReqDown 返回下游侧请求体原文副本（未记录返回 nil）。
+func (f *flight) snapshotReqDown() []byte {
+	f.contentMu.Lock()
+	defer f.contentMu.Unlock()
+	if f.reqDown == nil {
+		return nil
+	}
+	out := make([]byte, len(f.reqDown))
+	copy(out, f.reqDown)
+	return out
+}
+
+// snapshotFullContentDown 返回下游侧完整回传的副本（未记录返回 nil），供下载端点读取。
+func (f *flight) snapshotFullContentDown() []byte {
+	f.contentMu.Lock()
+	defer f.contentMu.Unlock()
+	if f.fullContentDown == nil {
+		return nil
+	}
+	out := make([]byte, len(f.fullContentDown))
+	copy(out, f.fullContentDown)
+	return out
+}
+
+// hasReqDown / hasContentDown / reqDownTrunc / hasFullContentDown 供网页端点下发
+// 下游侧可用性（查看器侧切换与下载置灰判定）。
+func (f *flight) hasReqDown() bool {
+	f.contentMu.Lock()
+	defer f.contentMu.Unlock()
+	return f.reqDown != nil
+}
+
+// hasContentDown 返回下游侧回传是否已有内容（nil 与空都视为未记录）。
+func (f *flight) hasContentDown() bool {
+	f.contentMu.Lock()
+	defer f.contentMu.Unlock()
+	return len(f.contentDown) > 0
+}
+
+// reqDownTrunc 返回下游侧请求体是否被截断只剩前段。
+func (f *flight) reqDownTrunc() bool {
+	f.contentMu.Lock()
+	defer f.contentMu.Unlock()
+	return f.reqDownTruncated
+}
+
+// hasFullContentDown 返回是否仍持有下游侧完整输出副本。
+func (f *flight) hasFullContentDown() bool {
+	f.contentMu.Lock()
+	defer f.contentMu.Unlock()
+	return f.fullContentDown != nil
 }
 
 // hasFullContent 返回是否仍持有完整输出副本，供网页判定下载/交互按钮可用性。
@@ -953,33 +1064,38 @@ func (f *flight) hasFullContent() bool {
 // finishedFlight 是一个已结束 flight 的存档快照，供网页回看最近完成的流式输出。
 // 只在 flight 结束且 content 非空（有流式推送）时存档；content 是 snapshotContent 的副本。
 type finishedFlight struct {
-	id             uint64
-	model          string // origModel -> targetModel（-> upstreamModel 若上游返回且不同）
-	upstreamModel  string // 上游响应实际返回的 model 名（空则未返回/同 targetModel）
-	routeReason    int32  // 路由原因（route*），网页 model 列显示 [标签] 前缀用
-	status         int    // HTTP 状态码
-	gaveUp         bool   // 重试/预算用尽已透传兜底错误事件（此时 status 为 0），网页状态码列显 [重试尽]
-	attempts       int32  // 尝试次数（=重试次数+1；1 = 一把过无重试），网页状态码列 >1 时追加 [重试N次]
-	bytes          int64
-	stage          int32 // 结束时阶段
-	ended          time.Time
-	totalMs        int64   // 总耗时：收到下游请求到响应全部发回下游（= 翻译/路由/缓冲等内部处理 + 首字等待 + 吐字 + 收尾内部处理）
-	content        []byte  // ≤ flightContentCap 的透传内容副本
-	reqBody        []byte  // ≤ flightContentCap 的下游请求体原文副本（「储存完整结构体」开启时不截断；未记录为 nil）
-	fullContent    []byte  // 完整透传内容副本（仅「储存完整结构体」开启时记录，未记录为 nil）
-	reqTruncated   bool    // 请求体是否被截断只剩前段（供网页置灰下载按钮）
-	inTokens       int64   // 本流 input_tokens 累积值
-	cacheRead      int64   // 本流 cache_read 累积值
-	cacheCreation  int64   // 本流 cache_creation 累积值
-	outTokens      int64   // 本流 output_tokens 累积值
-	firstByteMs    int64   // 本流首字延迟（毫秒）
-	tps            float64 // 本流流式 tok/s
-	searchPrompt   string  // step2 摘要指令文本（仅搜索摘要子流非空）
-	translated     string  // 翻译口来源标记（"responses"=翻译，"responses-raw"=原生透传），网页 API 列 [translate]/[Response]
-	countTokens    bool    // count_tokens 探针流，网页 model 列 [count_tokens] 前缀
-	tools          string  // 工具调用标签（"[Read*1][Edit*3]"，无工具为空），网页 model 列追加显示
-	searchStripped int     // 剥掉的回放搜索块总数（对话水位剥+400 兜底剥；0=未剥），网页缓存命中列红标 [剥N]
-	convKey        string  // 会话缓存锚定键（convID|convAnchor）；空则该流不参与"缓存年龄"显示与裁剪保护
+	id            uint64
+	model         string // origModel -> targetModel（-> upstreamModel 若上游返回且不同）
+	upstreamModel string // 上游响应实际返回的 model 名（空则未返回/同 targetModel）
+	routeReason   int32  // 路由原因（route*），网页 model 列显示 [标签] 前缀用
+	status        int    // HTTP 状态码
+	gaveUp        bool   // 重试/预算用尽已透传兜底错误事件（此时 status 为 0），网页状态码列显 [重试尽]
+	attempts      int32  // 尝试次数（=重试次数+1；1 = 一把过无重试），网页状态码列 >1 时追加 [重试N次]
+	bytes         int64
+	stage         int32 // 结束时阶段
+	ended         time.Time
+	totalMs       int64  // 总耗时：收到下游请求到响应全部发回下游（= 翻译/路由/缓冲等内部处理 + 首字等待 + 吐字 + 收尾内部处理）
+	content       []byte // ≤ flightContentCap 的透传内容副本
+	reqBody       []byte // ≤ flightContentCap 的下游请求体原文副本（「储存完整结构体」开启时不截断；未记录为 nil）
+	fullContent   []byte // 完整透传内容副本（仅「储存完整结构体」开启时记录，未记录为 nil）
+	reqTruncated  bool   // 请求体是否被截断只剩前段（供网页置灰下载按钮）
+	// 双链路下游侧（代理↔客户端）镜像：仅与上游侧有差异的流才有值（规则见 flight 字段注释）。
+	reqDown          []byte  // 下游→代理 请求体原文（nil=未记录，端点回退另一侧）
+	reqDownTruncated bool    // reqDown 是否被截断只剩前段
+	contentDown      []byte  // 代理→下游 回传内容（nil=未记录）
+	fullContentDown  []byte  // 代理→下游 完整回传（nil=未记录）
+	inTokens         int64   // 本流 input_tokens 累积值
+	cacheRead        int64   // 本流 cache_read 累积值
+	cacheCreation    int64   // 本流 cache_creation 累积值
+	outTokens        int64   // 本流 output_tokens 累积值
+	firstByteMs      int64   // 本流首字延迟（毫秒）
+	tps              float64 // 本流流式 tok/s
+	searchPrompt     string  // step2 摘要指令文本（仅搜索摘要子流非空）
+	translated       string  // 翻译口来源标记（"responses"=翻译，"responses-raw"=原生透传），网页 API 列 [translate]/[Response]
+	countTokens      bool    // count_tokens 探针流，网页 model 列 [count_tokens] 前缀
+	tools            string  // 工具调用标签（"[Read*1][Edit*3]"，无工具为空），网页 model 列追加显示
+	searchStripped   int     // 剥掉的回放搜索块总数（对话水位剥+400 兜底剥；0=未剥），网页缓存命中列红标 [剥N]
+	convKey          string  // 会话缓存锚定键（convID|convAnchor）；空则该流不参与"缓存年龄"显示与裁剪保护
 	// start 锚流开始时刻：缓存写入/刷新发生在上游处理输入（≈流开始）时，"缓存年龄"与裁剪保护窗口都锚它。
 	start       time.Time
 	obsKey      string // 实测缓存存活配对键（convID|upstreamKey）；空则不参与观测（黄灯 499/无会话/无归类键）
@@ -1022,6 +1138,21 @@ func markClientGone(f *flight, ctx context.Context) {
 // addFinished 在 flight 结束后存档其透传内容，供网页回看最近完成的流。
 // 不跳过空内容：失败/重试用尽/非流式请求也进列表，便于排查为何某个流没输出。
 // 超 finishedCap 时丢弃最旧的。调用方为 handler defer，单 goroutine。
+// refreshArchivedDown 用 flight 当前的下游侧记录刷新其完成存档副本：翻译口非流式回传
+// 由 tw.finish 在 handler 返回（归档）之后才产出，归档快照缺这部分尾巴，需补刷。
+// 存档找不到该流（如 finishedCap=0 立即挤出）则不动。
+func refreshArchivedDown(f *flight) {
+	finishedMu.Lock()
+	defer finishedMu.Unlock()
+	for i := range finished {
+		if finished[i].id == f.id {
+			finished[i].contentDown = f.snapshotContentDown()
+			finished[i].fullContentDown = f.snapshotFullContentDown()
+			return
+		}
+	}
+}
+
 func addFinished(f *flight) {
 	content := f.snapshotContent()
 	model := f.origModel
@@ -1043,37 +1174,41 @@ func addFinished(f *flight) {
 		obsKey = "" // 缓存写没写都不确定，存活实测同样不算数（本流不当 cur，归档后也不当别人的 prev）
 	}
 	ff := finishedFlight{
-		id:             f.id,
-		model:          model,
-		upstreamModel:  f.upstreamModel,
-		routeReason:    f.routeReason.Load(),
-		status:         f.status,
-		gaveUp:         f.gaveUp,
-		attempts:       f.attempt.Load(),
-		bytes:          f.bytes.Load(),
-		stage:          f.stage.Load(),
-		ended:          now,
-		totalMs:        now.Sub(f.start).Milliseconds(),
-		content:        content,
-		reqBody:        f.snapshotReqBody(),
-		fullContent:    f.snapshotFullContent(),
-		reqTruncated:   f.reqTrunc(),
-		inTokens:       f.inTokens,
-		cacheRead:      f.cacheRead,
-		cacheCreation:  f.cacheCreation,
-		outTokens:      f.outTokens,
-		firstByteMs:    f.firstByteMs,
-		tps:            f.tps,
-		searchPrompt:   f.searchPrompt,
-		translated:     f.translated,
-		countTokens:    f.countTokens,
-		tools:          f.toolCallsTag(),
-		searchStripped: int(f.searchStripped.Load()),
-		convKey:        convKey,
-		start:          f.start,
-		obsKey:         obsKey,
-		upstreamKey:    f.upstreamKey,
-		think:          f.think,
+		id:               f.id,
+		model:            model,
+		upstreamModel:    f.upstreamModel,
+		routeReason:      f.routeReason.Load(),
+		status:           f.status,
+		gaveUp:           f.gaveUp,
+		attempts:         f.attempt.Load(),
+		bytes:            f.bytes.Load(),
+		stage:            f.stage.Load(),
+		ended:            now,
+		totalMs:          now.Sub(f.start).Milliseconds(),
+		content:          content,
+		reqBody:          f.snapshotReqBody(),
+		fullContent:      f.snapshotFullContent(),
+		reqTruncated:     f.reqTrunc(),
+		reqDown:          f.snapshotReqDown(),
+		reqDownTruncated: f.reqDownTrunc(),
+		contentDown:      f.snapshotContentDown(),
+		fullContentDown:  f.snapshotFullContentDown(),
+		inTokens:         f.inTokens,
+		cacheRead:        f.cacheRead,
+		cacheCreation:    f.cacheCreation,
+		outTokens:        f.outTokens,
+		firstByteMs:      f.firstByteMs,
+		tps:              f.tps,
+		searchPrompt:     f.searchPrompt,
+		translated:       f.translated,
+		countTokens:      f.countTokens,
+		tools:            f.toolCallsTag(),
+		searchStripped:   int(f.searchStripped.Load()),
+		convKey:          convKey,
+		start:            f.start,
+		obsKey:           obsKey,
+		upstreamKey:      f.upstreamKey,
+		think:            f.think,
 	}
 	finishedMu.Lock()
 	// 实测缓存存活观测：与同会话同上游的上一条完成流配对（finished 升序，倒扫取最近一条同键）。
@@ -3904,7 +4039,7 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 	}
 	stats.bytesForward.Add(int64(len(out)))
 	f.bytes.Add(int64(len(out)))
-	f.appendContent(out) // tee 重建后的非流式 JSON，供网页对照回传形态
+	f.appendContentDown(out) // tee 重建后的非流式 JSON 到下游侧（代理→客户端实际形态；上游侧 SSE 行由 handleChunk 逐行 tee 在 content）
 	// 组装 JSON 已一次性写完=完整送达（499 改记只看没送完的流）
 	f.delivered.Store(true)
 	log.Printf("[streamify] #%d stream complete; non-streaming JSON returned to client in one piece (%d output tokens)", f.id, lastOutput)
@@ -3974,6 +4109,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// translateNone2Low 升级标记（Responses 翻译口把关思考悄悄升成 low 发上游）：
 	// API 列显双色徽标 [off->low]；转发循环里上游 400 拒 thinking 时回退关思考重试一次。
 	none2LowUpgraded, _ := r.Context().Value(ctxKeyNone2Low).(bool)
+	// 双链路记录：Responses 翻译口的下游侧回传（代理→客户端实际写出的字节）经
+	// translatingWriter 的 tap 全量 tee 进 contentDown；原生口 w 不是 translatingWriter，
+	// 类型断言自然跳过（原生流两侧同文，上游侧一份即可）。
+	if t, ok := w.(interface{ setDownTap(*flight) }); ok {
+		t.setDownTap(f)
+	}
 	// Responses 翻译口带来的搜索还原上下文：水位主动剥块计数进 flight（[剥N] 显示）；
 	// replay 指针留在 flight 上，400 兜底剥块时取还原时刻学对话水位
 	// （见转发循环的 tool_call_id 分支）。
@@ -4005,8 +4146,18 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body.Close()
-	// 留一份请求体原文供网页查看（什么请求导致这个流）；翻译口的流存的是翻译后 body。
+	// 留一份请求体供网页查看（什么请求导致这个流）：此为 代理→上游 侧初值，重试循环
+	// 每次尝试以实际发出体刷新（兜底改写后以最后一次为准）；没到分发就早夭的流
+	// （如坏 JSON）也保有这份入口体可看。
 	f.setReqBody(body)
+	// 双链路记录的下游侧（下游→代理）请求体：翻译口经 context 带来 Responses 原文
+	// （与翻译后体必然不同，恒存）；原生流留待与首发上游体对比，有差异才存。
+	var downBody []byte
+	if v, ok := r.Context().Value(ctxKeyReqDown).([]byte); ok && len(v) > 0 {
+		f.setReqDown(v)
+	} else {
+		downBody = body
+	}
 	// Anthropic 口：从请求体 metadata.user_id 提会话标识（Responses 口已由 context 带上，不重复解析）。
 	if f.convID == "" {
 		f.convID = extractConvID(body)
@@ -4269,6 +4420,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		upPath := r.URL.Path
 		if f.responsesRaw() {
 			upPath = responsesAPIPath(upstream)
+		}
+		// 双链路记录：代理→上游 侧以本次尝试实际发出体为准（覆盖入口初值，兜底改写
+		// 后自然刷新）；原生流的下游侧只在被改写而与上行体有差异时才存，同文不双存。
+		f.setReqBody(body)
+		if downBody != nil && !bytes.Equal(downBody, body) {
+			f.setReqDown(downBody)
+			downBody = nil // 客户端原文不变，存一次即可
 		}
 		upReq, err := http.NewRequestWithContext(ctx, r.Method, upstream+upPath, bytes.NewReader(body))
 		if err != nil {

@@ -54,6 +54,14 @@ type ctxKeyNone2LowT struct{}
 
 var ctxKeyNone2Low ctxKeyNone2LowT
 
+// ctxKeyReqDown 是内部请求 context 的键：Responses 翻译口把下游请求体原文
+// （翻译前的 Responses 格式）递给主 handler，存为双链路记录的下游侧（下游→代理）。
+// 透传分支不设置——body 原样转发，两侧同文无需双存。
+// 同 ctxKeyTranslated：用 context 不用 header，不会漏到上游。
+type ctxKeyReqDownT struct{}
+
+var ctxKeyReqDown ctxKeyReqDownT
+
 // ctxKeyTranslated 的取值：flight.translated 同款三态——
 // translatedResponses 表示 Responses 请求被翻译成 Anthropic 走主管线（API 列 [translate]）；
 // translatedResponsesRaw 表示命中路由配了 url_response_api，Responses 原文透传不翻译（API 列 [Response]）。
@@ -268,6 +276,9 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	if upgraded {
 		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyNone2Low, true))
 	}
+	// 双链路记录：下游 Responses 原文经 context 带给主 handler 存 reqDown
+	// （与翻译后体必然不同，恒存；透传分支不设置——body 原样转发，两侧同文）。
+	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyReqDown, raw))
 	if convID != "" {
 		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyConvID, convID))
 	}
@@ -292,6 +303,11 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	tw.conv.stripThinking = upgraded
 	handler(tw, r2)
 	tw.finish()
+	// 双链路记录补尾：非流式客户端的下游侧回传是 finish 在 handler 归档之后产出的，
+	// 把 tap 进 flight 的下游侧字节补刷进完成存档（流式客户端在转发中已全量入账，补刷同值无害）。
+	if tw.downFlight != nil {
+		refreshArchivedDown(tw.downFlight)
+	}
 }
 
 // writeResponsesError 返回 Responses 协议风格的错误 JSON。
