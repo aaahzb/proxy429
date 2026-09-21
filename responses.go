@@ -46,13 +46,20 @@ type ctxKeyThinkT struct{}
 
 var ctxKeyThink ctxKeyThinkT
 
-// ctxKeyNone2Low 是内部请求 context 的键：translateNone2Low 升级标记——翻译口把
-// 下游的关思考请求悄悄升级为 low 思考发上游（回传剥离思考块，下游无感知）。
-// 主 handler 据此给 flight 打 [off->low] 徽标，并在上游 400 拒 thinking 时
-// 回退关思考重试一次。
+// ctxKeyNone2Low 是内部请求 context 的键：translateNone2Low 升级模式（int，见下）。
+// 主 handler 据此给 flight 打 [off->low] 徽标（仅 n2lStealth），并在上游 400 拒
+// thinking 时回退关思考重试一次（n2lStealth 与 n2lTryLow 都罩）。
 type ctxKeyNone2LowT struct{}
 
 var ctxKeyNone2Low ctxKeyNone2LowT
+
+// translateNone2Low 升级模式（responsesToAnthropicTriple 的第 4 返回值，经 ctxKeyNone2Low 透传）：
+const (
+	n2lNone    = 0 // 未升级
+	n2lStealth = 1 // 隐式升级：下游显式关思考 → low 发上游；回传剥离思考块（下游无感知）+ [off->low] 徽标
+	n2lTryLow  = 2 // 试 low：工具续轮历史不可回放时代理本要自行关思考（关 = Kimi 把 K3 路由 K2.8 无思考版），
+	// 开关开着就改试 low；不剥思考块——下游本来就要思考，块随回传带回签名，下一轮历史自愈
+)
 
 // ctxKeyReqDown 是内部请求 context 的键：Responses 翻译口把下游请求体原文
 // （翻译前的 Responses 格式）递给主 handler，存为双链路记录的下游侧（下游→代理）。
@@ -248,7 +255,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	if rr := matchRouteRule(c, origModel); rr != nil {
 		thinkStyle = rr.Thinking
 	}
-	anth, reg, upgraded, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle, c.TranslateNone2Low)
+	anth, reg, n2l, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle, c.TranslateNone2Low)
 	if err != nil {
 		writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -273,8 +280,8 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	r2 := r.Clone(r.Context())
 	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyTranslated, translatedResponses))
 	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeySearchReplay, replay))
-	if upgraded {
-		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyNone2Low, true))
+	if n2l != n2lNone {
+		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyNone2Low, n2l))
 	}
 	// 双链路记录：下游 Responses 原文经 context 带给主 handler 存 reqDown
 	// （与翻译后体必然不同，恒存；透传分支不设置——body 原样转发，两侧同文）。
@@ -297,10 +304,11 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tw := newTranslatingWriter(w, clientStream, origModel, reg)
-	// translateNone2Low 升级流：回传剥离思考块（流式由 conv 状态机剥离、非流式由
-	// finishBuffered 整转剥离），下游看到的仍是关思考响应；usage 不碰，如实透传。
-	tw.stripThinking = upgraded
-	tw.conv.stripThinking = upgraded
+	// translateNone2Low 隐式升级流（下游显式关思考→low）：回传剥离思考块（流式由 conv
+	// 状态机剥离、非流式由 finishBuffered 整转剥离），下游看到的仍是关思考响应；usage
+	// 不碰，如实透传。试 low（历史兜底）不剥：下游本来就要思考，块随回传带回签名。
+	tw.stripThinking = n2l == n2lStealth
+	tw.conv.stripThinking = n2l == n2lStealth
 	handler(tw, r2)
 	tw.finish()
 	// 双链路记录补尾：非流式客户端的下游侧回传是 finish 在 handler 归档之后产出的，
@@ -356,11 +364,14 @@ func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, 
 // 模型思考形态 thinkStyle（""/"auto"=按客户端 model 名查表；"adaptive"=强制 adaptive；
 // "budget"=强制 enabled+budget_tokens——路由 thinking 参数，解决路由目标模型与客户端
 // 别名的思考能力不一致，如客户端叫 claude-fable-5 实际路由到只支持 budget 的 Kimi）。
-// none2Low=true（配置 translateNone2Low）时：下游显式关思考（effort none/off/disabled）
-// 的请求被悄悄升级为 low 思考发上游，返回的 upgraded=true（回传侧剥离思考块，下游
-// 无感知；usage 如实透传）。动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview
-// 无思考版」——开着 low 让 K3 不被降级路由到 K2.8。
-func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx, thinkStyle string, none2Low bool) (map[string]interface{}, *toolRegistry, bool, error) {
+// none2Low=true（配置 translateNone2Low）时两处升级（第 4 返回值 n2l，三态见常量）：
+// ① 下游显式关思考（effort none/off/disabled）→ low 发上游，n2l=n2lStealth（回传侧剥离
+// 思考块，下游无感知；usage 如实透传）；② 工具续轮历史不可回放（trailingTurnSupportsThinking
+// =false）——代理的兜底本是显式关思考，而关思考恰会触发 Kimi 把 K3 路由到 K2.8 无思考版
+// （正是本参数要防的事），故同样改试 low，n2l=n2lTryLow（不剥思考块：下游本来就要思考，
+// 块随回传带回签名，下一轮历史自愈；上游拒则主 handler 400 兜底回退关思考重发）。
+// 动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」——开着 low 让 K3 不被降级。
+func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx, thinkStyle string, none2Low bool) (map[string]interface{}, *toolRegistry, int, error) {
 	result := map[string]interface{}{}
 	if model := objStr(body, "model"); model != "" {
 		result["model"] = model
@@ -403,7 +414,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	case []interface{}:
 		msgs, err = convertInputToMessages(inp, reg, reqTriple, replay)
 		if err != nil {
-			return nil, nil, false, err
+			return nil, nil, n2lNone, err
 		}
 	}
 
@@ -413,12 +424,12 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	msgs = dropEmptyMessages(msgs)
 	msgs = ensureLeadingUserMessage(msgs)
 	if len(msgs) == 0 {
-		return nil, nil, false, fmt.Errorf("cannot convert request: empty messages")
+		return nil, nil, n2lNone, fmt.Errorf("cannot convert request: empty messages")
 	}
 	trimTrailingAssistantText(msgs)
 	msgs = dropEmptyMessages(msgs)
 	if len(msgs) == 0 {
-		return nil, nil, false, fmt.Errorf("cannot convert request: empty messages")
+		return nil, nil, n2lNone, fmt.Errorf("cannot convert request: empty messages")
 	}
 	result["messages"] = msgs
 
@@ -456,9 +467,9 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	historyValid := trailingTurnSupportsThinking(msgs)
 	thinkingEnabled := false
 	budget := effortToThinkingBudget(effort)
-	// upgraded：translateNone2Low 生效标记——下游关思考被悄悄升级为 low 发上游，
-	// 回传侧据此剥离思考块（主 handler 打 [off->low] 徽标、上游 400 拒时回退重试）。
-	upgraded := false
+	// n2l：translateNone2Low 升级模式（三态见常量）——隐式升级（n2lStealth）回传侧
+	// 据此剥离思考块（主 handler 打 [off->low] 徽标）；两种升级上游 400 拒时都回退重试。
+	n2l := n2lNone
 	// upgradeNoneToLow 把关思考升级为 low：adaptive 模型给 thinking:adaptive+effort:low；
 	// budget 模型给 enabled+2048（压顶 maxTokens/2，容不下 1024 下限则放弃升级保持关闭）。
 	// thinkingEnabled 打开后 temperature/top_p 不透传（与正常 thinking 路径同规则）。
@@ -481,16 +492,26 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	}
 	switch {
 	case !historyValid:
-		// 工具续轮缺签名 thinking 块可回放：关不掉的模型直接报错（照抄 cc-switch 文案），
-		// 能关的 adaptive 模型显式关闭，其余模型不开 thinking（budget 路径一并跳过）。
-		// none2Low 升级在本分支同样生效（工具续推是 Codex 的主要请求形态）：上游若拒
-		// 「无思考历史却开思考」，主 handler 一次性 400 兜底回退为关思考重发。
+		// 工具续轮缺签名 thinking 块可回放：关不掉的模型直接报错（照抄 cc-switch 文案）。
+		// 能关时——translateNone2Low 开着就不再自行关思考（关 = Kimi 把 K3 路由到
+		// K2.8 无思考版，正是本参数要防的事，#11/#12 实况），一律试 low 发上游；上游若
+		// 拒「无思考历史却开思考」，主 handler 一次性 400 兜底回退为关思考重发。下游显式
+		// 关思考走隐式升级（回传剥思考块）；下游本就要思考（effort 非关档）走试 low（不剥：
+		// 块随回传带回签名，下一轮历史自愈）。开关关着保持 cc-switch 行为：能关的 adaptive
+		// 模型显式关闭，其余模型不开 thinking（budget 路径一并跳过）。
 		if cannotDisable {
-			return nil, nil, false, fmt.Errorf("Anthropic model requires thinking, but the tool history has no signed thinking block to replay")
+			return nil, nil, n2lNone, fmt.Errorf("Anthropic model requires thinking, but the tool history has no signed thinking block to replay")
 		}
-		if none2Low && explicitlyDisabled {
-			upgraded = upgradeNoneToLow()
-		} else if adaptiveShouldThink {
+		switch {
+		case none2Low && explicitlyDisabled:
+			if upgradeNoneToLow() {
+				n2l = n2lStealth
+			}
+		case none2Low:
+			if upgradeNoneToLow() {
+				n2l = n2lTryLow
+			}
+		case adaptiveShouldThink:
 			result["thinking"] = map[string]interface{}{"type": "disabled"}
 		}
 	case adaptiveShouldThink && (!explicitlyDisabled || cannotDisable):
@@ -501,13 +522,14 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		} else if explicitlyDisabled && cannotDisable {
 			// Fable/Mythos 关不掉 thinking：用 low 表达 Codex 显式的 none。
 			result["output_config"] = map[string]interface{}{"effort": "low"}
-			upgraded = none2Low // 下游本就想关思考：开启 translateNone2Low 时回传侧剥离思考块
+			if none2Low {
+				n2l = n2lStealth // 下游本就想关思考：开启 translateNone2Low 时回传侧剥离思考块
+			}
 		}
 	case explicitlyDisabled:
-		if none2Low {
-			upgraded = upgradeNoneToLow()
-		}
-		if !upgraded {
+		if none2Low && upgradeNoneToLow() {
+			n2l = n2lStealth
+		} else {
 			result["thinking"] = map[string]interface{}{"type": "disabled"}
 		}
 	case budget > 0:
@@ -543,11 +565,11 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			// 不悄悄弱化 required/指定选择。对照 cc-switch 398-425。
 			if t := objStr(mapped, "type"); thinkingEnabled && (t == "any" || t == "tool") {
 				if cannotDisable {
-					return nil, nil, false, fmt.Errorf("Anthropic model requires adaptive thinking and cannot honor a forced tool_choice")
+					return nil, nil, n2lNone, fmt.Errorf("Anthropic model requires adaptive thinking and cannot honor a forced tool_choice")
 				}
 				result["thinking"] = map[string]interface{}{"type": "disabled"}
 				delete(result, "output_config")
-				upgraded = false // 思考已被关掉：上游不会再产思考块，回传侧无需剥离
+				n2l = n2lNone // 思考已被关掉：上游不会再产思考块，回传侧无需剥离
 				if v, ok := body["temperature"]; ok {
 					result["temperature"] = v
 				}
@@ -566,7 +588,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			tc["disable_parallel_tool_use"] = true
 		}
 	}
-	return result, reg, upgraded, nil
+	return result, reg, n2l, nil
 }
 
 // responsesSystemText 提取 system/developer 消息项的文本（content 为字符串或 parts 数组）。

@@ -43,6 +43,20 @@
 - [x] README 两处 ui_lang 描述更新
 - [x] go build/vet/test 全绿 + build.sh 重出 release
 
+## 提交 F — translateNone2Low 覆盖「历史不可回放的代理兜底关思考」（#11/#12 实况修复）
+背景：用户开启 translateNone2Low 后 #11/#12 上游仍收到关思考。诊断闭环：Codex 发的 effort 是
+max（codex config model_reasoning_effort="max"，enabled-reasoning-efforts 无 none 档），显式关
+=false；是 trailingTurnSupportsThinking=false（工具续轮缺签名思考块）触发 !historyValid 兜底分支
+把 thinking 显式关成 disabled——关思考恰会触发 Kimi 把 K3 路由到 K2.8 无思考版，正是本参数要防
+的事，却从另一扇门发生；参数按字面 spec（只升级下游显式关）正确地没介入。
+- [x] responses.go：第 4 返回值 upgraded bool 改三态 n2l int（0 未升级 / 1 隐式升级=回传剥思考块+[off->low]徽标 / 2 试 low=不剥思考块只带 400 兜底）
+- [x] !historyValid 分支：none2Low 开时不再自行关思考——下游显式关→隐式升级（原行为）；其余（下游本就要思考）→试 low 发上游（上游拒则主 handler 既有 400 兜底回退关思考重发）；开关关→保持 cc-switch 的显式关闭
+- [x] 试 low 不剥思考块的理由：下游本来就要思考，思考块随回传带回签名块，下一轮历史自愈
+- [x] main.go：ctxKeyNone2Low 改携 int；[off->low] 徽标仅 n2l==1；400 兜底罩 n2l!=0；Config 字段注释更新
+- [x] 测试：#11/#12 复现形状（工具续轮缺签名思考块 + effort max + 路由 thinkStyle=adaptive）→ 上游收到 adaptive+low 且 n2l==2（非隐式、不剥）；开关关 → 仍 disabled；既有用例签名随三态化更新
+- [x] 文档同步：README 中英、docs/使用说明.md、应用内文档配置表（logview.go 中英两版）
+- [x] gofmt/vet/test 全绿 + build.sh 重出 release（含跨平台矩阵）
+
 ## 收尾
 - [x] go build ./... 与 go test ./... 全绿（含旧测试签名更新）
 - [x] README.md / docs 同步（用户全局规则）

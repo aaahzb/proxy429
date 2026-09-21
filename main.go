@@ -51,7 +51,7 @@ type Config struct {
 	SearchFallback             *SearchRoute     `json:"search_fallback,omitempty"`     // 搜索兜底路由；请求带搜索工具却命中 no_search 上游时改走此处；空则不启用
 	SearchDebugDir             string           `json:"search_debug_dir,omitempty"`    // 搜索调试目录；非空时把搜索摘要各步请求/响应 raw 写入该目录，便于排查
 	ConvertAllToStream         bool             `json:"convertAlltoStream"`            // 全局流式化：开启后所有非流式请求改为流式发上游，收集完整流后重建非流式 JSON 一次性返回（客户端无感知，网页可监控吐字/首字/tok/s）
-	TranslateNone2Low          bool             `json:"translateNone2Low"`             // Responses 翻译口：下游关思考的请求悄悄升级为 low 思考发上游、回传剥离思考块（下游无感知，usage 如实透传）；默认 false。动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」，开 low 避免 K3 被降级路由
+	TranslateNone2Low          bool             `json:"translateNone2Low"`             // Responses 翻译口：①下游关思考的请求悄悄升级为 low 思考发上游、回传剥离思考块（下游无感知，usage 如实透传）；②工具续轮历史不可回放时代理本要自行关思考——关会触发 Kimi 把 K3 路由 K2.8 无思考版，同样改试 low（不剥思考块，带回签名让下轮历史自愈；上游拒则 400 兜底回退关思考重试）；默认 false。动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」，开 low 避免 K3 被降级路由
 	ResponsesListen            string           `json:"responses_listen"`              // OpenAI Responses API 监听口（如 127.0.0.1:8081）；空不启用。把 Responses 协议请求翻译成 Anthropic 走主管线，供 Codex CLI 等工具接入。保存/重载即动态启停
 }
 
@@ -4189,9 +4189,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if v, ok := r.Context().Value(ctxKeyThink).(string); ok {
 		f.think = v
 	}
-	// translateNone2Low 升级标记（Responses 翻译口把关思考悄悄升成 low 发上游）：
-	// API 列显双色徽标 [off->low]；转发循环里上游 400 拒 thinking 时回退关思考重试一次。
-	none2LowUpgraded, _ := r.Context().Value(ctxKeyNone2Low).(bool)
+	// translateNone2Low 升级模式（Responses 翻译口把关思考悄悄升成 low / 历史不可回放时
+	// 改试 low 发上游，见 n2l 常量）：API 列对隐式升级显双色徽标 [off->low]；转发循环里
+	// 上游 400 拒 thinking 时回退关思考重试一次（两种模式都罩）。
+	n2lMode, _ := r.Context().Value(ctxKeyNone2Low).(int)
 	// 双链路记录：Responses 翻译口的下游侧回传（代理→客户端实际写出的字节）经
 	// translatingWriter 的 tap 全量 tee 进 contentDown；原生口 w 不是 translatingWriter，
 	// 类型断言自然跳过（原生流两侧同文，上游侧一份即可）。
@@ -4277,9 +4278,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if f.think == "" {
 		f.think = extractThinkMode(body)
 	}
-	// 升级流的思考值覆盖为 [off->low]（extractThinkMode 看到的是升级后的 low，
-	// 体现不出「下游关、上游开」的悄悄升级语义）。
-	if none2LowUpgraded {
+	// 隐式升级流（下游显式关思考→low）的思考值覆盖为 [off->low]（extractThinkMode
+	// 看到的是升级后的 low，体现不出「下游关、上游开」的悄悄升级语义）。试 low（历史
+	// 兜底）不覆盖：如实显示 low 即可（下游本来就要思考）。
+	if n2lMode == n2lStealth {
 		f.think = "off->low"
 	}
 
@@ -4655,17 +4657,18 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			// translateNone2Low 升级被上游拒（如无思考历史却开思考）：把 thinking 改回
-			// 关闭立即重试一次——下游本来要的就是关思考，语义无损；不烧退避预算
-			// （attempt--，与搜索剥块兜底同款）。回退后上游收到的即是关思考，响应
-			// 不会有思考块，回传侧剥离自然无事可做；徽标也回退为如实显示。
-			if none2LowUpgraded && bytes.Contains(head, []byte("thinking")) {
+			// translateNone2Low 升级被上游拒（如无思考历史却开思考——试 low 的兜底升级
+			// 主要防这个）：把 thinking 改回关闭立即重试一次——下游本来要的就是关思考（或
+			// 至多接受关思考），语义无损；不烧退避预算（attempt--，与搜索剥块兜底同款）。
+			// 回退后上游收到的即是关思考，响应不会有思考块，回传侧剥离自然无事可做；
+			// 徽标也回退为如实显示。
+			if n2lMode != n2lNone && bytes.Contains(head, []byte("thinking")) {
 				if nb, ok := disableThinkingInBody(body); ok {
 					log.Printf("[fallback] #%d upstream rejected the low-thinking upgrade (HTTP %d); reverted to thinking-off and retried", f.id, resp.StatusCode)
 					stats.statusRetries.Add(1)
 					stats.addModelRetry(f.realModel())
 					body = nb
-					none2LowUpgraded = false
+					n2lMode = n2lNone
 					f.think = extractThinkMode(body)
 					attempt--
 					resp.Body.Close()
