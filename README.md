@@ -37,8 +37,9 @@ providers.
   agent sent and received) — stored separately only when they differ
   (translation streams always differ; direct streams only when the proxy
   rewrote the body). The console UI is bilingual (中文/English): it
-  follows the system language on first run and remembers your choice via
-  the `ui_lang` config key.
+  follows the system language on first run and remembers your choice in
+  `program-settings.txt` (program settings, kept separate from the routing
+  config — the proxy never rewrites your config file's formatting).
 - **Model hijacking**: route any model name (e.g., `fable`) to any upstream
   model, with a system-tray right-click menu to switch routes on the fly.
 - **Cross-platform tray app** (Windows / macOS / Linux), single binary,
@@ -129,7 +130,8 @@ observability. Also: [使用说明](docs/使用说明.md) ·
   诊断。流查看器的请求体/返回体按链路侧分存——代理↔上游（代理实发/实收）
   与 下游↔代理（客户端实发/实收），仅两侧有差异的流才双存（翻译流恒不同，
   原生流只在代理改写请求体时才存下游侧）。控制台界面中英双语：首次运行
-  跟随系统语言，网页里可切换，选择经 `ui_lang` 配置项持久记忆。
+  跟随系统语言，网页里可切换，选择存在 `program-settings.txt`（程序设置，
+  与路由配置分离——代理绝不重排你的配置文件排版）。
 - **模型劫持**：把任意模型名（如 `fable`）路由到任意上游模型，系统托盘
   右键菜单一键切换路由。
 - 跨平台托盘应用（Windows / macOS / Linux），单二进制，~40% 测试代码。

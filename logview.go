@@ -39,7 +39,7 @@ const (
 	recentFlightsPath = "/__recentflights"  // GET 最近完成的流列表（摘要）
 	finishedCapPath   = "/__finishedcap"    // POST 设置保留完成流个数 N
 	fullStorePath     = "/__fullstore"      // POST 开关「储存完整结构体」（记录完整请求体/输出供下载）
-	uiLangPath        = "/__uilang"         // GET 当前界面语言 / POST 切换语言（写回当前配置文件 ui_lang 并热生效）
+	uiLangPath        = "/__uilang"         // GET 当前界面语言 / POST 切换语言（写 program-settings.txt 并热生效）
 )
 
 // isLocalRequest 限制只有本机浏览器能访问控制台。
@@ -102,11 +102,10 @@ func logViewerHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // uiLangHandler 查询/切换网页控制台界面语言。
-// GET 返回 {"lang": 当前生效语言, "source": "config"|"system"}；
-// POST {"lang":"zh"|"en"|""} 把选择写回当前配置文件的 ui_lang 字段（"" = 跟随系统，
-// 从配置里删掉该字段），随即热生效——下次刷新页面即是新语言。
-// 写配置走文本级编辑（setTopLevelJSONValue 只动 ui_lang 一个键），其余字段的
-// 内容、顺序与手写排版（缩进/换行风格）原样保留。
+// GET 返回 {"lang": 当前生效语言, "source": "program"|"system"}；
+// POST {"lang":"zh"|"en"|""} 把选择写入程序设置 program-settings.txt（"" = 跟随系统，
+// 删掉该键），随即热生效——下次刷新页面即是新语言。语言是程序级偏好，与路由配置
+// 分离：不写 config*.json，也不触发配置重载（程序设置与上游设置分开维护）。
 func uiLangHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -115,8 +114,8 @@ func uiLangHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if r.Method == http.MethodGet {
 		source := "system"
-		if l := cfg.Load().UILang; l == "zh" || l == "en" {
-			source = "config"
+		if l := readProgramSetting("ui-lang"); l == "zh" || l == "en" {
+			source = "program"
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "lang": currentUILang(), "source": source})
 		return
@@ -136,36 +135,12 @@ func uiLangHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "lang must be zh / en / empty (follow system)", http.StatusBadRequest)
 		return
 	}
-	path := currentConfigPath()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		http.Error(w, "failed to read config file: "+err.Error(), http.StatusInternalServerError)
+	if err := writeProgramSetting("ui-lang", b.Lang); err != nil {
+		http.Error(w, "failed to write program settings: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	var probe any
-	if err := json.Unmarshal(data, &probe); err != nil {
-		http.Error(w, "config file is not valid JSON; unchanged: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	// 文本级编辑只动 ui_lang 一个键：raw=nil 表示删除该键（跟随系统）。
-	var raw []byte
-	if b.Lang != "" {
-		raw = []byte(`"` + b.Lang + `"`)
-	}
-	out, ok := setTopLevelJSONValue(data, "ui_lang", raw)
-	if !ok {
-		http.Error(w, "config file is not a JSON object; unchanged", http.StatusInternalServerError)
-		return
-	}
-	if err := os.WriteFile(path, out, 0644); err != nil {
-		http.Error(w, "failed to write config file: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := reloadConfig(); err != nil { // reloadConfig 内部已 applyUILang
-		http.Error(w, "saved but reload failed: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	log.Printf("[lang] UI language switched to %s (written to %s)", currentUILang(), filepath.Base(path))
+	applyUILang(b.Lang) // 热生效；不 reloadConfig——语言与路由配置互不牵连
+	log.Printf("[lang] UI language switched to %s (%s)", currentUILang(), programSettingsFile)
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "lang": currentUILang()})
 }
 
@@ -1116,7 +1091,7 @@ const logViewerHTML = `<!DOCTYPE html>
   <div>在途流 <label style="margin-left:8px;color:#9a9a9a;font-weight:normal"><input type="checkbox" id="autoTrackChk" checked>自动跟踪最新</label> <label style="color:#9a9a9a;font-weight:normal">最多显示 <input type="number" id="maxFlightsInput" min="1" max="20" value="3" style="width:40px;background:#1e1e1e;color:#d4d4d4;border:1px solid #333;border-radius:3px;padding:2px 4px;font:inherit"> 个</label></div>
   <table id="flights"><thead><tr><th></th><th>#</th><th>model</th><th>API<span class="thq" title="协议来源：橙 [Anthropic] = Anthropic 口原生流量、紫 [translate] = Responses 口翻译成 Anthropic。名后 [值] = 实际发给上游的思考配置最短形态，其颜色 = 词汇口径（思考是针对上游的：上游收到的都是 Anthropic 格式）——橙 = Anthropic thinking（直连原样或翻译映射后）。值：关 = thinking 关或 effort none/off；开 N = enabled+budget_tokens N；adaptive = 自适应无档；low/high/max 等档位词 = adaptive 的 effort；无 [值] = 请求体未带思考字段">?</span></th><th>字节</th><th>状态</th></tr></thead><tbody></tbody></table>
   <div id="flightViewWrap" style="display:none;margin-top:8px">
-    <div>流 #<span id="flightViewId"></span> <span id="flightViewKind">输出</span> <button id="flightViewWhatBtn" class="ghost" style="display:none">看请求体</button> <button id="flightViewSideBtn" class="ghost" style="display:none">链路:代理↔上游</button><span id="flightViewSideNote" style="color:#d7ba7d"></span> <button id="flightViewRawBtn" class="ghost">显示原始</button> <button id="flightViewDlBtn" class="ghost" style="display:none">下载请求体</button> <button id="flightViewDlOutBtn" class="ghost" style="display:none">下载输出</button> <button id="flightViewTreeBtn" class="ghost" style="display:none">交互式JSON</button> <button id="flightViewClose" class="ghost">关闭</button></div>
+    <div>流 #<span id="flightViewId"></span> <span id="flightViewKind">输出</span> <button id="flightViewWhatBtn" class="ghost" style="display:none">看请求体</button> <button id="flightViewSideBtn" class="ghost" style="display:none">链路:代理<->上游</button><span id="flightViewSideNote" style="color:#d7ba7d"></span> <button id="flightViewRawBtn" class="ghost">显示原始</button> <button id="flightViewDlBtn" class="ghost" style="display:none">下载请求体</button> <button id="flightViewDlOutBtn" class="ghost" style="display:none">下载输出</button> <button id="flightViewTreeBtn" class="ghost" style="display:none">交互式JSON</button> <button id="flightViewClose" class="ghost">关闭</button></div>
     <div id="flightView" style="max-height:300px;overflow:auto;background:#1e1e1e;border:1px solid #333;padding:8px"></div>
   </div>
   <div style="margin-top:10px">最近完成的流</div>
@@ -1547,7 +1522,7 @@ function updateFlightViewChrome(){
     whatBtn.style.display = '';
     whatBtn.textContent = flightViewWhat==='req' ? '看输出' : '看请求体';
     sideBtn.style.display = '';
-    sideBtn.textContent = down ? '链路:下游↔代理' : '链路:代理↔上游';
+    sideBtn.textContent = down ? '链路:下游<->代理' : '链路:代理<->上游'; // ASCII 箭头：↔ 在按钮上会走 emoji 字体，挤且丑
     // 类型标签带链路侧后缀：请求体[代理→上游] / 输出[上游→代理] / 请求体[下游→代理] / 输出[代理→下游]
     var kind = flightViewWhat==='req' ? '请求体' : '输出';
     kind += down ? (flightViewWhat==='req' ? '[下游→代理]' : '[代理→下游]') : (flightViewWhat==='req' ? '[代理→上游]' : '[上游→代理]');
@@ -2541,7 +2516,7 @@ cardsEl.addEventListener('click', function(e){ if(e.target.closest('#clsCard')){
 // ---- 界面语言（i18n）----
 // 页面默认中文渲染；英文模式 = 服务端 renderLogViewerEN 已把静态文案与 JS 构建串翻成英文，
 // 本脚本只负责 alert/confirm/prompt 里的中文（服务端够不着的浏览器弹窗）。
-// 切换语言 POST /__uilang 写回当前配置文件 ui_lang（热生效），随后整页刷新。
+// 切换语言 POST /__uilang 写 program-settings.txt（程序设置，热生效），随后整页刷新。
 var I18N = {
   '确定删除「': 'Delete "', '」？此操作不可恢复。': '"? This cannot be undone.',
   '再次确认：真的要删除「': 'Confirm again: really delete "', '」吗？': '"?',
@@ -2951,8 +2926,8 @@ var enHTMLRepl = [][2]string{
 	{`flightViewWhat==='req' ? '看输出' : '看请求体'`, `flightViewWhat==='req' ? 'Output' : 'Request body'`},
 	{`flightViewWhat==='req' ? '请求体' : '输出'`, `flightViewWhat==='req' ? 'Request body' : 'Output'`},
 	{`down ? (flightViewWhat==='req' ? '[下游→代理]' : '[代理→下游]') : (flightViewWhat==='req' ? '[代理→上游]' : '[上游→代理]')`, `down ? (flightViewWhat==='req' ? '[client→proxy]' : '[proxy→client]') : (flightViewWhat==='req' ? '[proxy→upstream]' : '[upstream→proxy]')`},
-	{`链路:下游↔代理`, `Link: client↔proxy`},
-	{`链路:代理↔上游`, `Link: proxy↔upstream`},
+	{`链路:下游<->代理`, `Link: client<->proxy`},
+	{`链路:代理<->上游`, `Link: proxy<->upstream`},
 	{`（该侧无记录，显示另一侧）`, `(no data for that side, showing the other)`},
 	{`flightViewTree ? '退出交互' : '交互式JSON'`, `flightViewTree ? 'Exit tree' : 'Interactive JSON'`},
 	{`textContent = '输出';`, `textContent = 'Output';`},

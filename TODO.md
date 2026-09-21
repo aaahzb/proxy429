@@ -32,7 +32,18 @@
 - [x] 测试：双侧端点回退、side 参数、tap 覆盖全路径
 - [x] 文档：应用内文档中英两版、docs/使用说明.md、README.md
 
+## 提交 E — 界面语言移出配置文件、链路按钮去 emoji 箭头、配置文件零重排
+- [x] logview.go：链路按钮「链路:代理↔上游/下游↔代理」的 ↔（emoji 呈现，太挤）改 ASCII `<->`；enHTMLRepl 两对同步
+- [x] 界面语言改存 program-settings.txt（配置目录下，与 active-config.txt 同族的程序设置载体；key=value 行式，可扩展）——程序设置与上游路由配置分离
+- [x] Config 删 ui_lang 字段与校验；reloadConfig/switchConfig 不再触碰界面语言
+- [x] 一次性迁移：旧配置文件残留的 ui_lang → program-settings.txt 并从配置删除（setTopLevelJSONValue 文本级，不动排版）
+- [x] uiLangHandler POST 改写 program-settings.txt：不再写配置、不再 reloadConfig
+- [x] 根除重排：ui_lang 迁出后代码里再无对既有配置文件的程序化写入（配置编辑器保存本就是用户原文 verbatim）
+- [x] 测试：lang_test.go 三个用例改新行为；新增 program-settings 读写往返、迁移用例
+- [x] README 两处 ui_lang 描述更新
+- [x] go build/vet/test 全绿 + build.sh 重出 release
+
 ## 收尾
-- [ ] go build ./... 与 go test ./... 全绿（含旧测试签名更新）
-- [ ] README.md / docs 同步（用户全局规则）
+- [x] go build ./... 与 go test ./... 全绿（含旧测试签名更新）
+- [x] README.md / docs 同步（用户全局规则）
 - [ ] 删除 TODO.md（需用户确认）

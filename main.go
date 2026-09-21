@@ -53,8 +53,10 @@ type Config struct {
 	ConvertAllToStream         bool             `json:"convertAlltoStream"`            // 全局流式化：开启后所有非流式请求改为流式发上游，收集完整流后重建非流式 JSON 一次性返回（客户端无感知，网页可监控吐字/首字/tok/s）
 	TranslateNone2Low          bool             `json:"translateNone2Low"`             // Responses 翻译口：下游关思考的请求悄悄升级为 low 思考发上游、回传剥离思考块（下游无感知，usage 如实透传）；默认 false。动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」，开 low 避免 K3 被降级路由
 	ResponsesListen            string           `json:"responses_listen"`              // OpenAI Responses API 监听口（如 127.0.0.1:8081）；空不启用。把 Responses 协议请求翻译成 Anthropic 走主管线，供 Codex CLI 等工具接入。保存/重载即动态启停
-	UILang                     string           `json:"ui_lang,omitempty"`             // 网页控制台语言："zh"/"en"；空 = 跟随操作系统语言（探测不到用英文）。网页顶栏切换语言时写回本字段并热生效
 }
+
+// 网页控制台界面语言是程序级偏好，不属于路由配置：存配置目录下的 program-settings.txt
+// （与 active-config.txt 同族，见下文），配置文件里不再承载 ui_lang（旧字段启动时一次性迁移）。
 
 // RouteRule 定义一条模型路由：命中的请求改走指定上游，并替换 model 名与 API key。
 // Pattern 用 * 通配模型名；命中后 URL 覆盖默认 upstream，API 覆盖客户端 token，Model 替换请求体 model 字段。
@@ -183,11 +185,6 @@ func loadConfig(path string) (*Config, error) {
 	if c.RecentSampleWindow <= 0 {
 		c.RecentSampleWindow = 20 // 默认统计最近 20 次请求的首字延迟与 token/s
 	}
-	switch c.UILang {
-	case "", "zh", "en":
-	default:
-		return nil, fmt.Errorf("ui_lang must be \"zh\" or \"en\" (empty = follow system), got %q", c.UILang)
-	}
 	if c.Upstream == "" && !hasCatchAllRoute(c.Routes) {
 		log.Printf("[config] warning: upstream is empty and routes has no pattern:\"*\" catch-all; unmatched requests will get 502")
 	}
@@ -257,6 +254,94 @@ func writeActiveConfigState(path string) {
 	if err := os.WriteFile(statePath, []byte(filepath.Base(path)), 0644); err != nil {
 		log.Printf("[config] failed to write state file: %v", err)
 	}
+}
+
+// programSettingsFile 是程序级设置的专用载体：界面语言这类「跟哪个上游无关」的偏好
+// 与路由配置分离，不进 config*.json（旧版把 ui_lang 写进配置文件，已迁出）。文件放在
+// 当前配置目录、与 active-config.txt 同族；行式 key=value，# 开头为注释行，可扩展。
+const programSettingsFile = "program-settings.txt"
+
+// programSettingsPath 返回程序设置文件的完整路径（跟随当前配置所在目录）。
+func programSettingsPath() string {
+	return filepath.Join(filepath.Dir(currentConfigPath()), programSettingsFile)
+}
+
+// readProgramSetting 读取程序设置里 key 的值（去首尾空白）；文件或键不存在返回 ""。
+func readProgramSetting(key string) string {
+	data, err := os.ReadFile(programSettingsPath())
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if k, v, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == key {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// writeProgramSetting 设置（value 非空）或删除（value 为空）一个程序设置键。
+// 其余行（含注释、顺序、排版）原样保留；键不存在且 value 非空时追加到文件末尾。
+// 统一 LF 换行、末尾带换行；写盘失败返回错误，由调用方决定如何提示。
+func writeProgramSetting(key, value string) error {
+	data, _ := os.ReadFile(programSettingsPath())
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines)+2)
+	replaced := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			if k, _, ok := strings.Cut(trimmed, "="); ok && strings.TrimSpace(k) == key {
+				replaced = true
+				if value != "" {
+					out = append(out, key+"="+value)
+				}
+				continue // value 为空：整行删除
+			}
+		}
+		out = append(out, line)
+	}
+	if !replaced && value != "" {
+		for len(out) > 0 && out[len(out)-1] == "" { // 去掉末尾空行再追加，键不拖着空行
+			out = out[:len(out)-1]
+		}
+		out = append(out, key+"="+value, "")
+	}
+	return os.WriteFile(programSettingsPath(), []byte(strings.Join(out, "\n")), 0644)
+}
+
+// resolveProgramUILang 启动时确定网页控制台界面语言：program-settings.txt 的 ui-lang
+// 优先；否则做一次性迁移——旧配置文件里残留的 ui_lang 移到 program-settings.txt 并从
+// 配置里删掉（setTopLevelJSONValue 文本级手术，其余排版逐字节不动）；都没有则跟随系统。
+// 迁完之后代码里再无任何对既有配置文件的程序化写入（配置编辑器保存走的是用户原文）。
+func resolveProgramUILang() {
+	if l := readProgramSetting("ui-lang"); l == "zh" || l == "en" {
+		applyUILang(l)
+		return
+	}
+	if data, err := os.ReadFile(currentConfigPath()); err == nil {
+		var probe struct {
+			UILang string `json:"ui_lang"` // 旧版字段：只用于迁移，Config 结构体已不再承载
+		}
+		if json.Unmarshal(data, &probe) == nil && (probe.UILang == "zh" || probe.UILang == "en") {
+			if err := writeProgramSetting("ui-lang", probe.UILang); err != nil {
+				log.Printf("[lang] failed to write %s: %v", programSettingsFile, err)
+			}
+			if out, ok := setTopLevelJSONValue(data, "ui_lang", nil); ok {
+				if err := os.WriteFile(currentConfigPath(), out, 0644); err != nil {
+					log.Printf("[lang] failed to remove migrated ui_lang from %s: %v", filepath.Base(currentConfigPath()), err)
+				}
+			}
+			log.Printf("[lang] migrated ui_lang=%q from %s to %s", probe.UILang, filepath.Base(currentConfigPath()), programSettingsFile)
+			applyUILang(probe.UILang)
+			return
+		}
+	}
+	applyUILang("")
 }
 
 // resolveConfigPath 决定配置文件路径，优先级：
@@ -342,8 +427,7 @@ func reloadConfig() error {
 		return err
 	}
 	cfg.Store(c)
-	applyUILang(c.UILang)                       // 网页控制台语言随配置热生效
-	reconcileResponsesServer(c.ResponsesListen) // Responses 口随配置动态启停
+	reconcileResponsesServer(c.ResponsesListen) // Responses 口随配置重载动态启停
 	log.Printf("[reload] config reloaded: http://%s -> %s (max retries %d, classifier thinking-off=%v)",
 		c.Listen, c.Upstream, c.MaxRetries, c.ClassifierThinkingDisabled)
 	return nil
@@ -362,7 +446,6 @@ func switchConfig(newPath string) error {
 	configMu.Unlock()
 	writeActiveConfigState(newPath)
 	cfg.Store(c)
-	applyUILang(c.UILang)                       // 网页控制台语言随配置切换热生效
 	reconcileResponsesServer(c.ResponsesListen) // Responses 口随配置动态启停
 	// 通知托盘重建「切换配置」子菜单刷新勾选（网页端发起的切换不走托盘点击路径）
 	notifyTrayCfgChanged()
@@ -4702,7 +4785,7 @@ func main() {
 	}
 	cfg.Store(c)
 	stats.resetSampleCap(c.RecentSampleWindow) // 初始化"最近X次"延迟/吞吐滑动窗口容量
-	applyUILang(c.UILang)                      // 首次启动：配置有 ui_lang 用之，否则跟随系统语言
+	resolveProgramUILang()                     // 首次启动：program-settings.txt 优先，迁移旧配置 ui_lang，缺省跟随系统
 	// flight 注册表与日志缓冲区始终初始化（handler 总会 register flight，map 不能为 nil）。
 	flights.m = make(map[uint64]*flight)
 	logBuf.lines = make([]string, 0, maxLogBuf)
