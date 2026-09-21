@@ -196,7 +196,7 @@ func TestNamespaceToolRoundTrip(t *testing.T) {
 			},
 		},
 	}
-	resp := anthropicToResponsesObject(msg, "m", reg, nil)
+	resp := anthropicToResponsesObject(msg, "m", reg, nil, false)
 	item := resp["output"].([]interface{})[0].(map[string]interface{})
 	if item["type"] != "function_call" || item["name"] != "read" || item["namespace"] != "mcp_files" {
 		t.Fatalf("输出项=%v", item)
@@ -306,7 +306,7 @@ func TestToolSearchRoundTrip(t *testing.T) {
 			},
 		},
 	}
-	resp := anthropicToResponsesObject(msg, "m", reg, nil)
+	resp := anthropicToResponsesObject(msg, "m", reg, nil, false)
 	item := resp["output"].([]interface{})[0].(map[string]interface{})
 	if item["type"] != "tool_search_call" || item["execution"] != "client" {
 		t.Fatalf("输出项=%v", item)

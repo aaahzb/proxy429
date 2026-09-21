@@ -71,6 +71,7 @@ const (
 	bkToolUse
 	bkSearchUse   // server_tool_use：query 可能走 input_json_delta（实测 Kimi 常只给 id/name），stop 补全后才发项
 	bkInstantDone // web_search_tool_result 及未知块：start 时块已完整，add+done 已发
+	bkDropped     // translateNone2Low 升级流的思考块：整块剥离，不发任何事件、不占 output index
 )
 
 type blockState struct {
@@ -103,6 +104,7 @@ type anthToRespStream struct {
 	stopReason      string
 	triple          *searchTriple          // 搜索信封归属三元组（路由定案后由 translatingWriter 注入；nil = 不出信封）
 	lastSearchUse   map[string]interface{} // 最近一个 server_tool_use 块（结果块到达时配对封信封）
+	noneUpgraded    bool                   // translateNone2Low 升级的流：剥离思考块，不下发 reasoning 项
 }
 
 func newAnthToRespStream(emit func(string), model string, reg *toolRegistry) *anthToRespStream {
@@ -233,6 +235,15 @@ func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}
 		// （kimiSearchPreamble、stripSearchQueryEcho）要整块判定（回声行整行删/
 		// 重复裸前言剥光/纯前言丢弃），得等文本岔开前缀（或块收尾）再定。
 	case "thinking", "redacted_thinking":
+		if s.noneUpgraded {
+			// translateNone2Low：这块思考是升级 low 产生的，下游要看来仍是关思考——
+			// 整块剥离：不发事件、回退 output index（保持后续块 index 连续）。
+			s.nextOutputIndex--
+			bs.outputIndex = -1
+			bs.kind = bkDropped
+			s.blocks[index] = bs
+			return
+		}
 		if objStr(cb, "type") == "thinking" {
 			bs.kind = bkThinking
 			bs.accum = objStr(cb, "thinking")
@@ -315,6 +326,9 @@ func (s *anthToRespStream) handleBlockDelta(index int, delta map[string]interfac
 	if bs == nil || delta == nil {
 		return
 	}
+	if bs.kind == bkDropped {
+		return // translateNone2Low 剥离的思考块：累积/事件全忽略
+	}
 	switch objStr(delta, "type") {
 	case "text_delta":
 		t := objStr(delta, "text")
@@ -369,6 +383,9 @@ func (s *anthToRespStream) handleBlockStop(index int) {
 		return
 	}
 	delete(s.blocks, index)
+	if bs.kind == bkDropped {
+		return // translateNone2Low 剥离的思考块：不进 output、不发事件
+	}
 	switch bs.kind {
 	case bkText:
 		if bs.heldText {
@@ -536,6 +553,10 @@ type translatingWriter struct {
 	header http.Header
 	status int
 
+	// noneUpgraded：translateNone2Low 把本请求的关思考升级成了 low——回传时剥离思考块，
+	// 下游看来仍是关思考（reasoning 项不发、output 不含 reasoning）。
+	noneUpgraded bool
+
 	mode    int // 0=未定 1=SSE 2=缓冲
 	buf     []byte
 	conv    *anthToRespStream
@@ -550,13 +571,14 @@ const (
 	modeBuffered
 )
 
-func newTranslatingWriter(dst http.ResponseWriter, clientStream bool, model string, reg *toolRegistry) *translatingWriter {
+func newTranslatingWriter(dst http.ResponseWriter, clientStream bool, model string, reg *toolRegistry, noneUpgraded bool) *translatingWriter {
 	tw := &translatingWriter{
 		dst:          dst,
 		clientStream: clientStream,
 		model:        model,
 		reg:          reg,
 		header:       http.Header{},
+		noneUpgraded: noneUpgraded,
 	}
 	tw.flusher, _ = dst.(http.Flusher)
 	emit := func(ev string) {
@@ -573,6 +595,7 @@ func newTranslatingWriter(dst http.ResponseWriter, clientStream bool, model stri
 		}
 	}
 	tw.conv = newAnthToRespStream(emit, model, reg)
+	tw.conv.noneUpgraded = noneUpgraded
 	return tw
 }
 
@@ -717,7 +740,7 @@ func (tw *translatingWriter) finishBuffered() {
 		writeResponsesError(tw.dst, http.StatusBadGateway, "api_error", "invalid upstream JSON: "+err.Error())
 		return
 	}
-	respObj := anthropicToResponsesObject(msg, tw.model, tw.reg, tw.triple)
+	respObj := anthropicToResponsesObject(msg, tw.model, tw.reg, tw.triple, tw.noneUpgraded)
 	if !tw.clientStream {
 		b, _ := json.Marshal(respObj)
 		tw.writeDstHeader(http.StatusOK, "application/json")
