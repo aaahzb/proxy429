@@ -341,7 +341,7 @@ func reloadConfig() error {
 		return err
 	}
 	cfg.Store(c)
-	applyUILang(c.UILang) // 网页控制台语言随配置热生效
+	applyUILang(c.UILang)                       // 网页控制台语言随配置热生效
 	reconcileResponsesServer(c.ResponsesListen) // Responses 口随配置动态启停
 	log.Printf("[reload] config reloaded: http://%s -> %s (max retries %d, classifier thinking-off=%v)",
 		c.Listen, c.Upstream, c.MaxRetries, c.ClassifierThinkingDisabled)
@@ -361,7 +361,7 @@ func switchConfig(newPath string) error {
 	configMu.Unlock()
 	writeActiveConfigState(newPath)
 	cfg.Store(c)
-	applyUILang(c.UILang) // 网页控制台语言随配置切换热生效
+	applyUILang(c.UILang)                       // 网页控制台语言随配置切换热生效
 	reconcileResponsesServer(c.ResponsesListen) // Responses 口随配置动态启停
 	// 通知托盘重建「切换配置」子菜单刷新勾选（网页端发起的切换不走托盘点击路径）
 	notifyTrayCfgChanged()
@@ -2245,6 +2245,115 @@ func deleteFieldSpan(body []byte, spans []fieldSpan, idx int) []byte {
 	out = append(out, body[:start]...)
 	out = append(out, body[end:]...)
 	return out
+}
+
+// setTopLevelJSONValue 在 JSON 文本顶层精准设置一个键的值（rawValue 为完整 JSON
+// 值文本，如 `"en"`、`{"type":"disabled"}`），rawValue=nil 时删除该键。
+// 基于 locateTopFields 定位顶层字段（不误伤嵌套同名键），全程文本级编辑：其余字段
+// 的内容、顺序、缩进与换行风格原样保留；返回新切片，不改动入参。
+// 顶层不是合法 JSON object 时 ok=false，调用方应放弃写入。
+func setTopLevelJSONValue(body []byte, key string, rawValue []byte) ([]byte, bool) {
+	spans, ok := locateTopFields(body)
+	if !ok {
+		return nil, false
+	}
+	idx := -1
+	for i := range spans {
+		if spans[i].name == key {
+			idx = i
+			break
+		}
+	}
+	if idx >= 0 {
+		s := spans[idx]
+		if rawValue != nil {
+			// 改值：只替换 [valStart,valEnd) 区间，键名与其余字节原样保留
+			out := make([]byte, 0, len(body)-(s.valEnd-s.valStart)+len(rawValue))
+			out = append(out, body[:s.valStart]...)
+			out = append(out, rawValue...)
+			out = append(out, body[s.valEnd:]...)
+			return out, true
+		}
+		// 删键：连同分隔逗号一起清理，不留空行或悬挂逗号
+		start, end := s.keyStart, s.valEnd
+		if idx == 0 {
+			// 首字段：先退掉本键自身的行缩进，再吃值后紧跟的逗号与其后一个换行
+			for start > 0 && (body[start-1] == ' ' || body[start-1] == '\t') {
+				start--
+			}
+			for end < len(body) && (body[end] == ' ' || body[end] == '\t') {
+				end++
+			}
+			if end < len(body) && body[end] == ',' {
+				end++
+			}
+			for end < len(body) && (body[end] == ' ' || body[end] == '\t') {
+				end++
+			}
+			if end < len(body) && body[end] == '\r' {
+				end++
+			}
+			if end < len(body) && body[end] == '\n' {
+				end++
+			}
+		} else {
+			// 非首字段：吃键前的空白/换行与前一个逗号（该键整行随之消失）
+			for start > 0 && (body[start-1] == ' ' || body[start-1] == '\t' || body[start-1] == '\r' || body[start-1] == '\n') {
+				start--
+			}
+			if start > 0 && body[start-1] == ',' {
+				start--
+			}
+		}
+		out := make([]byte, 0, len(body)-(end-start))
+		out = append(out, body[:start]...)
+		out = append(out, body[end:]...)
+		return out, true
+	}
+	if rawValue == nil {
+		return body, true // 要删的键本就不存在，无需改动
+	}
+	// 追加新键：插到顶层收尾 '}' 之前，沿用首个顶层键的行缩进与文件换行风格
+	closePos := len(bytes.TrimRight(body, " \t\r\n")) - 1
+	if closePos < 0 || body[closePos] != '}' {
+		return nil, false
+	}
+	indent := "  "
+	if len(spans) > 0 {
+		lineStart := bytes.LastIndexByte(body[:spans[0].keyStart], '\n') + 1
+		ind := body[lineStart:spans[0].keyStart]
+		allWS := len(ind) > 0
+		for _, c := range ind {
+			if c != ' ' && c != '\t' {
+				allWS = false
+				break
+			}
+		}
+		if allWS {
+			indent = string(ind)
+		}
+	}
+	nl := "\n"
+	if bytes.Contains(body, []byte("\r\n")) {
+		nl = "\r\n"
+	}
+	out := make([]byte, 0, len(body)+len(key)+len(rawValue)+16)
+	// 逗号必须跟在最后一个非空白字节（上一字段的行尾）之后，新键另起一行；
+	// 原收尾 '}' 前的空白由下方统一的 nl 替代
+	trimEnd := len(bytes.TrimRight(body[:closePos], " \t\r\n"))
+	out = append(out, body[:trimEnd]...)
+	if len(spans) > 0 {
+		out = append(out, ',')
+	}
+	out = append(out, nl...)
+	out = append(out, indent...)
+	out = append(out, '"')
+	out = append(out, key...)
+	out = append(out, []byte(`": `)...)
+	out = append(out, rawValue...)
+	out = append(out, nl...)
+	out = append(out, body[closePos:]...) // 收尾 '}' 与原有尾部空白
+	return out, true
 }
 
 // isClassifierRequest 判断 body 是否为分类器请求（system 字段前缀匹配）。
@@ -4396,7 +4505,7 @@ func main() {
 	}
 	cfg.Store(c)
 	stats.resetSampleCap(c.RecentSampleWindow) // 初始化"最近X次"延迟/吞吐滑动窗口容量
-	applyUILang(c.UILang) // 首次启动：配置有 ui_lang 用之，否则跟随系统语言
+	applyUILang(c.UILang)                      // 首次启动：配置有 ui_lang 用之，否则跟随系统语言
 	// flight 注册表与日志缓冲区始终初始化（handler 总会 register flight，map 不能为 nil）。
 	flights.m = make(map[uint64]*flight)
 	logBuf.lines = make([]string, 0, maxLogBuf)

@@ -23,21 +23,21 @@ import (
 const (
 	logViewerPath     = "/__logs"
 	logDataPath       = "/__logs/data"
-	configPath        = "/__config"        // GET 取配置内容、POST 保存并重载
-	reloadPath        = "/__reload"        // POST 仅重载（不改动文件）
-	configsPath       = "/__configs"       // GET 列出当前配置目录下所有 .json（供切换）
-	switchPath        = "/__switch"        // POST 切换到指定配置文件并即时生效
-	newConfigPath     = "/__newconfig"     // POST 新建配置文件（空白模板）并切换
+	configPath        = "/__config"         // GET 取配置内容、POST 保存并重载
+	reloadPath        = "/__reload"         // POST 仅重载（不改动文件）
+	configsPath       = "/__configs"        // GET 列出当前配置目录下所有 .json（供切换）
+	switchPath        = "/__switch"         // POST 切换到指定配置文件并即时生效
+	newConfigPath     = "/__newconfig"      // POST 新建配置文件（空白模板）并切换
 	codexSetupPS1Path = "/__codexsetup.ps1" // GET 烤制后的 codex-setup.ps1（Windows，irm|iex 拉取）
 	codexSetupSHPath  = "/__codexsetup.sh"  // GET 烤制后的 codex-setup.sh（macOS/Linux，curl|bash 拉取）
-	renameConfigPath  = "/__renameconfig"  // POST 重命名配置文件
-	delConfigPath     = "/__delconfig"     // POST 删除配置文件（不允许删当前在用的）
-	resetStatsPath    = "/__resetstats"    // POST 清空累计统计（切换配置不再自动清）
-	clearLogsPath     = "/__clearlogs"     // POST 清空内存日志缓冲
-	flightPath        = "/__flight"        // GET 在途流透传内容（?id=N，已完成流也查此）
+	renameConfigPath  = "/__renameconfig"   // POST 重命名配置文件
+	delConfigPath     = "/__delconfig"      // POST 删除配置文件（不允许删当前在用的）
+	resetStatsPath    = "/__resetstats"     // POST 清空累计统计（切换配置不再自动清）
+	clearLogsPath     = "/__clearlogs"      // POST 清空内存日志缓冲
+	flightPath        = "/__flight"         // GET 在途流透传内容（?id=N，已完成流也查此）
 	flightReqPath     = "/__flightreq"      // GET 流的下游请求体原文（?id=N，在途/已完成都查）
-	recentFlightsPath = "/__recentflights" // GET 最近完成的流列表（摘要）
-	finishedCapPath   = "/__finishedcap"   // POST 设置保留完成流个数 N
+	recentFlightsPath = "/__recentflights"  // GET 最近完成的流列表（摘要）
+	finishedCapPath   = "/__finishedcap"    // POST 设置保留完成流个数 N
 	fullStorePath     = "/__fullstore"      // POST 开关「储存完整结构体」（记录完整请求体/输出供下载）
 	uiLangPath        = "/__uilang"         // GET 当前界面语言 / POST 切换语言（写回当前配置文件 ui_lang 并热生效）
 )
@@ -93,6 +93,8 @@ func logViewerHandler(w http.ResponseWriter, r *http.Request) {
 	page := logViewerHTML
 	if currentUILang() == "en" {
 		page = renderLogViewerEN(page)
+	} else {
+		page = strings.Replace(page, "__DOC_BODY__", logViewerDocZH, 1)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -103,7 +105,8 @@ func logViewerHandler(w http.ResponseWriter, r *http.Request) {
 // GET 返回 {"lang": 当前生效语言, "source": "config"|"system"}；
 // POST {"lang":"zh"|"en"|""} 把选择写回当前配置文件的 ui_lang 字段（"" = 跟随系统，
 // 从配置里删掉该字段），随即热生效——下次刷新页面即是新语言。
-// 写配置走「读原文件 → 只改 ui_lang 一个键 → 写回」，其余字段与顺序原样保留。
+// 写配置走文本级编辑（setTopLevelJSONValue 只动 ui_lang 一个键），其余字段的
+// 内容、顺序与手写排版（缩进/换行风格）原样保留。
 func uiLangHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -139,22 +142,22 @@ func uiLangHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to read config file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	var m map[string]any
-	if err := json.Unmarshal(data, &m); err != nil {
+	var probe any
+	if err := json.Unmarshal(data, &probe); err != nil {
 		http.Error(w, "config file is not valid JSON; unchanged: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if b.Lang == "" {
-		delete(m, "ui_lang")
-	} else {
-		m["ui_lang"] = b.Lang
+	// 文本级编辑只动 ui_lang 一个键：raw=nil 表示删除该键（跟随系统）。
+	var raw []byte
+	if b.Lang != "" {
+		raw = []byte(`"` + b.Lang + `"`)
 	}
-	out, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		http.Error(w, "failed to serialize: "+err.Error(), http.StatusInternalServerError)
+	out, ok := setTopLevelJSONValue(data, "ui_lang", raw)
+	if !ok {
+		http.Error(w, "config file is not a JSON object; unchanged", http.StatusInternalServerError)
 		return
 	}
-	if err := os.WriteFile(path, append(out, '\n'), 0644); err != nil {
+	if err := os.WriteFile(path, out, 0644); err != nil {
 		http.Error(w, "failed to write config file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -168,16 +171,16 @@ func uiLangHandler(w http.ResponseWriter, r *http.Request) {
 
 // flightInfo 是单个在途流的展示信息（网页「状态」标签的表格用）。
 type flightInfo struct {
-	ID          uint64 `json:"id"`
-	Model       string `json:"model"`
-	Phase       int    `json:"phase"`       // 0=等待响应, 1=已收到响应（开始转发）
-	Bytes       int64  `json:"bytes"`       // 已转发字节
-	Status      int    `json:"status"`      // HTTP 状态码（stage=stageForward 时显示）
-	Stage       int32  `json:"stage"`       // 当前阶段：0=请求 1=路由 2=尝试N 3=转发(显示状态码)
-	Attempt     int32  `json:"attempt"`     // 当前尝试序号（1 起），stage=2 时显示「尝试N」
+	ID           uint64 `json:"id"`
+	Model        string `json:"model"`
+	Phase        int    `json:"phase"`                 // 0=等待响应, 1=已收到响应（开始转发）
+	Bytes        int64  `json:"bytes"`                 // 已转发字节
+	Status       int    `json:"status"`                // HTTP 状态码（stage=stageForward 时显示）
+	Stage        int32  `json:"stage"`                 // 当前阶段：0=请求 1=路由 2=尝试N 3=转发(显示状态码)
+	Attempt      int32  `json:"attempt"`               // 当前尝试序号（1 起），stage=2 时显示「尝试N」
 	AttemptMs    int64  `json:"attemptMs"`             // 当前尝试已等首字节的毫秒数（黄灯旁 [尝试N:Xs]）；-1=重试退避中（显示 [退避中]）
-	RouteReason  int32  `json:"routeReason"` // 路由原因：0=透传 1=pattern 2=分类器 3=fast 4=多模态 5=搜索
-	Translated   string `json:"translated"`  // 翻译口来源（"responses"=翻译 / "responses-raw"=原生透传[已实现未实测，文档未提及]），API 列显示 [translate]/[Response]
+	RouteReason  int32  `json:"routeReason"`           // 路由原因：0=透传 1=pattern 2=分类器 3=fast 4=多模态 5=搜索
+	Translated   string `json:"translated"`            // 翻译口来源（"responses"=翻译 / "responses-raw"=原生透传[已实现未实测，文档未提及]），API 列显示 [translate]/[Response]
 	CountTokens  bool   `json:"countTokens,omitempty"` // count_tokens 探针流，model 列显示 [count_tokens] 前缀
 	SearchPrompt string `json:"searchPrompt,omitempty"`
 	ReqTrunc     bool   `json:"reqTrunc,omitempty"` // 请求体被截断只剩前 256KB（下载按钮置灰）
@@ -190,25 +193,25 @@ type flightInfo struct {
 
 // logData 是 /__logs/data 返回的 JSON：最近日志 + 全量状态计数 + 在途流列表。
 type logData struct {
-	Lines        []string          `json:"lines"`
-	Active       int               `json:"active"`
-	Waiting      int               `json:"waiting"`
-	Version      string            `json:"version"`
-	CacheRead    int64             `json:"cacheRead"`
-	CacheCreation int64            `json:"cacheCreation"`
-	InputTokens  int64             `json:"inputTokens"`
-	OutputTokens int64             `json:"outputTokens"`
-	ModelStats   []modelUsageEntry `json:"modelStats"`
+	Lines         []string          `json:"lines"`
+	Active        int               `json:"active"`
+	Waiting       int               `json:"waiting"`
+	Version       string            `json:"version"`
+	CacheRead     int64             `json:"cacheRead"`
+	CacheCreation int64             `json:"cacheCreation"`
+	InputTokens   int64             `json:"inputTokens"`
+	OutputTokens  int64             `json:"outputTokens"`
+	ModelStats    []modelUsageEntry `json:"modelStats"`
 	CacheObs      []cacheObsRow     `json:"cacheObs"` // 实测缓存时间（按上游 URL+模型），缓存命中弹窗第二表
-	BytesForward int64             `json:"bytesForward"`
-	Rate         int64             `json:"rate"` // bytes/s
-	Retries      int64             `json:"retries"`
-	Classifiers  int64             `json:"classifiers"`
-	AvgFirstByte float64           `json:"avgFirstByte"` // ms
-	Tps          float64           `json:"tps"`          // tok/s
-	Flights      []flightInfo      `json:"flights"`
-	CurrentCfg   string            `json:"currentCfg"`  // 当前生效的配置文件名
-	FinishedCap  int32             `json:"finishedCap"` // 保留完成流个数 N（状态页可改）
+	BytesForward  int64             `json:"bytesForward"`
+	Rate          int64             `json:"rate"` // bytes/s
+	Retries       int64             `json:"retries"`
+	Classifiers   int64             `json:"classifiers"`
+	AvgFirstByte  float64           `json:"avgFirstByte"` // ms
+	Tps           float64           `json:"tps"`          // tok/s
+	Flights       []flightInfo      `json:"flights"`
+	CurrentCfg    string            `json:"currentCfg"`  // 当前生效的配置文件名
+	FinishedCap   int32             `json:"finishedCap"` // 保留完成流个数 N（状态页可改）
 	FullStore     bool              `json:"fullStore"`   // 「储存完整结构体」开关（状态页可切，默认关）
 
 	// ClassifierNoThink 是关思考改写次数：只在实际改 body 关 thinking 时 +1。
@@ -419,7 +422,7 @@ func readConfigTemplate() []byte {
 }
 
 // 烤制锚点：与模板文件里的写法逐字符一致（codex_setup_test.go 锁定它们在模板中各出现一次）。
-// 值只经白名单校验后替换进单引号空串 '' 的位置，不可能引号逃逸。
+// 值只经白名单校验后替换进单引号空串 ” 的位置，不可能引号逃逸。
 var codexPS1Anchors = [5]string{"$BAKED_BASE_URL = ''", "$BAKED_MODEL    = ''", "$BAKED_CATALOG  = ''", "$BAKED_CONTEXT_WINDOW  = ''", "$BAKED_COMPACT_PERCENT = ''"}
 var codexSHAnchors = [5]string{"BAKED_BASE_URL=''", "BAKED_MODEL=''", "BAKED_CATALOG=''", "BAKED_CONTEXT_WINDOW=''", "BAKED_COMPACT_PERCENT=''"}
 
@@ -857,27 +860,27 @@ func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		out = append(out, map[string]any{
-			"id":          ff.id,
-			"model":       ff.model,
-			"routeReason": ff.routeReason,
-			"translated":  ff.translated,
-			"countTokens": ff.countTokens,
-			"think":       ff.think,
-			"status":      ff.status,
+			"id":            ff.id,
+			"model":         ff.model,
+			"routeReason":   ff.routeReason,
+			"translated":    ff.translated,
+			"countTokens":   ff.countTokens,
+			"think":         ff.think,
+			"status":        ff.status,
 			"gaveUp":        ff.gaveUp,
 			"attempts":      ff.attempts,
-			"bytes":       ff.bytes,
+			"bytes":         ff.bytes,
 			"total":         fmtMs(ff.totalMs),
-			"stage":       ff.stage,
-			"ended":       ff.ended.Format("15:04:05"),
-			"hitRate":     cacheHitRate(ff.cacheRead, ff.inTokens, ff.cacheCreation),
+			"stage":         ff.stage,
+			"ended":         ff.ended.Format("15:04:05"),
+			"hitRate":       cacheHitRate(ff.cacheRead, ff.inTokens, ff.cacheCreation),
 			"cacheAge":      cacheAge,
-			"cacheRead":   ff.cacheRead,
+			"cacheRead":     ff.cacheRead,
 			"cacheCreation": ff.cacheCreation,
-			"inTokens":    ff.inTokens,
-			"firstByte":   fmtFirstByte(ff.firstByteMs),
-			"tps":         fmtTps(ff.tps),
-			"searchPrompt": ff.searchPrompt,
+			"inTokens":      ff.inTokens,
+			"firstByte":     fmtFirstByte(ff.firstByteMs),
+			"tps":           fmtTps(ff.tps),
+			"searchPrompt":  ff.searchPrompt,
 			"tools":         ff.tools,
 			"stripped":      ff.searchStripped,
 			"reqTrunc":      ff.reqTruncated,
@@ -2480,9 +2483,120 @@ window.prompt = function(s, d){ return __prompt(t(String(s)), d); };
 </body>
 </html>`
 
+// logViewerDocZH 是使用文档弹窗的中文整版（母版默认语言）：中文页渲染时把
+// __DOC_BODY__ 占位整段替换为它。内容即 097003d 版本 logViewerHTML 内联的正文。
+// 新增文档段落时中文写这里、英文写 logViewerDocEN，两边都要补。
+const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
+      <p>顶层配置 <code>convertAlltoStream</code>（默认 false）开启后，所有非流式请求（<code>stream:false</code> 或省略）都被代理悄悄改为流式发给上游：在途流页面实时可见吐字、统计首字与 tok/s。请求方无感知——代理把上游流完整收完后，<b>原样重建</b>非流式 JSON（所有内容块按流里原样拼回，含搜索结果 encrypted_content）一次性返回，调用方拿到的仍是它预期的非流式响应。流中途断开（未见 message_stop）时未向客户端写任何内容，代理整体重试。</p>
+      <p>仅作用于 Anthropic Messages 请求（/v1/messages）；已是流式的请求、搜索摘要模式不受影响。重试等待期间不发 SSE 保活 ping（会污染非流式响应），静默等待。</p>
+      <h3>Responses API 监听口 responses_listen</h3>
+      <p>顶层配置 <code>responses_listen</code>（空 = 不启用；配置模板默认演示 <code>127.0.0.1:8081</code>）设为如 <code>127.0.0.1:8081</code> 后，代理在该地址额外开一个 OpenAI Responses API 端点（<code>/v1/responses</code>）：把 Codex CLI 等只说 Responses 协议的工具接到 Anthropic 上游。请求被翻译成 Anthropic Messages 走主管线（路由/重试/本控制台监控照常生效），响应翻译回 Responses（客户端 stream:true 拿 SSE 事件流，false 拿一次性 JSON）。</p>
+      <p>工具里的 model 名照常参与路由匹配：在 routes 加一条如 <code>gpt-5*</code> 即可指定上游与改写模型。改动保存重载即生效（监听口随配置动态启停）；与主端口一样永远仅本机可连。</p>
+      <p>翻译规则与 cc-switch 3.20.0 一致：<code>reasoning.effort</code> 按模型分类映射——adaptive 模型（fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6）翻成 <code>thinking:adaptive</code> + <code>output_config.effort</code>（fable-5/mythos-5 关不掉 thinking，显式 none 翻成 effort:low）；其余模型翻成 budget_tokens（low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576）。查表用客户端发来的 model 名（路由改写之前），想让表生效就把客户端 model 直接填目标模型名；反过来别名命中上表但路由目标模型能力不一致时（如别名叫 claude-fable-5 实际路由到只支持 budget 的 Kimi），在该路由条目配 <code>thinking:"budget"/"adaptive"</code> 覆盖（见下方参数速查）。工具映射（function/custom/namespace/tool_search/web_search/input_file）与完整映射表见使用说明.md「Responses 翻译映射表」。</p>
+      <p><b>思考/搜索信封</b>：签名 thinking 块与每次搜索的完整结果块（含 encrypted_content 正文）被自封装进 reasoning 项的 encrypted_content 随响应发给客户端，下轮客户端回放历史时还原上行——思考链不丢，追问直接读上次搜索到的正文、不再原关键字重搜。搜索信封带 url+key 哈希归属且整体经 key 派生掩码混淆（客户端历史里不躺明文 url/key 信息）：换了上游或 key 就解不开不还原（省 token），换模型不拦（实测照常解密）；旧对话的搜索块在上游过期（报 tool_call_id）时代理自动剥掉回放块重试一次，无感降级为需要时重新搜。</p>
+      <p><b>Codex CLI 接入</b>：最省事——本控制台「配置」标签下方给出 Windows / macOS·Linux 两行一键命令（DeepSeek 文档同款格式，按编辑框实时生成：地址取 <code>responses_listen</code>；routes 每个 pattern 的代表名全部写进 Codex <code>/model</code> 菜单，下拉选中项为默认模型），复制到对应终端回车即运行，脚本由本代理实时烤制下发。仓库根目录另有交互版 <code>codex-setup.ps1</code>（Windows）与 <code>codex-setup.sh</code>（macOS/Linux）：选模型、备份后改写 config.toml、写模型目录、可一键还原。手动：编辑 <code>~/.codex/config.toml</code>——顶层 <code>model_provider = "proxy429"</code>、<code>model = "gpt-5-codex"</code>、<code>preferred_auth_method = "apikey"</code> + <code>forced_login_method = "api"</code>（免官方登录），加 <code>[model_providers.proxy429]</code> 段（<code>base_url = "http://127.0.0.1:8081/v1"</code>、<code>wire_api = "responses"</code>、<code>experimental_bearer_token</code> 填任意占位串）。改完重启 Codex。<b>503 且代理侧零日志</b>：系统代理或终端代理变量会把 127.0.0.1 的请求劫到代理服务器报 503——Windows 一键脚本安装时已自动写用户级 NO_PROXY（含 127.0.0.1）绕过；macOS 脚本自动把 NO_PROXY 写进 launchd 环境（GUI 应用与新终端窗口都生效）并安装登录项持久化（脚本选「还原」可撤销）；Linux 脚本只做体检并提示 <code>export NO_PROXY="localhost,127.0.0.1,::1"</code>；手动配置请自行 <code>setx NO_PROXY "localhost,127.0.0.1,::1"</code>（Windows）后重启 Codex。逐步教程见使用说明.md「让 Codex CLI 走代理」。</p>
+      <h3>路由与能力兜底</h3>
+      <p>请求按顺序匹配上游：classifier_route（分类器分流）→ fast_route（快速直连）→ routes（按 model pattern 匹配）。命中 route 后，若该上游能力不足（text_only 缺图片 / no_search 缺搜索）按以下处理：</p>
+      <ul>
+      <li>搜索请求（带 web_search）→ 走 search_fallback：开了 summary_mode 则代理做 step1 搜索 + step2 摘要两步自构响应，否则整请求转发给 search_fallback 上游自己搜索回答。两种都是同一个 search_fallback 配置，不是独立路由。</li>
+      <li>纯图片请求（无搜索）→ 走 multimodal_fallback；没配则透传原 route。</li>
+      <li>搜索没配 search_fallback、或纯图片没配 multimodal_fallback → 降级透传原 route（上游可能报错）。</li>
+      </ul>
+      <h3>参数速查</h3>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;color:#d4d4d4;margin:8px 0">
+      <tr style="border-bottom:1px solid #555">
+      <th style="text-align:left;padding:6px 8px">参数</th>
+      <th style="text-align:left;padding:6px 8px">配在哪儿</th>
+      <th style="text-align:left;padding:6px 8px">作用</th>
+      <th style="text-align:left;padding:6px 8px">搭配 / 互斥</th>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>text_only</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] 条目</td>
+      <td style="padding:6px 8px;vertical-align:top">标记上游不支持图片</td>
+      <td style="padding:6px 8px;vertical-align:top">含图请求改走 multimodal_fallback；没配则透传原 route</td>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>no_search</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] 条目</td>
+      <td style="padding:6px 8px;vertical-align:top">标记上游不支持搜索</td>
+      <td style="padding:6px 8px;vertical-align:top">搜索请求改走 search_fallback；与 enhance_search 互斥（标了 no_search 则 enhance_search 不生效）</td>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>enhance_search</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] 条目</td>
+      <td style="padding:6px 8px;vertical-align:top">支持搜索时主动改走 kimi 摘要模式</td>
+      <td style="padding:6px 8px;vertical-align:top">仅该 route 未标 no_search 时生效；与 search_fallback 互斥</td>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top">只影响 Responses 口；Anthropic 口仍走该 route 的 url；配了它该 route 的 text_only/no_search/enhance_search 对透传流不生效</td>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>thinking</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] 条目</td>
+      <td style="padding:6px 8px;vertical-align:top">声明目标模型的思考形态：auto（默认，按客户端 model 名查表）/ adaptive / budget</td>
+      <td style="padding:6px 8px;vertical-align:top">仅 Responses 翻译流生效（透传不翻译、Anthropic 口不改写）；别名命中 adaptive 表但目标是 Kimi 等 budget 上游时配 "budget" 纠正</td>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>multimodal_fallback</code></td>
+      <td style="padding:6px 8px;vertical-align:top">顶层</td>
+      <td style="padding:6px 8px;vertical-align:top">图片兜底上游</td>
+      <td style="padding:6px 8px;vertical-align:top">route 标 text_only 且请求含图时走它；纯图片无搜索才落这里</td>
+      </tr>
+      <tr>
+      <td style="padding:6px 8px;vertical-align:top"><code>search_fallback</code></td>
+      <td style="padding:6px 8px;vertical-align:top">顶层</td>
+      <td style="padding:6px 8px;vertical-align:top">搜索兜底上游</td>
+      <td style="padding:6px 8px;vertical-align:top">route 标 no_search 且请求含搜索时走它；summary_mode=true 代理做 step1+step2 自构响应，=false 整请求转发给上游自己搜索回答</td>
+      </tr>
+      </table>
+      <h3>pattern 顺序</h3>
+      <p>routes 按数组顺序匹配，第一个命中的生效，无"更具体优先"排序。宽通配会截胡窄通配--<code>*opus*</code> 写在 <code>*opus-4*</code> 前面时，<code>claude-opus-4-8</code> 先命中 <code>*opus*</code>，<code>*opus-4*</code> 永不触发；要让更具体的 pattern 生效，写在前面。</p>
+      <h3>图片多模态</h3>
+      <p>route 标了 <code>text_only</code> 且请求含图片时触发兜底。route 本身支持图片（未标 text_only）则直接走，不触发。</p>
+      <ul>
+      <li>配了 multimodal_fallback：改走 mf（正常多模态兜底）。</li>
+      <li>没配 multimodal_fallback：透传给原 route 模型（上游不支持图片会报错，代理原样透传）。</li>
+      </ul>
+      <p>搜索请求（带 web_search）一律走 search_fallback，不管请求体是否含图片--没有证据表明会同时出现多模态+搜索。</p>
+      <h3>增强搜索 enhance_search</h3>
+      <p>route 配 <code>enhance_search</code> 后，<b>仅当该 route 支持搜索（未标 <code>no_search</code>）</b>时生效：收到带 web_search 的请求不调主力，改走两步：</p>
+      <ul>
+      <li>step1：用本 route 上游做非流式搜索，拿到 web_search_tool_result。</li>
+      <li>step2：搜索结果 + 用户原始问题（搜索意图）组合成指令，流式生成逐条摘要（Result N: ...）。</li>
+      </ul>
+      <p>与 <code>search_fallback</code> 互斥：route 支持搜索（未标 <code>no_search</code>）走 enhance_search；route 标 <code>no_search</code> 缺搜索才走 <code>search_fallback</code>。</p>
+      <p><code>summary_level</code>：low（简短）/ mid（中等）/ high（详尽）/ max（含代码公式逐字复述），控制详细度与 max_tokens。<code>summary_thinking</code>：step2 是否开 thinking。</p>
+      <h3>缓存命中</h3>
+      <p>命中率 = cache_read / (input + cache_read + cache_creation)，与 Claude Code 的 cache hit 算法一致：缓存写入不算命中、但计入总输入。高命中率（90%+）主要来自上游模型（DeepSeek/Kimi）的原生 context caching，代理只透传 usage，不做额外缓存优化。点击状态页「缓存命中」卡片可看按真实上游模型分组的明细（含写入量），弹窗底部另有「实测缓存时间」表（按上游 URL+模型归组，规则见「统计字段」的「缓存年龄」条目）。中途断开的流（按 Esc、网络掉线）不计入聚合：它们只有 message_start 的预估 usage（部分上游的 start.input 含 cache_read 且 start.cr=0），计入会污染命中率，日志里标 [中断]。</p>
+      <h3>统计字段</h3>
+      <ul>
+      <li><b>总时间</b>：从代理收到下游请求到把响应全部发回下游的总耗时 = 内部处理（翻译/路由/缓冲）+ 首字等待 + 吐字 + 收尾内部处理。</li>
+      <li><b>首字</b>：从发出请求到收到首个输出字节耗时（ms）。</li>
+      <li><b>tok/s</b>：流式输出速率 = 输出 token 数 / 流式耗时。</li>
+      <li><b>缓存命中</b>：见上。</li>
+      <li><b>分类器</b>（状态卡片）：卡面数字 = 启动至今命中分类器（Claude Code 安全判断）特征的请求数——无论是否分流到 classifier_route、是否关思考都计，反映安全判断请求量。鼠标移上卡片看明细（命中总量 / 关思考改写次数），点击放大弹窗（含关思考占比）；「关思考」= 其中实际被改写关掉 thinking 的次数（仅 classifier_thinking_disabled 开启时发生；已是关思考形态的请求不产生改写，不计）。</li>
+      <li><b>缓存年龄</b>（最近完成流表）：按会话+路由锚定，显示该会话该路由最近一次缓存写入距现在过了多久（m:ss 递增）——上游缓存真实存活期是动态的，这列不再猜倒计时，只告诉你"这份缓存是多久前写的"，还能不能用请对照「缓存命中」弹窗的实测区间判断。同会话同路由最新一条流显示年龄；被更新的同键流刷新后旧行显示 <code>-</code>；无会话标识的流（count_tokens 探针、不带 metadata 的裸调用）恒 <code>-</code>。黄灯（等待首字节）阶段被下游主动断开的 499 流视同未刷新缓存：本行显 <code>-</code>、该键锚停留再上一次同键流；绿灯（流式中）断开的 499 说明上游已在吐字、缓存已写，照常作为新锚。同会话同路由有<b>在途流正在吐字</b>（绿灯转发中）时，缓存实际刚被刷新——该键最新完成行冻结显示 <code>[m:ss]</code>（方括号内为刷新那一刻旧锚的年龄，数字不变），新锚等该在途流完成归档后生效。会话标识来自客户端请求自带字段（Claude Code 的 metadata.user_id 内 session_id / Codex 的 prompt_cache_key），代理只读不改。年龄从流开始时刻起算（缓存写入/刷新发生在上游处理输入时）。<b>保留规则</b>：开始时刻距今 5 分钟内的"会话+路由最新一条"完成流不被「保留完成流 N」挤掉（列表行数可因此超 N）；显示 <code>-</code> 或超窗口的行照常先进先出裁剪。<b>点击「缓存命中」卡片</b>，弹窗底部「实测缓存时间」表列出各上游实测的缓存存活时间：按 URL+模型名归为一类（不看其他参数），同会话相邻两条流后条命中率 ≥95% 记一次区间下界「至少活了间隔那么久」（取最大值），前条命中过而后条命中率 &lt;50% 记一次区间上界「没活过间隔那么久」（取最小值；不看严格归零——系统提示词等公共前缀的残留缓存命中不算活着）；间隔按两条流各自的开始时刻算；输入总量（input+cache_read+cache_creation）不足 1024 token 的流不观测（小请求噪声大）；两侧观测矛盾时（上游缓存时间中途变化、或缓存被提前驱逐）以较新的观测为准、被否的一侧作废重测、观测次数同步归零重计；「≥形成」「&lt;形成」两列 = 各自界数值形成至今的时长（m:ss 递增），该界数值变化（含矛盾作废重测）即重新起算，只新增支撑观测、数值不变时不重置；无该界观测时随界同显 <code>-</code>；实测只作展示，纯内存态（重启/清空统计即清零）。</li>
+      <li><b>model 列工具标签</b>：响应中调用过的工具以 [Read*1][Edit*3] 形式金色跟在 model 后（web_search 等服务端工具也计）；在途流随转发实时增加，完成流保留最终快照；同名 N 次合并显 *N（原始次数），单次调用显 *1，参数结构体为空的单次调用显 *0（如空搜索），顺序按首次出现。<b>剥块红标 [剥N]</b>：该流剥掉的回放搜索块总数（本对话撞过 400 学到水位后，不比水位新的信封直接剥不还原——注册表按龄淘汰，同龄与更老的必死，不设固定存活期上限；还原后仍被上游拒 → 400 兜底剥光重试并学水位）。在途流挂在 model 列工具标签后，完成流改挂「缓存命中」列（如 81%[剥2]），同一标记两处只出现一处；只有发生过剥块的流才显示。拆分（水位剥多少、400 兜底剥多少）看日志 [剥块]/[兜底] 行；被剥后客户端无感（收不到 400），模型失去旧搜索上下文时可能重搜。</li>
+      <li><b>状态灯时长</b>：在途流表格首列状态灯（⚪请求 / 🟡等首字节 / 🟢转发中）旁的秒数 = 当前灯色已持续的时间；只在灯变色时清零——黄灯内部的路由、多次重试不单独清零，保证"黄灯亮了多久"连续真实。黄灯内正在等首字节时，状态灯与总时长之间另有 [尝试N: Xs] = 本次尝试已等待的时长（每次尝试重新起算；重试退避中显示 [退避中]）——黄灯总时长 = 各次尝试 + 退避之和，两者对照即可看出是否已在重试。</li>
+      <li><b>API 列</b>：协议来源 + 思考值合一格。名 = 协议来源：橙 <code>[Anthropic]</code> = Anthropic 口原生流量（Claude Code 等）、紫 <code>[translate]</code> = Responses 口翻译成 Anthropic 走主管线。名后 <code>[值]</code> = <b>实际发给上游</b>的思考配置最短形态（翻译映射、分类器关思考等代理改写生效后的最终口径），<b>其颜色 = 词汇口径</b>（思考是针对上游的：上游收到的都是 Anthropic 格式，所以紫名后跟的是橙值）——橙 = Anthropic thinking。值：<code>关</code> = thinking disabled 或 effort none/off/disabled；<code>开 N</code> = enabled + budget_tokens N；<code>adaptive</code> = 自适应无档；<code>low</code>/<code>high</code>/<code>max</code> 等档位词 = adaptive 的 effort；无 <code>[值]</code> = 请求体未带思考字段。例：<code>[translate][开 16384]</code> = Codex 发 effort high 翻译到 Anthropic 上游；<code>[Anthropic][关]</code> = 命中分类器被代理关思考。</li>
+      <li><b>499</b>：状态码列中非 200 的状态码加方括号显示（如 [499]、[400]），一眼挑出异常流。重试/预算用尽时代理会向下游透传兜底 error 事件（overloaded_error），此类流状态码列显 [重试尽]（点击行可回看该兜底事件）。发生过退避重试的流在状态码后追加金色 <code>[重试N次]</code>（N = 重试次数，如 200[重试2次]；[重试尽] 时同样带，可对照 max_retries 看是否打满）。499 口径与上游提供商后台一致——上游响应没发完连接就结束了记 499（最常见是下游主动取消，取消会传导成上游断连；nginx 惯例 client closed request）；上游完整发完后下游才断开的（Codex 收完 response.completed 即关连接）仍记 200。</li>
+      </ul>
+      <h3>流查看</h3>
+      <p>点击在途流/最近完成流的行可看该流内容：默认看输出（「显示解析/显示原始」切换）；「看请求体」回看导致这个流的下游请求体（JSON 自动美化，非完整 JSON 按原文显示）。浏览一律只给前 256KB。勾选「储存完整结构体」（默认关，重启复位）后，新开始的请求额外记录完整请求体与输出（不设上限，占内存），查看器出现「下载请求体/下载输出」按钮可下载完整文件（JSON 美化后保存，非 JSON 按原文），以及「交互式JSON」按钮——把请求体/输出渲染成可按键折叠展开的 JSON 树（默认全部折叠，点键名行懒展开；输出是 SSE 事件流时解析成事件数组再成树）；取消勾选立即清空已存的完整副本、下载与交互按钮消失。数据残缺的流不会静默当成完整版：请求体只剩截断版的「下载请求体」置灰（悬停见原因），无完整输出副本的「下载输出」置灰，交互式JSON 对这两类直接提示不看。Responses 翻译口的流记录的是翻译成 Anthropic 后的请求体。</p>
+      <h3>配置管理</h3>
+      <ul>
+      <li>配置页可新建 / 重命名 / 删除 / 切换配置文件。</li>
+      <li>切到配置页后自动每 3 秒刷新文件列表，增删配置文件无需手动按「刷新列表」。</li>
+      <li>当前生效的配置不可删除。</li>
+      </ul>
+      <h3>访问控制</h3>
+      <p>转发通道与管理端点（/__*）都永远仅本机可连（127.0.0.1/::1）：误把 listen / responses_listen 设成 0.0.0.0 也不会把转发通道暴露给内网。</p>
+`
+
 // logViewerDocEN 是使用文档弹窗的英文整版：英文页渲染时把 __DOC_BODY__ 占位
 // 整段替换为它（整段替换比逐句替换稳，长段落不会漏）。新增文档段落时中文写进
-// logViewerHTML、英文写进这里，两边都要补。
+// logViewerDocZH、英文写进这里，两边都要补。
 const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h3>
       <p>With the top-level <code>convertAlltoStream</code> (default false) on, every non-streaming request (<code>stream:false</code> or omitted) is silently sent upstream as streaming: the in-flight view shows token output live, with TTFT and tok/s stats. The caller notices nothing — after collecting the full upstream stream, the proxy <b>rebuilds</b> the non-streaming JSON exactly (all content blocks reassembled as they arrived, including search-result encrypted_content) and returns it in one piece. If the stream breaks midway (no message_stop), nothing has been written to the client and the proxy retries the whole request.</p>
       <p>Only applies to Anthropic Messages requests (/v1/messages); already-streaming requests and search summary mode are unaffected. No SSE keep-alive pings during retry waits (they would pollute a non-streaming response) — waits are silent.</p>
@@ -2579,7 +2693,6 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <h3>Access control</h3>
       <p>Both the forwarding channel and the admin endpoints (/__*) are only ever reachable from this machine (127.0.0.1/::1): even mistakenly setting listen / responses_listen to 0.0.0.0 won't expose the forwarding channel to the LAN.</p>
 `
-
 
 // ---- 控制台英文版 ----
 // logViewerHTML 是中文母版；renderLogViewerEN 按对照表把 HTML 静态文案与
