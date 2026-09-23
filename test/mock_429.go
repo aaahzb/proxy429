@@ -66,16 +66,19 @@ func main() {
 			if flusher != nil {
 				flusher.Flush()
 			}
-			// Each delta is followed by a message_delta updating output_tokens (cumulative),
-			// simulating streaming token growth — the status row's "output" and "tok/s" tick up.
+			// Faithful block framing (start/delta/stop with index and typed text_delta) so downstream
+			// converters that key on delta.type see real text. Each delta is followed by a message_delta
+			// updating output_tokens (cumulative) — the status row's "output" and "tok/s" tick up.
+			w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
 			for i := 1; i <= 5; i++ {
-				w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\n"))
+				w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n"))
 				w.Write([]byte(fmt.Sprintf("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":%d}}\n\n", i*10)))
 				if flusher != nil {
 					flusher.Flush()
 				}
 				time.Sleep(100 * time.Millisecond)
 			}
+			w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
 			w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
 			if flusher != nil {
 				flusher.Flush()
@@ -118,7 +121,7 @@ func main() {
 			return
 		}
 	})
-	log.Println("mock 服务器启动: 监听 127.0.0.1:9099 (?mode=429|bodyerr|ok)")
+	log.Println("mock 服务器启动: 监听 127.0.0.1:9099 (?mode=429|bodyerr|ok|think，或路径前缀 /ok/ /think/ /bodyerr/)")
 	log.Fatal(http.ListenAndServe("127.0.0.1:9099", nil))
 }
 
