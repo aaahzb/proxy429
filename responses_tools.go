@@ -1,8 +1,8 @@
-// responses_tools.go — Responses API 工具体系的翻译注册表。
-// 对照 cc-switch 3.20.0 的 CodexToolContext（transform_codex_chat.rs）与
-// tool_media.rs（工具结果媒体剥离）。四类工具：function（普通函数）、
-// namespace（MCP 命名空间，拍平成 ns__name）、custom（Codex freeform 工具，
-// 包装成 {"input": string} 的 JSON Schema）、toolSearch（固定代理工具）。
+// responses_tools.go — the translation registry for the Responses API tool system.
+// Mirrors cc-switch 3.20.0's CodexToolContext (transform_codex_chat.rs) and
+// tool_media.rs (tool-result media stripping). Four tool kinds: function (ordinary functions),
+// namespace (MCP namespaces, flattened to ns__name), custom (Codex freeform tools,
+// wrapped into an {"input": string} JSON Schema), toolSearch (fixed proxy tool).
 package main
 
 import (
@@ -15,7 +15,7 @@ import (
 	"unicode/utf8"
 )
 
-// 对照 cc-switch 同名常量。标记字符串沿用原文，客户端/模型侧可能按字面匹配。
+// Mirrors cc-switch's same-named constant. The marker string stays verbatim; client/model sides may match it literally.
 const (
 	toolSearchProxyName    = "tool_search"
 	customToolInputField   = "input"
@@ -29,42 +29,42 @@ const (
 	maxMediaTraversalDepth = 32
 )
 
-// toolKind 工具类别（决定输出项翻译成哪种 Responses item）。
+// toolKind tool category (decides which Responses item kind an output item translates into).
 type toolKind int
 
 const (
-	tkFunction   toolKind = iota // 普通函数工具
-	tkNamespace                  // MCP 命名空间子工具（上游名是拍平名）
-	tkCustom                     // Codex freeform 工具（输入是裸字符串）
-	tkToolSearch                 // tool_search 代理工具
+	tkFunction   toolKind = iota // Ordinary function tool
+	tkNamespace                  // MCP namespace sub-tool (upstream name is the flattened name)
+	tkCustom                     // Codex freeform tool (input is a bare string)
+	tkToolSearch                 // tool_search proxy tool
 )
 
-// toolSpec 记录一个上游工具名的原始身份（用于把 tool_use 块翻译回 Responses 项时拆包）。
+// toolSpec records an upstream tool name's original identity (for unpacking tool_use blocks back into Responses items).
 type toolSpec struct {
 	kind      toolKind
-	name      string // 原始工具名（namespace 工具是子工具名）
-	namespace string // 仅 namespace 工具非空
+	name      string // Original tool name (sub-tool name for namespace tools)
+	namespace string // Non-empty only for namespace tools
 }
 
-// toolRegistry 一个请求的工具注册表：请求翻译时建立，响应/流式翻译时据此拆包。
-// 零值可用（空注册表：所有工具按普通 function 处理）。
+// toolRegistry is one request's tool registry: built at request translation, used for unpacking at response/stream translation.
+// The zero value is usable (empty registry: all tools treated as ordinary functions).
 type toolRegistry struct {
-	specs   map[string]toolSpec // 上游工具名 → 身份
-	nsIndex map[string]string   // namespace\x00子工具名 → 上游工具名
-	tools   []interface{}       // 转换后的 Anthropic tools（按声明顺序）
+	specs   map[string]toolSpec // upstream tool name → identity
+	nsIndex map[string]string   // namespace\x00sub-tool-name → upstream tool name
+	tools   []interface{}       // Converted Anthropic tools (in declaration order)
 }
 
-// buildToolRegistry 把 Responses tools 数组转换成 Anthropic tools 并建立注册表。
-// 对照 cc-switch build_codex_tool_context_from_request + chat_tool_to_anthropic_tool。
-// 额外支持 web_search/web_search_preview → web_search_20250305（cc-switch 直接丢弃，
-// 我们映射成 Anthropic 托管搜索工具，是超集行为）。
+// buildToolRegistry converts a Responses tools array into Anthropic tools and builds the registry.
+// Mirrors cc-switch build_codex_tool_context_from_request + chat_tool_to_anthropic_tool.
+// Additionally supports web_search/web_search_preview → web_search_20250305 (cc-switch drops them outright;
+// we map them to Anthropic's managed search tool — a superset behavior).
 func buildToolRegistry(tools []interface{}) *toolRegistry {
 	reg := &toolRegistry{
 		specs:   map[string]toolSpec{},
 		nsIndex: map[string]string{},
 	}
 	for _, t := range tools {
-		// 字符串形式 = custom 工具（名字即字符串）。
+		// String form = custom tool (the name is the string itself).
 		if name, ok := t.(string); ok {
 			reg.addCustomTool(map[string]interface{}{"type": "custom", "name": name})
 			continue
@@ -93,7 +93,7 @@ func buildToolRegistry(tools []interface{}) *toolRegistry {
 	return reg
 }
 
-// addTool 注册一个工具（按上游名去重，名字空跳过）。
+// addTool registers a tool (deduped by upstream name; empty names skipped).
 func (reg *toolRegistry) addTool(chatName string, spec toolSpec, anthTool map[string]interface{}) {
 	if strings.TrimSpace(chatName) == "" {
 		return
@@ -108,7 +108,7 @@ func (reg *toolRegistry) addTool(chatName string, spec toolSpec, anthTool map[st
 	reg.tools = append(reg.tools, anthTool)
 }
 
-// addFunctionTool 注册 function 工具；namespace 非空时拍平名字（MCP 子工具）。
+// addFunctionTool registers a function tool; flattens the name when namespace is non-empty (MCP sub-tool).
 func (reg *toolRegistry) addFunctionTool(tool map[string]interface{}, namespace string) {
 	name := responsesToolName(tool)
 	if name == "" {
@@ -120,7 +120,7 @@ func (reg *toolRegistry) addFunctionTool(tool map[string]interface{}, namespace 
 		chatName = flattenNamespaceToolName(namespace, name)
 		kind = tkNamespace
 	}
-	// parameters 规整：必须是 object 类型 schema（Anthropic 强校验）。
+	// parameters normalization: must be an object-type schema (Anthropic strictly validates).
 	schema := asObj(tool["parameters"])
 	if len(schema) == 0 {
 		schema = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
@@ -138,8 +138,8 @@ func (reg *toolRegistry) addFunctionTool(tool map[string]interface{}, namespace 
 	reg.addTool(chatName, toolSpec{kind: kind, name: name, namespace: namespace}, anthTool)
 }
 
-// addCustomTool 注册 custom 工具：包装成 {"input": string} 的 JSON Schema，
-// 原始工具定义（含 format 语法）以 JSON 形式内嵌进 description 供模型遵循。
+// addCustomTool registers a custom tool: wrapped into an {"input": string} JSON Schema,
+// the original tool definition (including format syntax) inlined as JSON into the description for the model to follow.
 func (reg *toolRegistry) addCustomTool(tool map[string]interface{}) {
 	name := responsesToolName(tool)
 	if name == "" {
@@ -163,7 +163,7 @@ func (reg *toolRegistry) addCustomTool(tool map[string]interface{}) {
 	reg.addTool(name, toolSpec{kind: tkCustom, name: name}, anthTool)
 }
 
-// addToolSearchTool 注册 tool_search 代理工具（固定名字与参数形状）。
+// addToolSearchTool registers the tool_search proxy tool (fixed name and parameter shape).
 func (reg *toolRegistry) addToolSearchTool() {
 	anthTool := map[string]interface{}{
 		"name":        toolSearchProxyName,
@@ -186,8 +186,8 @@ func (reg *toolRegistry) addToolSearchTool() {
 	reg.addTool(toolSearchProxyName, toolSpec{kind: tkToolSearch, name: toolSearchProxyName}, anthTool)
 }
 
-// addNamespaceTool 注册 MCP namespace：子工具（tools/children 数组里 type=function 的）
-// 逐个拍平成 ns__name 的普通函数工具。
+// addNamespaceTool registers an MCP namespace: each sub-tool (type=function entries in the tools/children array)
+// is flattened one by one into an ns__name ordinary function tool.
 func (reg *toolRegistry) addNamespaceTool(tool map[string]interface{}) {
 	namespace := objStr(tool, "name")
 	if namespace == "" {
@@ -205,7 +205,7 @@ func (reg *toolRegistry) addNamespaceTool(tool map[string]interface{}) {
 	}
 }
 
-// responsesToolName 取工具名（兼容 function 嵌套形与扁平形）。
+// responsesToolName extracts a tool name (tolerating both nested function form and flat form).
 func responsesToolName(tool map[string]interface{}) string {
 	if n := objStr(asObj(tool["function"]), "name"); n != "" {
 		return strings.TrimSpace(n)
@@ -213,8 +213,8 @@ func responsesToolName(tool map[string]interface{}) string {
 	return strings.TrimSpace(objStr(tool, "name"))
 }
 
-// flattenNamespaceToolName 拍平 namespace__name；超 64 字节截断前缀 + "__" +
-// sha256 前 8 字节 hex（16 字符）保证唯一（对照 cc-switch 同名函数）。
+// flattenNamespaceToolName flattens namespace__name; over 64 bytes it's truncated prefix + "__" +
+// first 8 bytes of sha256 hex (16 chars) for uniqueness (mirrors cc-switch's same-named function).
 func flattenNamespaceToolName(namespace, name string) string {
 	full := namespace + "__" + name
 	if len(full) <= chatToolNameMaxLen {
@@ -236,7 +236,7 @@ func flattenNamespaceToolName(namespace, name string) string {
 	return b.String() + suffix
 }
 
-// lookup 按上游工具名查身份。
+// lookup queries an identity by upstream tool name.
 func (reg *toolRegistry) lookup(chatName string) (toolSpec, bool) {
 	if reg == nil {
 		return toolSpec{}, false
@@ -245,14 +245,14 @@ func (reg *toolRegistry) lookup(chatName string) (toolSpec, bool) {
 	return spec, ok
 }
 
-// isCustomTool 判断上游工具名是不是 custom 工具。
+// isCustomTool reports whether an upstream tool name is a custom tool.
 func (reg *toolRegistry) isCustomTool(chatName string) bool {
 	spec, ok := reg.lookup(chatName)
 	return ok && spec.kind == tkCustom
 }
 
-// chatNameForFunction 把客户端 function_call 的 (name, namespace) 解析回上游工具名：
-// 注册过的查表，没注册的按拍平规则重算（回放历史里注册表外的名字也能对上）。
+// chatNameForFunction resolves a client function_call's (name, namespace) back to the upstream tool name:
+// registered names hit the table; unregistered ones are recomputed per the flattening rule (names outside the registry in replayed history also match).
 func (reg *toolRegistry) chatNameForFunction(name, namespace string) string {
 	if namespace == "" {
 		return name
@@ -265,8 +265,8 @@ func (reg *toolRegistry) chatNameForFunction(name, namespace string) string {
 	return flattenNamespaceToolName(namespace, name)
 }
 
-// canonicalJSON 序列化成规范 JSON（map 键排序——Go encoding/json 天然有序；
-// 关闭 HTML 转义，与 cc-switch canonical_json_string 的输出习惯对齐）。
+// canonicalJSON serializes to canonical JSON (map keys sorted — Go encoding/json is naturally ordered;
+// HTML escaping off, aligned with cc-switch canonical_json_string's output habits).
 func canonicalJSON(v interface{}) string {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -277,8 +277,8 @@ func canonicalJSON(v interface{}) string {
 	return strings.TrimSuffix(buf.String(), "\n")
 }
 
-// sanitizeToolUseInput 剔除 Anthropic 模型在 Read 工具调用里附加的 pages:""
-// （已知怪癖，cc-switch sanitize_anthropic_tool_use_input 同款 workaround）。
+// sanitizeToolUseInput strips the pages:"" Anthropic models attach to Read tool calls
+// (a known quirk; same workaround as cc-switch sanitize_anthropic_tool_use_input).
 func sanitizeToolUseInput(name string, input map[string]interface{}) map[string]interface{} {
 	if name != "Read" || input == nil {
 		return input
@@ -289,7 +289,7 @@ func sanitizeToolUseInput(name string, input map[string]interface{}) map[string]
 	return input
 }
 
-// sanitizeToolUseInputJSON 同上，作用于未解析的 JSON 字符串（流式收拢时用）。
+// sanitizeToolUseInputJSON same as above, on an unparsed JSON string (used at streaming close-out).
 func sanitizeToolUseInputJSON(name, raw string) string {
 	if name != "Read" || raw == "" {
 		return raw
@@ -301,8 +301,8 @@ func sanitizeToolUseInputJSON(name, raw string) string {
 	return canonicalJSON(sanitizeToolUseInput(name, input))
 }
 
-// canonicalizeToolArguments 解析后重新规范序列化；解析失败原样返回
-// （对照 cc-switch canonicalize_tool_arguments_str）。
+// canonicalizeToolArguments re-serializes canonically after parsing; returns as-is on parse failure
+// (mirrors cc-switch canonicalize_tool_arguments_str).
 func canonicalizeToolArguments(raw string) string {
 	var v interface{}
 	if err := json.Unmarshal([]byte(raw), &v); err != nil {
@@ -311,8 +311,8 @@ func canonicalizeToolArguments(raw string) string {
 	return canonicalJSON(v)
 }
 
-// customToolInputFromArguments 从包装后的 arguments JSON 解出 custom 工具的裸输入
-// 字符串；解不出（不是对象/没有 input 字符串字段）时原样返回。
+// customToolInputFromArguments unwraps a custom tool's bare input
+// string from the wrapped arguments JSON; on failure (not an object / no input string field) returns as-is.
 func customToolInputFromArguments(arguments string) string {
 	if strings.TrimSpace(arguments) == "" {
 		return ""
@@ -329,8 +329,8 @@ func customToolInputFromArguments(arguments string) string {
 	return arguments
 }
 
-// parseToolArgumentsObject 把 arguments 解析成对象（tool_search_call 项用）；
-// 空串给 {}，解析失败包成 {"query": 原文}。
+// parseToolArgumentsObject parses arguments into an object (for tool_search_call items);
+// empty string yields {}, parse failure wraps into {"query": original text}.
 func parseToolArgumentsObject(arguments string) interface{} {
 	if strings.TrimSpace(arguments) == "" {
 		return map[string]interface{}{}
@@ -344,8 +344,8 @@ func parseToolArgumentsObject(arguments string) interface{} {
 	return map[string]interface{}{"query": arguments}
 }
 
-// toolCallItemID 生成工具调用输出项 id：custom=ctc_ 前缀，其他=fc_ 前缀
-// （对照 cc-switch response_tool_call_item_id_from_chat_name）。
+// toolCallItemID generates a tool-call output item id: ctc_ prefix for custom, fc_ for the rest
+// (mirrors cc-switch response_tool_call_item_id_from_chat_name).
 func toolCallItemID(reg *toolRegistry, callID, chatName string) string {
 	if reg.isCustomTool(chatName) {
 		return "ctc_" + callID
@@ -353,10 +353,10 @@ func toolCallItemID(reg *toolRegistry, callID, chatName string) string {
 	return "fc_" + callID
 }
 
-// toolCallItemFromRegistry 按工具身份把上游 tool_use 块翻译成对应的 Responses
-// 输出项（对照 cc-switch response_tool_call_item_from_chat_name）：
-// toolSearch → tool_search_call；custom → custom_tool_call（解包裸输入）；
-// namespace → 带 namespace 字段、还原子工具名的 function_call；其余 → 普通 function_call。
+// toolCallItemFromRegistry translates an upstream tool_use block into the corresponding Responses
+// output item per the tool identity (mirrors cc-switch response_tool_call_item_from_chat_name):
+// toolSearch → tool_search_call; custom → custom_tool_call (bare input unwrapped);
+// namespace → function_call with the namespace field and the sub-tool name restored; the rest → ordinary function_call.
 func toolCallItemFromRegistry(reg *toolRegistry, itemID, status, callID, chatName, arguments string) map[string]interface{} {
 	spec, ok := reg.lookup(chatName)
 	if ok {
@@ -387,8 +387,8 @@ func toolCallItemFromRegistry(reg *toolRegistry, itemID, status, callID, chatNam
 	return functionCallItem(itemID, status, callID, chatName, arguments)
 }
 
-// documentBlockFromInputFile 把 Responses input_file 转成 Anthropic document 块
-// （file_url → url 源；file_data data URL → base64 源；filename 进 title）。
+// documentBlockFromInputFile converts a Responses input_file into an Anthropic document block
+// (file_url → url source; file_data data URL → base64 source; filename into title).
 func documentBlockFromInputFile(part map[string]interface{}) map[string]interface{} {
 	if part == nil {
 		return nil
@@ -431,9 +431,9 @@ func documentBlockFromInputFile(part map[string]interface{}) map[string]interfac
 	return block
 }
 
-// ---- 工具结果媒体剥离（对照 cc-switch tool_media.rs，ImagesOnly 范围）----
+// ---- Tool-result media stripping (mirrors cc-switch tool_media.rs, ImagesOnly scope) ----
 
-// normalizedImageURL 规整 image_url 字段为 {url: ...} 对象（字符串形式包一层）。
+// normalizedImageURL normalizes the image_url field into a {url: ...} object (string form wrapped once).
 func normalizedImageURL(part map[string]interface{}) map[string]interface{} {
 	switch u := part["image_url"].(type) {
 	case string:
@@ -450,21 +450,21 @@ func normalizedImageURL(part map[string]interface{}) map[string]interface{} {
 	return nil
 }
 
-// isImageMimeType 判断 MIME 类型是否 image/ 前缀（大小写不敏感）。
+// isImageMimeType reports whether a MIME type has the image/ prefix (case-insensitive).
 func isImageMimeType(v string) bool {
 	return len(v) >= 6 && strings.EqualFold(v[:6], "image/")
 }
 
-// imageMediaPartFromToolPart 识别工具结果节点是否是图片媒体，是则归一化成
-// {type:"image_url", image_url:{url}}（对照 cc-switch chat_media_part_from_tool_part
-// 的图片分支：input_image/image_url、Anthropic image+source、MCP image+data+mimeType、
-// 无 type 的松散 image_url data URL）。
+// imageMediaPartFromToolPart recognizes whether a tool-result node is image media, and if so normalizes it into
+// {type:"image_url", image_url:{url}} (mirrors cc-switch chat_media_part_from_tool_part's
+// image branch: input_image/image_url, Anthropic image+source, MCP image+data+mimeType,
+// type-less loose image_url data URLs).
 func imageMediaPartFromToolPart(part map[string]interface{}) map[string]interface{} {
 	wrap := func(url string) map[string]interface{} {
 		return map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": url}}
 	}
 	dataURL := func(mediaType, data string) string {
-		// data 本身已是 data URL 就直接用，否则包成 data:<mt>;base64,<data>。
+		// data already being a data URL is used directly; otherwise wrapped as data:<mt>;base64,<data>.
 		if len(data) >= 11 && strings.EqualFold(data[:11], "data:image/") {
 			return data
 		}
@@ -477,7 +477,7 @@ func imageMediaPartFromToolPart(part map[string]interface{}) map[string]interfac
 		}
 	case "image":
 		if src := asObj(part["source"]); src != nil {
-			// media_type 缺席视为图片，在场必须 image/ 前缀。
+			// A missing media_type counts as an image; when present it must have the image/ prefix.
 			mt := objStr(src, "media_type")
 			if mt == "" {
 				mt = objStr(src, "mime_type")
@@ -508,7 +508,7 @@ func imageMediaPartFromToolPart(part map[string]interface{}) map[string]interfac
 			}
 		}
 	case "":
-		// 松散形状：没有 type 但带 image_url 且是 data: URL。
+		// Loose shape: no type but carries image_url as a data: URL.
 		if u := normalizedImageURL(part); u != nil {
 			if url := objStr(u, "url"); len(url) >= 5 && strings.EqualFold(url[:5], "data:") {
 				return map[string]interface{}{"type": "image_url", "image_url": u}
@@ -518,7 +518,7 @@ func imageMediaPartFromToolPart(part map[string]interface{}) map[string]interfac
 	return nil
 }
 
-// wholeStringImageDataURL 识别整串就是一个图片 data URL（≥8KB 且 base64 编码）的字符串。
+// wholeStringImageDataURL recognizes a string that is entirely one image data URL (≥8KB and base64-encoded).
 func wholeStringImageDataURL(s string) string {
 	trimmed := strings.TrimSpace(s)
 	if len(trimmed) < wholeDataURLMinBytes {
@@ -535,7 +535,7 @@ func wholeStringImageDataURL(s string) string {
 	return ""
 }
 
-// looksLikeBase64Payload 粗判字符串是否像 base64 载荷（≥16KB 且全是 base64 字符）。
+// looksLikeBase64Payload roughly judges whether a string looks like a base64 payload (≥16KB of pure base64 characters).
 func looksLikeBase64Payload(s string) bool {
 	if len(s) < base64ishMinBytes {
 		return false
@@ -549,8 +549,8 @@ func looksLikeBase64Payload(s string) bool {
 	return true
 }
 
-// clampBase64ishStrings 在已确认含媒体的结构里，把残留的 data:/base64 长串
-// 替换成省略标记（对照 cc-switch clamp_base64ish_strings）。
+// clampBase64ishStrings replaces leftover data:/base64 long strings with an elision marker
+// inside structures already confirmed to contain media (mirrors cc-switch clamp_base64ish_strings).
 func clampBase64ishStrings(v interface{}) {
 	switch t := v.(type) {
 	case []interface{}:
@@ -581,9 +581,9 @@ func clampedString(s string) string {
 	return s
 }
 
-// stripMediaFromToolValue 递归剥离值里的图片媒体节点：媒体节点被标记块替换、
-// 归一化后进 mediaParts；JSON 字符串会解析后递归并在有替换时重新序列化。
-// 返回清理后的值与替换次数（对照 cc-switch strip_media_from_tool_value_at_depth）。
+// stripMediaFromToolValue recursively strips image-media nodes from a value: media nodes are replaced by marker blocks,
+// normalized into mediaParts; JSON strings are parsed and recursed, re-serialized when replacements happened.
+// Returns the cleaned value and the replacement count (mirrors cc-switch strip_media_from_tool_value_at_depth).
 func stripMediaFromToolValue(v interface{}, mediaParts *[]interface{}, depth int) (interface{}, int) {
 	if depth > maxMediaTraversalDepth {
 		return v, 0
@@ -637,9 +637,9 @@ func stripMediaFromToolValue(v interface{}, mediaParts *[]interface{}, depth int
 	return v, 0
 }
 
-// appendSanitizedToolResultValue 把清理后的值摊平成 Anthropic text 块
-// （对照 cc-switch append_sanitized_tool_result_value）：字符串/文本型部件进文本，
-// error marker 置 is_error，其余形状序列化成 JSON 文本。
+// appendSanitizedToolResultValue flattens a cleaned value into Anthropic text blocks
+// (mirrors cc-switch append_sanitized_tool_result_value): strings/text parts go to text,
+// error markers set is_error, other shapes serialize into JSON text.
 func appendSanitizedToolResultValue(v interface{}, content *[]interface{}, isError *bool) {
 	switch t := v.(type) {
 	case string:
@@ -678,9 +678,9 @@ func appendSanitizedToolResultValue(v interface{}, content *[]interface{}, isErr
 	}
 }
 
-// alternateImageToolResultContent 尝试把含图片媒体的工具结果值转换成
-// [text..., image...] 的 Anthropic 内容块；没识别到媒体时 ok=false 让调用方走原样路径
-// （对照 cc-switch alternate_image_tool_result_content）。
+// alternateImageToolResultContent tries converting a tool-result value containing image media into
+// [text..., image...] Anthropic content blocks; when no media is recognized, ok=false lets the caller take the as-is path
+// (mirrors cc-switch alternate_image_tool_result_content).
 func alternateImageToolResultContent(v interface{}) (content []interface{}, isError bool, ok bool) {
 	var mediaParts []interface{}
 	cleaned, n := stripMediaFromToolValue(v, &mediaParts, 0)

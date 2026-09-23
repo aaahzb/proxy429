@@ -1,44 +1,44 @@
-# Proxy429 设计文档
+# Proxy429 Design Document
 
-> 本文档随代码同步更新，记录每个机制「为什么这么做、踩过什么坑」。
-> 项目入口与英文摘要见根目录 README.md。
+> This document is updated alongside the code, recording for each mechanism *why* it works this way and what pitfalls were hit along the way.
+> The project overview and quick start are in the root README.md.
 
-一个本地 Anthropic 兼容 HTTP 代理，专门用来吃掉上游的 429 / 5xx——遇到限流就自动指数退避重试，让 Claude Code 完全无感。
+A local Anthropic-compatible HTTP proxy whose job is to absorb upstream 429 / 5xx responses — automatically retrying with exponential backoff so Claude Code never notices.
 
-## 工作原理
+## How it works
 
-Claude Code 的所有请求先发到本地代理（`127.0.0.1:8080`），代理原样转发给上游模型提供商：
+Every Claude Code request goes to the local proxy (`127.0.0.1:8080`) first, and the proxy forwards it verbatim to the upstream model provider:
 
-- **原样透传**：Anthropic 兼容接口，请求/响应头和体原样转发，不做解析改写。例外：分类器请求关掉 thinking、路由命中时改 model 名/上游/API key、fast 路由命中时移除 speed 字段并注入响应 headers（见「分类器请求自动关 thinking」「路由功能」两节）。
-- **自动重试（三种触发）**：
-  - **情况 0**：网络层错误（连接失败、首字节超时）-> 重试。客户端断开（ctx 取消）则立即停止重试、直接结束，不再白烧上游配额。
-  - **情况 A**：上游 HTTP 状态码是 `429/500/502/503/504` → 重试。
-  - **情况 B**：状态码是 **200**，但响应体里藏着错误事件（`event: error` / `rate_limit` / `overloaded` / `"type":"error"` 等）→ 也重试。这点很关键——有些上游（含部分 Anthropic 兼容服务）限流时不返回 429 状态码，而是返回 200 把错误塞在 SSE 流里，只看状态码会漏掉。
-  - **情况 C**：正常响应 → 直接透传，记录首字延迟 / 流式时长 / output_tokens 入滑动窗口。
-- **总预算**：`total_budget_s` 限制总重试时长，超时后放弃并把最后一个响应透传给 Claude Code，避免 Claude Code 自己先超时。
-- **首字节超时内部重发**：`upstream_header_timeout_s`（默认 70s）限制"等上游首字节"的时长。超时认为请求卡住，**内部自动重发**（不报错给 Claude Code）；重试用尽才透传 503 交给 Claude Code 自行重试。注意只限等首字节、不砍流式 Body（长输出不受影响）。
-- **流式透传**：每读到一点就 `Flush`，保证 SSE 增量输出，不会攒成一坨。判断错误时只偷看响应体开头，没消费的字节会补回去继续转发，不丢数据。
-- **关闭上游压缩**：代理强制 `Accept-Encoding: identity`，这样响应体是明文，才能做错误字符串匹配；代价是带宽略增。
+- **Verbatim pass-through**: an Anthropic-compatible endpoint; request/response headers and bodies are forwarded as-is, with no parsing or rewriting. Exceptions: classifier requests get thinking turned off; route hits rewrite the model name / upstream / API key; fast-route hits remove the speed field and inject response headers (see "Classifier requests: automatic thinking-off" and "Routing").
+- **Automatic retry (three triggers)**:
+  - **Case 0**: network-layer errors (connection failure, first-byte timeout) -> retry. If the client disconnects (ctx cancelled), retrying stops immediately and the request ends — no more burning upstream quota for nothing.
+  - **Case A**: upstream HTTP status is `429/500/502/503/504` → retry.
+  - **Case B**: status is **200**, but the response body hides an error event (`event: error` / `rate_limit` / `overloaded` / `"type":"error"` etc.) → also retry. This matters — some upstreams (including some Anthropic-compatible services) don't return a 429 status when rate-limiting; they return 200 and stuff the error into the SSE stream. Looking only at the status code would miss it.
+  - **Case C**: normal response → pass straight through; record first-token latency / streaming duration / output_tokens into the sliding window.
+- **Total budget**: `total_budget_s` caps the total retry duration; past it, the proxy gives up and passes the last response through to Claude Code, so Claude Code doesn't hit its own timeout first.
+- **Internal resend on first-byte timeout**: `upstream_header_timeout_s` (default 70s) bounds how long the proxy waits for the upstream's first byte. On timeout the request is considered stuck and is **resent internally** (no error reported to Claude Code); only when retries are exhausted is a 503 passed through for Claude Code to retry itself. Note this only bounds waiting for the first byte — it never cuts a streaming body (long outputs unaffected).
+- **Streaming pass-through**: every chunk read is `Flush`ed, guaranteeing incremental SSE output instead of clumping. When sniffing for errors the proxy only peeks at the beginning of the response body; unconsumed bytes are pushed back and forwarding continues — no data lost.
+- **Upstream compression disabled**: the proxy forces `Accept-Encoding: identity` so the response body is plaintext and error-string matching works; the cost is slightly more bandwidth.
 
-## 文件结构
+## File structure
 
-| 文件 | 作用 |
+| File | Role |
 |------|------|
-| `main.go` | 代理主程序（含 `resolveConfigPath` 配置路径解析、`reloadConfig` 热重载、`logRing` 内存日志缓冲） |
-| `tray.go` | 跨平台托盘/菜单栏（`fyne.io/systray`）：菜单（仅「查看日志」+「退出代理」两项，全平台一致）、状态灯图标、tooltip、状态轮询 |
-| `logview.go` | 网页控制台（全平台唯一 UI）：挂 `/__logs`，状态/日志/配置三标签；同端口本地路由 `/__logs/data`、`/__config`、`/__reload`，仅本机访问 |
-| `main_test.go` / `tray_test.go` | 单元测试（SSE 解析 / 状态采样 / 托盘状态灯与 tooltip） |
-| `config.json` | 运行配置（监听地址、上游、重试策略、分类器开关等）。首次运行无配置时从 `//go:embed config.example.json` 自动生成 |
-| `config.example.json` | 内嵌的配置模板，首次启动自动生成 `config.json` 用 |
-| `go.mod` | Go 模块定义 |
-| `README.md` | 文档 |
-| `test/mock_429.go` | 本地测试用 mock 服务器（见「本地测试」） |
-| `test/config_test.json` | 本地测试用配置 |
-| `release/Proxy429.app` / `release/proxy429.exe` / `release/proxy429` | 编译产物（`build.sh` 按宿主平台输出；darwin 打包成 `.app`、windows 用 GUI 子系统、linux 纯二进制；`.gitignore` 忽略，不入库） |
+| `main.go` | The proxy itself (including `resolveConfigPath` config-path resolution, `reloadConfig` hot reload, `logRing` in-memory log buffer) |
+| `tray.go` | Cross-platform tray / menu bar (`fyne.io/systray`): menu (only 「查看日志」/View logs + 「退出代理」/Quit, identical on all platforms), status-light icon, tooltip, status polling |
+| `logview.go` | Web console (the only UI on every platform): mounted at `/__logs`, with Status/Logs/Config tabs; same-port local routes `/__logs/data`, `/__config`, `/__reload`, localhost-only |
+| `main_test.go` and the other `*_test.go` files | Unit tests (SSE parsing / status sampling / tray light & tooltip / translation layers) |
+| `config.json` | Runtime config (listen address, upstream, retry policy, classifier switches, etc.). Auto-generated from `//go:embed config.example.json` on first run when absent |
+| `config.example.json` | The embedded config template used to generate `config.json` on first start |
+| `go.mod` | Go module definition |
+| `README.md` | Documentation |
+| `test/mock_429.go` | Local mock server for testing (see "Local testing") |
+| `test/config_test.json` | Config for local testing |
+| `release/Proxy429.app` / `release/proxy429.exe` / `release/proxy429` | Build artifacts (`build.sh` outputs per host platform; darwin is packaged as `.app`, windows uses the GUI subsystem, linux is a bare binary; ignored by `.gitignore`, never committed) |
 
-## 配置说明（config.json）
+## Configuration (config.json)
 
-当前已配置为火山方舟 ARK Coding Plan：
+The example below uses a Volcano ARK Coding Plan upstream:
 
 ```json
 {
@@ -61,160 +61,160 @@ Claude Code 的所有请求先发到本地代理（`127.0.0.1:8080`），代理�
 }
 ```
 
-- **listen**：本地监听地址端口，Claude Code 连这里。
-- **upstream**：上游 ARK 的 Anthropic 兼容 Base URL。已带 `/api/plan` 前缀，Claude Code 自带的 `/v1/messages` 会被拼在后面，最终端点为 `https://ark.cn-beijing.volces.com/api/plan/v1/messages`（已实测返回 401 鉴权错误，证明路径正确）。`routes` 里有 `pattern:"*"` 兜底规则时可为空（所有带 model 的请求都被兜底路由接管，默认 upstream 用不到）；为空且无兜底时，未命中路由的请求直接 502，配置加载/重载日志会警告。
-- **max_retries**：最多重试次数。
-- **base_delay_s / max_delay_s**：指数退避的起步等待和上限（秒）。
-- **total_budget_s**：总重试预算（秒），超过即放弃。
-- **retry_status_codes**：触发重试的状态码。
-- **respect_retry_after**：是否优先听上游 `Retry-After` 头。
-- **classifier_thinking_disabled**：是否对安全分类器请求关掉 thinking（见下节）。
-- **classifier_max_tokens**：命中分类器后把 max_tokens 压到这个值（加速）。**注意：值太小（如 512）会让分类器的 thinking 被截断、Claude Code 收不到有效的安全判断，表现为 Bash 被拒且不给原因**。推荐 `0`（不压，用请求原 max_tokens；关 thinking 后输出很短，仍快速返回）。
-- **upstream_header_timeout_s**：等上游首字节的最长时间（秒）。超过则认为请求卡住，**内部自动重发**（不报错给 Claude Code），重试用尽才透传 503 交给 Claude Code 自行重试。默认 `70`（70s）。用首字节超时而非整体超时，只卡"等响应开头"而不砍掉长流式输出。
-- **ping_interval_s**：429 重试时向客户端发 SSE ping 保活的间隔（秒）。代理重试期间客户端收不到上游数据，长时间无数据会触发 Claude Code 超时报 API error；代理定期发 ping 保活避免此问题。默认 `5`；`0` 用默认。详见「429 重试保活」一节。
-- **log_request_detail**：是否打印每个请求的 stream/tools/system 前缀（诊断分类器指纹用，默认关）。
-- **recent_sample_window**：网页控制台「状态」标签「首字」「tok/s」取最近多少次请求的样本做统计（滑动窗口）。默认 `20`；改大更平滑、改小更跟手。仅统计正常透传（情况 C）的流。
-- **convertAlltoStream**：全局流式化开关（默认 `false`）。开启后，所有非流式请求（`stream:false` 或省略）被代理悄悄改为流式发给上游——网页控制台实时可见吐字，首字延迟与 tok/s 统计与普通流式请求一致。请求方无感知：代理把上游流完整收完后，**原样重建**非流式 JSON 一次性返回（所有内容块按流里原样拼回，含搜索结果 `encrypted_content`），调用方拿到的仍是它预期的非流式响应。流中途断开（未见 `message_stop`）时未向客户端写任何内容，代理整体重试。仅作用于 Anthropic Messages 请求（`/v1/messages`）；已是流式的请求与搜索摘要模式不受影响。详见「全局流式化」一节。
-- **responses_listen**：OpenAI Responses API 监听口（空 = 不启用；配置模板默认演示 `127.0.0.1:8081`）。设为如 `127.0.0.1:8081` 后，代理在该地址额外开一个 Responses API 端点（`/v1/responses`），把 Responses 协议请求翻译成 Anthropic Messages 走主管线（路由/重试/网页监控全部生效），响应再翻译回 Responses 协议。供 Codex CLI 等只说 Responses 协议的工具接入 Anthropic 上游。改动保存重载即生效（监听口随配置动态启停）。详见「Responses API 监听口」一节。
-- **routes**：模型路由规则数组，按 `pattern` 通配匹配请求的 model 名，命中则改走指定上游（换 URL/API/model）。未配置或空数组则不路由，所有请求走默认 `upstream`。详见「路由功能」一节。
-- **classifier_route**：分类器请求专用路由（对象，与 `routes` 平级）。命中分类器（安全判断）的请求无视原 model 统一路由到指定 `url`/`api`/`model`；未配置则分类器请求仍按 model 走 `routes`（兼容）。详见「路由功能」一节。
-- **fast_route**：fast 模式请求专用路由（对象，与 `routes` 平级）。检测到 `"speed":"fast"` 的非分类器请求统一路由到指定 `url`/`api`/`model`；未配置则不干预（兼容）。详见「路由功能」一节。
-- **multimodal_fallback**：多模态兜底路由（对象，与 `routes` 平级）。请求带图片却命中 `text_only` 纯文本模型时，自动改走此处指定的 `url`/`api`/`model`；未配置则不兜底（透传给纯文本模型，由上游处理）。详见「路由功能」一节。
-- **search_fallback**：搜索兜底路由（对象，与 `routes` 平级）。请求带搜索工具却命中 `no_search` 不支持搜索上游时，自动改走此处指定的 `url`/`api`/`model`；未配置则不兜底。详见「路由功能」一节。
-- **log_file**：日志文件路径（可选）。**默认空**：日志只进内存环形缓冲（`logRing`，500 行，供网页控制台「日志」标签轮询）+ stderr；windowsgui 子系统或无终端时 stderr 为空操作，即不落盘。设了非空值才同时追加写入此文件，方便留存排查或 RemoteApp 等无控制台场景复制查看。改了需重启代理生效（网页「配置」标签保存重载不会重开日志文件）。
+- **listen**: local listen address:port — Claude Code connects here.
+- **upstream**: the upstream ARK Anthropic-compatible Base URL. It already carries the `/api/plan` prefix; Claude Code's own `/v1/messages` gets appended, producing `https://ark.cn-beijing.volces.com/api/plan/v1/messages` (field-tested to return a 401 auth error, proving the path is correct). May be empty when `routes` contains a `pattern:"*"` catch-all (every model-bearing request is taken over by the catch-all route and the default upstream is never used); with an empty upstream and no catch-all, unrouted requests get a straight 502 and config load/reload logs a warning.
+- **max_retries**: maximum retry count.
+- **base_delay_s / max_delay_s**: exponential backoff's starting wait and cap (seconds).
+- **total_budget_s**: total retry budget (seconds); give up past it.
+- **retry_status_codes**: status codes that trigger a retry.
+- **respect_retry_after**: whether to honor the upstream `Retry-After` header first.
+- **classifier_thinking_disabled**: whether to turn thinking off for safety-classifier requests (see the next section).
+- **classifier_max_tokens**: clamp max_tokens to this after a classifier hit (for speed). **Warning: too small a value (e.g. 512) truncates the classifier's thinking, Claude Code receives no valid safety verdict, and Bash calls get denied with no reason given.** Recommended: `0` (no clamp; use the request's own max_tokens — with thinking off the output is short and still returns fast).
+- **upstream_header_timeout_s**: longest wait for the upstream's first byte (seconds). Past it the request is considered stuck and is **resent internally** (no error to Claude Code); only exhausted retries yield a 503 for Claude Code to retry itself. Default `70`. Using a first-byte timeout rather than a whole-request timeout only bounds "waiting for the response to start" without cutting long streaming outputs.
+- **ping_interval_s**: interval (seconds) between SSE ping keepalives sent to the client during 429 retries. While the proxy is retrying, the client receives no upstream data, and a long silence triggers Claude Code's timeout with an API error; periodic pings keep the connection alive. Default `5`; `0` means default. See "429 retry keepalive".
+- **log_request_detail**: whether to print each request's stream/tools/system prefixes (for diagnosing classifier fingerprints; default off).
+- **recent_sample_window**: how many recent requests the Status tab's "first token" and "tok/s" cards sample (sliding window). Default `20`; larger is smoother, smaller is more responsive. Only normally-passed-through (case C) streams are counted.
+- **convertAlltoStream**: global stream-ification switch (default `false`). When on, every non-streaming request (`stream:false` or omitted) is silently rewritten to streaming before going upstream — the web console shows tokens arriving live, with first-token latency and tok/s stats just like ordinary streaming requests. The caller notices nothing: once the upstream stream is fully collected, the proxy **rebuilds** a non-streaming JSON exactly as streamed (all content blocks reassembled as they appeared, including search-result `encrypted_content`) and returns it in one shot — the caller still gets the non-streaming response it expected. If the stream breaks midway (no `message_stop` seen), nothing has been written to the client and the proxy retries the whole request. Only applies to Anthropic Messages requests (`/v1/messages`); already-streaming requests and search summary mode are unaffected. See "Global stream-ification".
+- **responses_listen**: OpenAI Responses API listen port (empty = disabled; the config template demos `127.0.0.1:8081`). Set it and the proxy opens an extra Responses API endpoint (`/v1/responses`) at that address, translating Responses-protocol requests into Anthropic Messages through the main pipeline (routing / retries / web monitoring all apply), and translating responses back to the Responses protocol. For Codex CLI and other Responses-only tools to reach Anthropic upstreams. Takes effect on save+reload (the listener starts/stops dynamically with the config). See "Responses API listener".
+- **routes**: model routing rules; each request's model name is wildcard-matched against `pattern`, and a hit reroutes to the given upstream (URL/API/model swap). Unset or empty array means no routing — everything goes to the default `upstream`. See "Routing".
+- **classifier_route**: dedicated route for classifier requests (an object, sibling of `routes`). Requests matching the classifier (safety check) are routed to the given `url`/`api`/`model` regardless of their original model; unset means classifier requests still follow `routes` by model (compatible). See "Routing".
+- **fast_route**: dedicated route for fast-mode requests (an object, sibling of `routes`). Non-classifier requests carrying `"speed":"fast"` are routed to the given `url`/`api`/`model`; unset means no intervention (compatible). See "Routing".
+- **multimodal_fallback**: multimodal fallback route (an object, sibling of `routes`). When a request carries an image but hits a `text_only` text-only model, it automatically falls back to the given `url`/`api`/`model`; unset means no fallback (passed through to the text-only model, for the upstream to deal with). See "Routing".
+- **search_fallback**: search fallback route (an object, sibling of `routes`). When a request carries a search tool but hits a `no_search` upstream that doesn't support search, it automatically falls back to the given `url`/`api`/`model`; unset means no fallback. See "Routing".
+- **log_file**: log file path (optional). **Default empty**: logs go only to the in-memory ring buffer (`logRing`, 500 lines, polled by the web console's Logs tab) + stderr; under the windowsgui subsystem or with no terminal, stderr is a no-op, i.e. nothing hits disk. A non-empty value additionally appends to this file — handy for keeping logs around, or for copy-reading in console-less scenarios like RemoteApp. Changing it requires a proxy restart (the web Config tab's save+reload does not reopen the log file).
 
-## 用法
+## Usage
 
-### 1. 启动代理
+### 1. Start the proxy
 
-`build.sh` 产出的二进制在 `release/` 下（见「重新编译」），双击或命令行启动均可，启动后驻留托盘/菜单栏，**不需要保持终端窗口开着**：
+The binaries `build.sh` produces live under `release/` (see "Rebuilding"); double-click or start from a shell — after startup it lives in the tray / menu bar and **no terminal window needs to stay open**:
 
 ```powershell
-# Windows（GUI 子系统，不弹控制台窗口）
+# Windows (GUI subsystem, no console window)
 .\release\proxy429.exe
 ```
 ```bash
-# macOS（.app 菜单栏应用，无 Dock 图标）
+# macOS (.app menu-bar app, no Dock icon)
 open release/Proxy429.app
 # Linux
 ./release/proxy429
 ```
 
-启动日志（含 `代理启动 vc639d56-1606: 监听 http://127.0.0.1:8080 -> 转发到 https://ark.cn-beijing.volces.com/api/plan`，`v` 后是版本号 = git 短 hash + 构建时分）进内存环形缓冲，可在网页控制台「日志」标签查看；`log_file` 非空时也写入文件。
+The startup log (containing `代理启动 vc639d56-1606: 监听 http://127.0.0.1:8080 -> 转发到 https://ark.cn-beijing.volces.com/api/plan` — "proxy started v…: listening … -> forwarding to …", where `v` is followed by the version = git short hash + build HHMM) goes to the in-memory ring buffer and can be read on the web console's Logs tab; it's also written to `log_file` when that is non-empty.
 
-> 默认按 `resolveConfigPath` 解析配置路径：`-config` 标志 > 当前目录 `./config.json`（若存在）> `os.UserConfigDir()/proxy429/config.json`（macOS `~/Library/Application Support/proxy429/`、Linux `~/.config/proxy429/`、Windows `%AppData%/proxy429/`）。首次运行无配置时从内嵌的 `config.example.json` 自动生成。本地 mock 测试用 `-config test/config_test.json`，详见下文「本地测试」一节。
+> By default `resolveConfigPath` resolves the config path as: `-config` flag > `./config.json` in the current directory (if present) > `os.UserConfigDir()/proxy429/config.json` (macOS `~/Library/Application Support/proxy429/`, Linux `~/.config/proxy429/`, Windows `%AppData%/proxy429/`). On first run without a config, one is generated from the embedded `config.example.json`. For local mock testing use `-config test/config_test.json` — see "Local testing" below.
 >
-> 启动后状态栏出现状态灯图标（灰/黄/绿）：macOS 在菜单栏（`.app` 打包，`LSUIElement=true` 无 Dock 图标）、Windows/Linux 在系统托盘。右键菜单全平台一致，仅 `查看日志`（浏览器打开网页控制台）+ `退出代理` 两项。Windows 用 GUI 子系统（`-H=windowsgui`）构建，启动不弹控制台窗口，纯托盘运行。
+> After startup a status-light icon appears: in the menu bar on macOS (`.app` packaging, `LSUIElement=true`, no Dock icon), in the system tray on Windows/Linux. The right-click menu is identical across platforms, with only 「查看日志」 (View logs — opens the web console in a browser) and 「退出代理」 (Quit proxy). Windows builds use the GUI subsystem (`-H=windowsgui`): no console window on launch, pure tray operation.
 
-### 2. 让 Claude Code 走代理
+### 2. Point Claude Code at the proxy
 
-另开一个终端。**ARK 必须用 `ANTHROPIC_AUTH_TOKEN`**（变成 `Authorization: Bearer xxx`，ARK 只认这个头；用 `ANTHROPIC_API_KEY` 会 401）：
+In a separate terminal. **ARK requires `ANTHROPIC_AUTH_TOKEN`** (it becomes `Authorization: Bearer xxx`, the only header ARK accepts; using `ANTHROPIC_API_KEY` gets you 401s):
 
-PowerShell：
+PowerShell:
 ```powershell
 $env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8080"
-$env:ANTHROPIC_AUTH_TOKEN = "你在火山方舟控制台获取的 API Key"
+$env:ANTHROPIC_AUTH_TOKEN = "the API Key from your ARK console"
 claude
 ```
 
-CMD：
+CMD:
 ```cmd
 set ANTHROPIC_BASE_URL=http://127.0.0.1:8080
-set ANTHROPIC_AUTH_TOKEN=你的API Key
+set ANTHROPIC_AUTH_TOKEN=your-api-key
 claude
 ```
 
-macOS / Linux（bash/zsh）：
+macOS / Linux (bash/zsh):
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
-export ANTHROPIC_AUTH_TOKEN="你在火山方舟控制台获取的 API Key"
+export ANTHROPIC_AUTH_TOKEN="the API Key from your ARK console"
 claude
 ```
 
-### 重新编译（改了 main.go 后）
+### Rebuilding (after changing main.go)
 
-用项目根的 `build.sh`，它会自动把版本号（git 短 hash + 构建时分）注入二进制，并按宿主平台输出对应产物到 `release/`：
+Use the root `build.sh` — it injects the version (git short hash + build HHMM) into the binary and outputs the artifact for the host platform into `release/`:
 
-- **darwin** -> `release/Proxy429.app`（`LSUIElement=true` 菜单栏应用，无 Dock 图标）+ ad-hoc codesign（首次启动需 Finder 右键「打开」过 Gatekeeper）
-- **windows** -> `release/proxy429.exe`（链接器 `-H=windowsgui`，GUI 子系统，启动不弹控制台窗口，纯托盘运行）
+- **darwin** -> `release/Proxy429.app` (`LSUIElement=true` menu-bar app, no Dock icon) + ad-hoc codesign (first launch needs Finder right-click "Open" to pass Gatekeeper)
+- **windows** -> `release/proxy429.exe` (linker `-H=windowsgui`, GUI subsystem, no console window, pure tray operation)
 - **linux** -> `release/proxy429`
 
-同时把 `使用说明.md`（若存在）复制进 `release/`。
+It also copies `docs/usage.md` (when present) into `release/`.
 
 ```bash
 bash build.sh
 ```
 
-> 不要直接 `go build`--那样版本号会是 `dev`，网页控制台/启动日志显示 `vdev`，没法区分跑的是哪个构建。`build.sh` 核心等价于：
+> Don't run bare `go build` — the version would be `dev`, the web console/startup log would show `vdev`, and you couldn't tell which build is running. `build.sh` is essentially equivalent to:
 >
 > ```bash
-> # macOS（托盘走 cgo，需 clang，macOS 自带）
+> # macOS (tray via cgo, needs clang — macOS ships it)
 > CGO_ENABLED=1 go build -buildvcs=false -ldflags "-X main.Version=$(git rev-parse --short HEAD)-$(date +%H%M)" -o release/proxy429 .
-> # Windows（托盘纯 Go，免 C 编译器；-H=windowsgui 走 GUI 子系统不弹控制台）
+> # Windows (tray is pure Go, no C compiler; -H=windowsgui selects the GUI subsystem, no console)
 > CGO_ENABLED=0 go build -buildvcs=false -ldflags "-X main.Version=$(git rev-parse --short HEAD)-$(date +%H%M) -H=windowsgui" -o release/proxy429.exe .
-> # Linux（托盘走 D-Bus，纯 Go）
+> # Linux (tray via D-Bus, pure Go)
 > CGO_ENABLED=0 go build -buildvcs=false -ldflags "-X main.Version=$(git rev-parse --short HEAD)-$(date +%H%M)" -o release/proxy429 .
 > ```
 >
-> **跨平台与 cgo**：托盘库 `fyne.io/systray` 只有 macOS 需 cgo（Cocoa/AppKit，macOS 自带 clang 满足），Windows 和 Linux 均为纯 Go（Linux 走 D-Bus），可免 C 工具链直接交叉编译。即 `GOOS=windows CGO_ENABLED=0 go build` 和 `GOOS=linux CGO_ENABLED=0 go build` 在 macOS 上可直接产出对应平台二进制。
+> **Cross-platform and cgo**: of the tray library `fyne.io/systray`, only macOS needs cgo (Cocoa/AppKit, satisfied by the macOS-bundled clang); Windows and Linux are pure Go (Linux via D-Bus) and cross-compile directly without a C toolchain. I.e. `GOOS=windows CGO_ENABLED=0 go build` and `GOOS=linux CGO_ENABLED=0 go build` produce those platforms' binaries right on macOS.
 
-## 密钥传递（ARK 专属）
+## Key passing (ARK-specific)
 
-代理原样透传 header。ARK 的 Anthropic 兼容端点**只认 `Authorization: Bearer` 头**（已通过 401 错误码 `AuthN_MissOrInvalidAuthorizationHeader` 验证），对应 Claude Code 的 `ANTHROPIC_AUTH_TOKEN` 环境变量。**不要用 `ANTHROPIC_API_KEY`**（它会变成 `x-api-key` 头，ARK 不认，会一直 401）。
+The proxy passes headers through verbatim. ARK's Anthropic-compatible endpoint **only accepts the `Authorization: Bearer` header** (verified via the 401 error code `AuthN_MissOrInvalidAuthorizationHeader`), which corresponds to Claude Code's `ANTHROPIC_AUTH_TOKEN` environment variable. **Do not use `ANTHROPIC_API_KEY`** (it becomes the `x-api-key` header, which ARK doesn't accept — perpetual 401s).
 
-## 排错：代理"没反应"/看不到重试日志
+## Troubleshooting: the proxy "does nothing" / no retry logs visible
 
-新版本加了**全量请求日志**，每个进来的请求打印 `[请求]`、每次上游返回打印 `[尝试 N] 上游响应状态码`、重试时打印 `→ 状态码 X，等待 Y 后重试`。所以一眼就能定位问题：
+Current versions have **full request logging**: every incoming request prints a `[请求]` line, every upstream response prints `[尝试 N] 上游响应状态码` (attempt N, upstream status), and retries print `→ 状态码 X，等待 Y 后重试` (status X, retrying after Y). So locating the problem is one glance:
 
-**启动代理后，在另一个终端跑 `claude`，然后看网页控制台「日志」标签（托盘右键「查看日志」，或浏览器开 `http://127.0.0.1:8080/__logs`）：**
+**Start the proxy, run `claude` in another terminal, then watch the web console's 「日志」 (Logs) tab (tray right-click 「查看日志」, or open `http://127.0.0.1:8080/__logs` in a browser):**
 
-- **看到 `[请求] #N POST /v1/messages model=xxx (body=N字节) 来自 ...`** → 请求已经进代理，代理在工作。接着看上游状态码日志：
-  - `[尝试 N] 上游响应状态码: 429` 接着 `→ 状态码 429，等待 ... 后重试` → 正常在重试，若最后仍 429 说明重试耗尽，把 `config.json` 的 `max_retries` / `total_budget_s` 调大。
-  - `[尝试 N] 上游响应状态码: 200` 接着 `→ 状态码 200 但响应体含错误` → 上游把限流错误塞在 200 响应体里了，代理也在重试（情况 B）。
-  - `[尝试 N] 上游响应状态码: 401` → 鉴权方式错了，改用 `ANTHROPIC_AUTH_TOKEN`（见下）。
-- **完全没有 `[请求]` 日志** → **Claude Code 根本没走代理**，它的 429 是直接从 ARK 拿的。这是最常见的"没反应"原因，按下面修。
+- **Seeing `[请求] #N POST /v1/messages model=xxx (body=N字节) 来自 ...`** → the request entered the proxy and the proxy is working. Read on to the upstream status lines:
+  - `[尝试 N] 上游响应状态码: 429` followed by `→ 状态码 429，等待 ... 后重试` → retrying normally; if it still ends in 429, retries were exhausted — raise `max_retries` / `total_budget_s` in `config.json`.
+  - `[尝试 N] 上游响应状态码: 200` followed by `→ 状态码 200 但响应体含错误` → the upstream stuffed the rate-limit error inside a 200 body, and the proxy is retrying that too (case B).
+  - `[尝试 N] 上游响应状态码: 401` → wrong auth method; switch to `ANTHROPIC_AUTH_TOKEN` (see below).
+- **No `[请求]` lines at all** → **Claude Code isn't going through the proxy at all**; its 429s come straight from ARK. This is the most common cause of "the proxy does nothing" — fix it per below.
 
-- **HEAD 探测请求**（Claude Code 启动时发 `HEAD /`、`HEAD /api/hello` 探测连通性）：代理直接返回 200，不建 flight、不转上游、不打 `[请求]` 日志。所以日志和流列表里看不到这类请求是正常的，不代表代理没工作。
+- **HEAD probes** (Claude Code sends `HEAD /`, `HEAD /api/hello` at startup to probe connectivity): the proxy answers 200 directly — no flight created, nothing forwarded upstream, no `[请求]` log. Not seeing these in the log or stream list is normal and doesn't mean the proxy isn't working.
 
-### Claude Code 没走代理的常见原因
+### Common reasons Claude Code misses the proxy
 
-1. **环境变量没设在跑 `claude` 的那个终端里**。必须在同一个 PowerShell 窗口里先 `$env:ANTHROPIC_BASE_URL=...` 再 `claude`，换个窗口就没了。
-2. **`~/.claude/settings.json` 里写了直连 ARK 的 `ANTHROPIC_BASE_URL`**（按 ARK 官方教程配的就常有）。这个文件里的值会被 shell 环境变量覆盖，但如果你没在 shell 里设，claude 就直连 ARK 了。要么删掉/改成代理地址，要么每次在 shell 里设环境变量覆盖它。
-3. **claude 登录了 Anthropic 账号**。`claude /logout` 退出，改用 `ANTHROPIC_AUTH_TOKEN` 环境变量鉴权。
-4. **验证办法**：跑 `claude` 之前在同一个终端执行 `echo $env:ANTHROPIC_BASE_URL`（PowerShell）或 `echo %ANTHROPIC_BASE_URL%`（CMD），必须输出 `http://127.0.0.1:8080` 才算设上了。
+1. **The environment variable wasn't set in the terminal that runs `claude`.** You must `$env:ANTHROPIC_BASE_URL=...` in the same PowerShell window before `claude`; a different window doesn't have it.
+2. **`~/.claude/settings.json` pins an `ANTHROPIC_BASE_URL` straight at ARK** (common if you followed ARK's official tutorial). Shell environment variables override this file, but if you didn't set them in the shell, claude goes straight to ARK. Either delete/change it to the proxy address, or set the env var in the shell every time.
+3. **claude is logged into an Anthropic account.** `claude /logout`, then authenticate via the `ANTHROPIC_AUTH_TOKEN` environment variable.
+4. **How to verify**: before running `claude`, run `echo $env:ANTHROPIC_BASE_URL` (PowerShell) or `echo %ANTHROPIC_BASE_URL%` (CMD) in the same terminal — it must print `http://127.0.0.1:8080`.
 
-### 鉴权别用错
+### Don't pick the wrong auth
 
-ARK 只认 `Authorization: Bearer` 头 → 必须用 `ANTHROPIC_AUTH_TOKEN`，**不要**用 `ANTHROPIC_API_KEY`（会变成 `x-api-key` 头，ARK 返回 401，错误码 `AuthN_MissOrInvalidAuthorizationHeader`）。代理是透传的，两种都行，但 ARK 只收 Bearer。
+ARK only accepts the `Authorization: Bearer` header → you must use `ANTHROPIC_AUTH_TOKEN`, **not** `ANTHROPIC_API_KEY` (which becomes the `x-api-key` header; ARK returns 401 with error code `AuthN_MissOrInvalidAuthorizationHeader`). The proxy passes both through fine — but ARK only takes Bearer.
 
-## 分类器请求自动关 thinking
+## Classifier requests: automatic thinking-off
 
-Claude Code 跑 Bash 前会用模型做一次"安全分类"。这个分类请求如果带着 thinking，模型要想很久（可能 30s+），撞上 Claude Code 的超时就会报 `glm-5.2 is temporarily unavailable, auto mode cannot determine the safety of Bash`，Bash 全被挡住。
+Before running Bash, Claude Code does a "safety classification" with the model. If that classification request carries thinking, the model ponders for a long time (possibly 30s+), hits Claude Code's timeout, and reports `glm-5.2 is temporarily unavailable, auto mode cannot determine the safety of Bash` — every Bash call blocked.
 
-代理会**认出这个分类器请求并强制关掉它的 thinking**，让分类 2-3 秒返回：
+The proxy **recognizes this classifier request and force-disables its thinking**, so classification returns in 2-3 seconds:
 
-- **识别**：只按 system 提示词前缀（默认 `You are a security monitor`）严格匹配，正常对话不会误伤。先用 `bytes.Contains` 预筛，正常请求不做 JSON 解析，开销极低。
-- **改写**：命中后设 `thinking:{type:"disabled"}` + `reasoning_effort:"none"` + 删 `reasoning`（三字段双保险，覆盖 Anthropic / OpenAI 两种格式），并把 `max_tokens` 压到 `classifier_max_tokens`。
-- **保留 key 顺序**：改写用 `json.Decoder` 流式定位目标字段在原 body 的字节位置，再做文本替换--只动 `thinking`/`reasoning_effort`/`reasoning`/`max_tokens` 这几个字段，其余字节（含 key 顺序、空格、格式）原样保留，不整体 `Unmarshal`+`Marshal`（那会让 Go 按字典序重排所有 key，可能影响上游缓存命中）。原 body 没有的字段（如 `reasoning_effort`）追加到闭合 `}` 之前。
-- **Content-Length**：改写后 body 变长，代理会按新 body 重算长度（`copyHeaders` 跳过原 Content-Length），不会截断。
+- **Recognition**: strict match on the system-prompt prefix only (default `You are a security monitor`) — normal conversation is never collateral. A `bytes.Contains` pre-screen means normal requests skip JSON parsing entirely; overhead is negligible.
+- **Rewrite**: on a hit, sets `thinking:{type:"disabled"}` + `reasoning_effort:"none"` + deletes `reasoning` (three fields as belt-and-braces, covering both Anthropic and OpenAI formats), and clamps `max_tokens` to `classifier_max_tokens`.
+- **Key order preserved**: the rewrite uses `json.Decoder` streaming to locate the target fields' byte positions in the original body, then does textual replacement — only `thinking`/`reasoning_effort`/`reasoning`/`max_tokens` are touched; every other byte (key order, spacing, formatting) is preserved as-is, with no wholesale `Unmarshal`+`Marshal` (that would make Go reorder all keys alphabetically and could hurt upstream cache hits). Fields absent from the original body (like `reasoning_effort`) are appended before the closing `}`.
+- **Content-Length**: the rewritten body is longer, and the proxy recomputes the length from the new body (`copyHeaders` skips the original Content-Length) — no truncation.
 
-### 怎么确认生效
+### Confirming it works
 
-1. 跑 `claude` 触发一次 Bash 操作，看网页控制台「日志」标签有没有 `[改写] 命中分类器请求` 日志。有 → 分类器走代理了且已改写。
-2. 如果没看到 `[改写]` 但 Bash 还是慢/失败：把 `config.json` 的 `log_request_detail` 改成 `true`，再触发一次，看 `[详情]` 日志里那个非流式请求的 `sys=` 前缀到底是什么。分类器前缀已硬编码为 `You are a security monitor`（main.go 常量 `classifierSystemPrefix`），若 Claude Code 升级后换了前缀，需改此常量重编译。
-3. 如果 ARK 的 glm-5.2 不认 `thinking:{type:"disabled"}`（改写了但分类还是慢），目前没有完美办法——三字段已经一起塞了，多余的会被上游忽略。可以先观察 `[改写]` 之后 Bash 是否还报 unavailable。
+1. Run `claude`, trigger a Bash operation, and check the web console's 「日志」 tab for a `[改写] 命中分类器请求` (rewrite: classifier request hit) line. Present → the classifier went through the proxy and got rewritten.
+2. If there's no `[改写]` line but Bash is still slow/failing: set `log_request_detail` to `true` in `config.json`, trigger again, and look at what the non-streaming request's `sys=` prefix actually is in the `[详情]` (detail) log. The classifier prefix is hardcoded as `You are a security monitor` (the `classifierSystemPrefix` constant in main.go); if a Claude Code upgrade changes the prefix, edit this constant and recompile.
+3. If ARK's glm-5.2 doesn't honor `thinking:{type:"disabled"}` (rewritten but classification still slow), there's currently no perfect fix — all three fields are already sent together and extras are ignored by the upstream. Start by watching whether Bash still reports unavailable after `[改写]`.
 
-> 注意：这只治"分类器因 thinking 太慢撞超时"。如果分类器返回的是 429/503（限流），那走的是上面的重试逻辑，两套各管各的。
+> Note: this only cures "classifier too slow because of thinking, hitting the timeout". If the classifier returns 429/503 (rate limit), that's the retry logic above — the two mechanisms are independent.
 
-ARK 的 Base URL 带 `/api/plan` 前缀，但因为 Claude Code 自带 `/v1/messages` 路径，代理用 `Upstream + r.URL.Path` 拼接正好得到 `…/api/plan/v1/messages`，是 ARK 的正确端点（已实测）。所以**只要上游期望标准 Anthropic 路径 `/v1/messages` 接在 Base URL 后面，当前逻辑就无需改动**。
+ARK's Base URL carries the `/api/plan` prefix, but since Claude Code brings its own `/v1/messages` path, the proxy's `Upstream + r.URL.Path` join yields exactly `…/api/plan/v1/messages` — ARK's correct endpoint (field-tested). So **as long as the upstream expects the standard Anthropic path `/v1/messages` appended to its Base URL, the current join logic needs no change**.
 
-只有当上游期望的路径不是简单的「Base URL + `/v1/...`」时（比如它要 `/anthropic/messages` 而不是 `/anthropic/v1/messages`），才需要改 `main.go` 里的拼接逻辑。
+Only when an upstream expects a path that isn't simply "Base URL + `/v1/...`" (say `/anthropic/messages` instead of `/anthropic/v1/messages`) does the join logic in `main.go` need editing.
 
-## 路由功能
+## Routing
 
-按请求的 model 名把请求路由到不同上游（换 URL + API key + model 名），支持多组、`*` 通配。**未配置 `routes`（或空数组）时完全不路由，所有请求走默认 `upstream`，行为和没这功能一样。**
+Routes requests to different upstreams by request model name (swapping URL + API key + model name), with multiple rules and `*` wildcards. **When `routes` is unset (or an empty array), nothing is routed at all — every request goes to the default `upstream`, behaving exactly as if the feature didn't exist.**
 
-配置示例（把 `claude-opus*` 开头的请求改走 DeepSeek，model 名换成 `deepseek-V4-pro`）：
+Config example (reroute `claude-opus*` requests to DeepSeek, renaming the model to `deepseek-V4-pro`):
 
 ```json
 "routes": [
@@ -228,26 +228,27 @@ ARK 的 Base URL 带 `/api/plan` 前缀，但因为 Claude Code 自带 `/v1/mess
 ]
 ```
 
-- **pattern**：模型名通配符，仅支持 `*`（匹配任意长度任意字符，含空）。`claude-opus*` 命中 `claude-opus-4-8`/`claude-opus`；`*opus` 匹配后缀；`claude-*` 匹配前缀；`a*b*c` 要求中间出现 b。无 `*` 则精确匹配。多条规则按数组顺序匹配，**第一个命中的生效**，没有"更具体优先"的排序--宽通配会截胡窄通配：`*opus*` 写在 `*opus-4*` 前面时，`claude-opus-4-8` 会先命中 `*opus*`，`*opus-4*` 永不触发；要让更具体的 pattern 生效，把它写在前面。
-- **url**：目标上游 Base URL（覆盖默认 `upstream`）。Claude Code 的 `/v1/messages` 会拼在后面，拼接规则和默认 upstream 一致。
-- **api**：目标 API key，设为 `Authorization: Bearer` 头。命中后会**删掉客户端原带的 `Authorization` 与 `x-api-key`**（避免把 ARK 的 token 透传到 DeepSeek 之类），再设新 key。留空则透传客户端原 token。
-- **model**：替换成的目标模型名（改写请求体 `"model"` 字段的值，长度变化自动重算 Content-Length）。留空则不改 model。
-- **text_only**：布尔，标记目标模型**仅支持纯文本**。设为 `true` 后，若该请求带图片，会自动改走 `multimodal_fallback` 兜底（详见「图片路由」一节）。不设或 `false` 则不兜底。
-- **no_search**：布尔，标记目标上游**不支持搜索**。设为 `true` 后，若该请求带搜索工具，会自动改走 `search_fallback` 兜底（详见「搜索路由」一节）。不设或 `false` 则不兜底。
-- **enhance_search**（可选对象，省略即不启用）：配成 `{}` 或填子字段即启用**增强搜索**——主力支持搜索（`no_search` 不为 `true`）时，带搜索工具的请求不调主力，改用本 route 的 `url`/`api`/`model` 走 kimi 摘要模式（详见「增强搜索」一节）。子字段：`summary_thinking`（默认 `false`）第2步摘要是否开 thinking；`summary_level`（默认 `low`）摘要详细程度 `low`/`mid`/`high`/`max`，档位与 `search_fallback.summary_level` 一致。
-- **url_response_api**（已实现，未实测，故未写进使用文档）：字符串，原生 Responses API 上游 Base URL。填了它之后 Responses 监听口命中本路由的请求不再翻译成 Anthropic，Responses 原文直接透传到该上游。待实测验证后再补文档。
-- **thinking**：字符串，声明**目标模型**的思考形态（省略或 `"auto"` = 按客户端发来的 model 名查内置映射表）。**仅 Responses 口翻译流生效**——Anthropic 口客户端直接发 Anthropic 格式，代理不改写其中的思考字段；为什么需要它：翻译时决定发 `adaptive+effort` 还是 `enabled+budget_tokens` 用的是客户端 model 名（路由改写 model 发生在翻译之后），别名叫 `claude-fable-5` 但实际路由到 Kimi 时会被误判成 adaptive 发给目标上游。配 `"budget"` 强制经典 `enabled+budget_tokens`（DeepSeek/Kimi 等）；配 `"adaptive"` 强制 `adaptive+effort` 档位（客户端名不在映射表、目标实为 adaptive 模型时）。填其他值配置加载直接报错。
-命中时打 `[路由]` 日志，如 `[路由] #1 claude-opus-4-8 -> https://api.deepseek.com (model claude-opus-4-8 -> deepseek-V4-pro)`；`[请求]` 行仍显示路由前的原始 model 名。路由命中后的重试仍走同一目标上游（URL/API/model 不变）。网页控制台「配置」标签保存重载会重新读 `routes`，热生效。
+- **pattern**: model-name wildcard; only `*` is supported (matches any length of any characters, including empty). `claude-opus*` hits `claude-opus-4-8`/`claude-opus`; `*opus` matches a suffix; `claude-*` matches a prefix; `a*b*c` requires b in the middle. No `*` means exact match. Rules match in array order, **first hit wins** — there is no "more specific first" sorting, and a wide wildcard intercepts a narrow one: with `*opus*` written before `*opus-4*`, `claude-opus-4-8` hits `*opus*` first and `*opus-4*` never fires; put more specific patterns earlier.
+- **url**: target upstream Base URL (overrides the default `upstream`). Claude Code's `/v1/messages` is appended, with the same join rule as the default upstream.
+- **api**: target API key, set as the `Authorization: Bearer` header. On a hit, the client's original `Authorization` and `x-api-key` are **deleted** (avoiding leaking an ARK token to DeepSeek etc.) before the new key is set. Empty = pass through the client's original token.
+- **model**: the target model name to substitute (rewrites the request body's `"model"` field value; Content-Length is recomputed for the length change). Empty = don't change the model.
+- **text_only**: boolean marking the target model as **text-only**. When `true`, a request carrying an image automatically falls back to `multimodal_fallback` (see "Image routing"). Unset or `false` = no fallback.
+- **no_search**: boolean marking the target upstream as **not supporting search**. When `true`, a request carrying a search tool automatically falls back to `search_fallback` (see "Search routing"). Unset or `false` = no fallback.
+- **enhance_search** (optional object; omitted = disabled): setting `{}` or any sub-field enables **enhanced search** — when the main upstream supports search (`no_search` not `true`), requests carrying a search tool don't call the main model; instead the route's own `url`/`api`/`model` runs the kimi summary mode (see "Enhanced search"). Sub-fields: `summary_thinking` (default `false`) — whether step 2's summary thinks; `summary_level` (default `low`) — summary verbosity `low`/`mid`/`high`/`max`, same levels as `search_fallback.summary_level`.
+- **url_response_api** (implemented, not yet field-tested — deliberately left out of the usage docs): string, the Base URL of a native Responses API upstream. Once set, Responses-listener requests hitting this route skip translation entirely, and the Responses original goes straight to that upstream. Documentation will be completed after field verification.
+- **thinking**: string declaring the **target model's** thinking shape (omitted or `"auto"` = look up the built-in mapping table by the client-sent model name). **Only effective for Responses-port translated streams** — Anthropic-port clients send Anthropic format directly and the proxy never rewrites their thinking fields. Why it exists: translation decides `adaptive+effort` vs `enabled+budget_tokens` using the client model name (route model rewriting happens after translation), so an alias named `claude-fable-5` that actually routes to Kimi would be misjudged as adaptive and sent to the target upstream. Set `"budget"` to force classic `enabled+budget_tokens` (DeepSeek/Kimi etc.); set `"adaptive"` to force `adaptive+effort` levels (when the client name isn't in the mapping table but the target really is an adaptive model). Any other value fails config load with an error.
 
-> 路由只改 URL/API/model 三项，不改写请求体里的 thinking、messages 等其他字段（`thinking` 路由参数只在 Responses 翻译构造新请求体时决定思考形态，见上）；分类器关 thinking 的逻辑在路由之前执行，两者互不影响。
+A hit logs a `[路由]` line, e.g. `[路由] #1 claude-opus-4-8 -> https://api.deepseek.com (model claude-opus-4-8 -> deepseek-V4-pro)`; the `[请求]` line still shows the pre-route original model name. Retries after a route hit keep going to the same target upstream (URL/API/model unchanged). The web console's 「配置」 (Config) tab re-reads `routes` on save+reload — hot-effective.
 
-**响应 model 回改**：路由改写请求 model 后，上游返回的 SSE 响应里 `"model"` 字段值（可能是上游实际 model ID，如 `glm-5-2-260617`，与请求里写的 `glm-5.2` 不一定一致）会被**字段定位替换回原始 model 名**，不依赖字符串匹配。这样 Claude Code 看到的始终是它发出的原始 model，不会因保存了上游 model 名而在重启时报 `Session model ... could not be restored`。改写时打 `[改写] #N 响应流 model 回改 <上游实际model> -> <原始model>` 日志，显示上游真正返回的 model 名。该行为对 model 路由、分类器路由、fast 路由均生效。
+> Routing only changes the three items URL/API/model; it doesn't rewrite other request-body fields like thinking or messages (the `thinking` route parameter only decides the thinking shape when the Responses translation constructs a new request body — see above); the classifier's thinking-off logic runs before routing, and the two don't interfere.
 
-### 分类器路由（classifier_route）
+**Response model write-back**: after a route rewrites the request model, the `"model"` field value in the upstream's SSE response (which may be the upstream's actual model ID, e.g. `glm-5-2-260617`, not necessarily matching the `glm-5.2` in the request) is **located by field position and replaced with the original model name** — no string matching involved. This way Claude Code always sees the model it sent, and never fails with `Session model ... could not be restored` on restart because it saved an upstream model name. The rewrite logs `[改写] #N 响应流 model 回改 <upstream actual model> -> <original model>`, showing the model name the upstream really returned. This applies to model routes, classifier routes, and fast routes alike.
 
-上面按 model 名路由是给正常对话请求分流用的。还有一种**只针对分类器请求**的路由模式：不管请求原本是什么 model，只要它命中分类器（即 Claude Code 工具调用前的安全判断请求，system 前缀匹配），就统一路由到指定上游。适合把这类轻量安全判断请求甩到便宜模型，省主模型额度。
+### Classifier route (classifier_route)
 
-配置（与 `routes` 平级，是一个对象，不是数组）：
+Model-name routing above is for splitting normal conversation traffic. There's also a routing mode **only for classifier requests**: regardless of the request's original model, as long as it matches the classifier (Claude Code's safety-check request before tool calls, matched by system-prefix), it's routed to the designated upstream. Good for dumping these lightweight safety checks onto a cheap model to save main-model quota.
+
+Config (sibling of `routes`; an object, not an array):
 
 ```json
 "classifier_route": {
@@ -257,38 +258,38 @@ ARK 的 Base URL 带 `/api/plan` 前缀，但因为 Claude Code 自带 `/v1/mess
 }
 ```
 
-- **url / api / model**：含义同 `routes` 里的同名字段。
-- **优先级**：命中分类器且配了 `classifier_route` 时，**无视原 model**，走分类器路由，不再匹配 `routes`。若命中分类器但**没配** `classifier_route`，则回退到按 model 走 `routes`（兼容旧行为）。
-- **独立性**：与 `classifier_thinking_disabled` 互不依赖--即使没开「关 thinking」，也能单独用分类器路由；反过来开了关 thinking 也能不配分类器路由。
-- 命中时打 `[路由] #N 分类器 <原model> -> <url> (model <原> -> <目标>)`，带「分类器」标识以区别于普通 model 路由。同样走网页控制台热重载。
+- **url / api / model**: same meanings as the like-named fields in `routes`.
+- **Priority**: on a classifier hit with `classifier_route` configured, the original model is **ignored** — the classifier route is taken and `routes` is not consulted. On a classifier hit **without** `classifier_route`, it falls back to model-based `routes` matching (compatible with old behavior).
+- **Independence**: mutually independent of `classifier_thinking_disabled` — the classifier route works without thinking-off enabled, and vice versa.
+- A hit logs `[路由] #N 分类器 <original model> -> <url> (model <original> -> <target>)`, tagged 分类器 (classifier) to distinguish it from ordinary model routes. Also hot-reloaded via the web console.
 
-> 分类器路由的判定（system 前缀匹配）与 `[改写]` 关 thinking 用的是同一套识别逻辑，但分类器路由只判定、不改写 body，两者可独立开关。
+> The classifier route's judgment (system-prefix match) uses the same recognition logic as the `[改写]` thinking-off rewrite, but the classifier route only decides and never rewrites the body — the two switch independently.
 
-### fast 路由（fast_route）
+### Fast route (fast_route)
 
-> **前置条件**：Claude Code 的 `/fast` 默认仅支持 Anthropic 官方 API。通过第三方代理使用时，需要先设置 `penguinModeOrgEnabled: true` 才能开启。项目里已提供 `enableFast.txt` 脚本，复制其内容到终端执行即可（或手动在 `~/.claude.json` 里加上 `"penguinModeOrgEnabled": true`）。
+> **Prerequisite**: Claude Code's `/fast` only supports the official Anthropic API by default. When using it through a third-party proxy, you must first set `penguinModeOrgEnabled: true` to enable it — manually add `"penguinModeOrgEnabled": true` in `~/.claude.json`.
 
-Claude Code `/fast` 模式在请求体里加 `"speed":"fast"` 字段、请求头加 `Anthropic-Beta: fast-mode-2026-02-01`。fast 路由检测到这个字段时，把非分类器请求统一甩到指定上游。
+Claude Code's `/fast` mode adds a `"speed":"fast"` field to the request body and an `Anthropic-Beta: fast-mode-2026-02-01` request header. When the fast route detects this field, non-classifier requests are uniformly sent to the designated upstream.
 
 ```json
 "fast_route": {
   "url": "https://api.deepseek.com",
-  "api": "sk-deepseek-你的key",
+  "api": "sk-deepseek-your-key",
   "model": "deepseek-v4-pro"
 }
 ```
 
-- **触发条件**：请求体含 `"speed":"fast"` 且不是分类器请求。
-- **改写行为**：命中后 **移除** `"speed":"fast"` 字段（上游不支持）、**删除** `Anthropic-Beta` 请求头（上游不认识），并在响应里**注入假的 fast 限流 headers**（`anthropic-fast-output-tokens-remaining: 999999` 等），让 Claude Code 认为 fast 模式可用。
-- **优先级**：分类器路由 > **fast 路由** > model 路由。分类器请求即使带 `"speed":"fast"` 也不走 fast 路由。
-- **未配置**：不做任何处理，`"speed":"fast"` 和 `Anthropic-Beta` 头原样透传给上游。
-- 命中时打 `[路由] #N fast <原model> -> <url> (model <原> -> <目标>)`，带「fast」标识。同样走网页控制台热重载。
+- **Trigger**: the request body contains `"speed":"fast"` and it's not a classifier request.
+- **Rewrite behavior**: on a hit, **remove** the `"speed":"fast"` field (the upstream doesn't support it), **delete** the `Anthropic-Beta` request header (the upstream doesn't know it), and **inject fake fast rate-limit headers** into the response (`anthropic-fast-output-tokens-remaining: 999999` etc.) so Claude Code believes fast mode is available.
+- **Priority**: classifier route > **fast route** > model route. A classifier request never takes the fast route, even with `"speed":"fast"`.
+- **Unconfigured**: nothing happens — `"speed":"fast"` and the `Anthropic-Beta` header pass through to the upstream as-is.
+- A hit logs `[路由] #N fast <original model> -> <url> (model <original> -> <target>)`, tagged fast. Also hot-reloaded via the web console.
 
-### 图片路由（multimodal_fallback）
+### Image routing (multimodal_fallback)
 
-某些上游模型只支持纯文本（如 DeepSeek-V4），收到带图片的请求会报错。图片路由解决这个问题：给纯文本模型的目标规则打上 `text_only: true` 标记，再配一个支持多模态的兜底上游；代理检测到请求带图片、且命中的是纯文本模型时，自动改走兜底上游。
+Some upstream models are text-only (e.g. DeepSeek-V4) and error out on image-bearing requests. Image routing solves this: mark the text-only target rule with `text_only: true`, configure a multimodal-capable fallback upstream, and when the proxy detects a request carrying an image that hits a text-only model, it automatically reroutes to the fallback upstream.
 
-配置（与 `routes` 平级，是一个对象）：
+Config (sibling of `routes`; an object):
 
 ```json
 "routes": [
@@ -308,20 +309,20 @@ Claude Code `/fast` 模式在请求体里加 `"speed":"fast"` 字段、请求头
 }
 ```
 
-- **text_only**（`routes` 条目内）：标记该条目标模型仅支持纯文本。
-- **url / api / model**（`multimodal_fallback` 内）：兜底多模态上游，含义同 `routes` 里的同名字段。
-- **触发条件**：请求体含 Anthropic 图片内容块（`{"type":"image",...}`） **且** 命中的 `routes` 规则 `text_only: true` **且** 配了 `multimodal_fallback` **且** 请求不带搜索工具（带搜索时走 `search_fallback`）。四者同时满足才兜底。
-- **改写行为**：命中兜底后，URL/API 改用 `multimodal_fallback` 的值，请求体 `"model"` 改写成兜底 model 名。响应里的 `"model"` 仍会**回改成原始 model 名**（和普通路由一样，见上文「响应 model 回改」），Claude Code 看到的还是它发出的原始 model。
-- **不兜底的情况**：请求无图片；命中的规则 `text_only` 为 `false`/未设（目标模型自己支持多模态）；配了 `text_only: true` 但没配 `multimodal_fallback`（降级透传给纯文本模型，由上游处理）；请求带搜索工具（改走 `search_fallback`）。分类器路由、fast 路由不参与图片兜底。
-- 命中时打 `[路由] #N 图片兜底 <原model> -> <兜底url> (model <原> -> <兜底model>)`，带「图片兜底」标识。同样走网页控制台热重载。
+- **text_only** (inside a `routes` entry): marks that entry's target model as text-only.
+- **url / api / model** (inside `multimodal_fallback`): the fallback multimodal upstream; same meanings as the like-named fields in `routes`.
+- **Trigger**: the request body contains an Anthropic image content block (`{"type":"image",...}`) **and** the hit `routes` rule has `text_only: true` **and** `multimodal_fallback` is configured **and** the request carries no search tool (search-bearing goes to `search_fallback`). All four at once.
+- **Rewrite behavior**: on fallback, URL/API switch to `multimodal_fallback`'s values and the request body `"model"` is rewritten to the fallback model name. The response's `"model"` is still **written back to the original model name** (same as ordinary routing — see "Response model write-back" above), so Claude Code still sees the model it sent.
+- **No-fallback cases**: no image in the request; the hit rule has `text_only` false/unset (the target model handles multimodal itself); `text_only: true` set but no `multimodal_fallback` configured (degrades to passing through to the text-only model for the upstream to deal with); the request carries a search tool (goes to `search_fallback` instead). Classifier and fast routes don't participate in image fallback.
+- A hit logs `[路由] #N 图片兜底 <original model> -> <fallback url> (model <original> -> <fallback model>)`, tagged 图片兜底 (image fallback). Also hot-reloaded via the web console.
 
-### 搜索路由（search_fallback）
+### Search routing (search_fallback)
 
-有些上游不支持搜索（如火山），有些支持（如 DeepSeek、Kimi）。给不支持搜索的目标规则打上 `no_search: true` 标记，再配一个支持搜索的兜底上游；代理检测到请求带搜索工具、且命中的是不支持搜索的上游时，自动改走兜底上游。
+Some upstreams don't support search (e.g. Volcano), others do (e.g. DeepSeek, Kimi). Mark searchless target rules with `no_search: true` and configure a search-capable fallback upstream; when the proxy detects a request carrying a search tool that hits a searchless upstream, it automatically reroutes to the fallback.
 
-"带搜索工具"特指请求 `tools` 里含 **Anthropic server-side** `web_search_*` 工具（如 `web_search_20250305`，由上游执行搜索）。**刻意不识别客户端侧 `WebSearch` 工具**——Claude Code 每个请求都带它的定义，无法据此区分是不是真要搜索，会误判所有对话为搜索请求。所以这套兜底主要服务于 Claude Desktop 等走服务端搜索的客户端；Claude Code CLI 的搜索由它自己执行，不经过这个兜底。
+"Carrying a search tool" specifically means the request `tools` contains an **Anthropic server-side** `web_search_*` tool (e.g. `web_search_20250305`, executed by the upstream). **The client-side `WebSearch` tool is deliberately not recognized** — Claude Code includes its definition in every request, so it can't distinguish "really searching" from "just defined" and would misjudge every conversation as a search request. So this fallback mainly serves clients that use server-side search, like Claude Desktop; Claude Code CLI performs searches itself and doesn't pass through this fallback.
 
-配置（与 `routes` 平级，是一个对象）：
+Config (sibling of `routes`; an object):
 
 ```json
 "routes": [
@@ -341,28 +342,28 @@ Claude Code `/fast` 模式在请求体里加 `"speed":"fast"` 字段、请求头
 }
 ```
 
-- **no_search**（`routes` 条目内）：标记该条目标上游不支持搜索。
-- **url / api / model**（`search_fallback` 内）：兜底支持搜索的上游，含义同 `routes` 里的同名字段。
-- **summary_mode**（`search_fallback` 内，可选，默认 `false`）：`true` 启用搜索摘要模式（见下节）；`false` 走老行为（整请求转走兜底上游）。
-- **summary_thinking**（`search_fallback` 内，可选，默认 `false`）：`summary_mode` 下第2步摘要是否开 thinking。
-- **summary_level**（`search_fallback` 内，可选，默认 `low`）：`summary_mode` 下摘要详细程度。`low`=简短摘要（`max_tokens=2048`）；`mid`=中等详细，含关键事实与数据点（`4096`）；`high`=详尽，含全部数据点/引文/上下文（`8192`）；`max`=在 `high` 基础上，遇到步骤/方法/代码/公式必须完完整整逐字复述（`16384`，`full` 为同义别名）。
-- **触发条件**：请求带搜索工具 **且** 命中的 `routes` 规则 `no_search: true` **且** 配了 `search_fallback`。
-- **改写行为**：同图片兜底，URL/API/model 改写，响应 model 回改成原始 model 名。
-- 命中时打 `[路由] #N 搜索兜底 <原model> -> <兜底url> (model <原> -> <兜底model>)`，带「搜索兜底」标识。同样走网页控制台热重载。
+- **no_search** (inside a `routes` entry): marks that entry's target upstream as not supporting search.
+- **url / api / model** (inside `search_fallback`): the fallback search-capable upstream; same meanings as the like-named fields in `routes`.
+- **summary_mode** (inside `search_fallback`, optional, default `false`): `true` enables search summary mode (next section); `false` keeps the old behavior (the whole request is transferred to the fallback upstream).
+- **summary_thinking** (inside `search_fallback`, optional, default `false`): whether step 2's summary thinks under `summary_mode`.
+- **summary_level** (inside `search_fallback`, optional, default `low`): summary verbosity under `summary_mode`. `low` = short summary (`max_tokens=2048`); `mid` = medium detail with key facts and data points (`4096`); `high` = thorough, with all data points/citations/context (`8192`); `max` = on top of `high`, steps/methods/code/formulas must be restated completely and verbatim (`16384`; `full` is a synonym alias).
+- **Trigger**: the request carries a search tool **and** the hit `routes` rule has `no_search: true` **and** `search_fallback` is configured.
+- **Rewrite behavior**: same as image fallback — URL/API/model rewritten, response model written back to the original name.
+- A hit logs `[路由] #N 搜索兜底 <original model> -> <fallback url> (model <original> -> <fallback model>)`, tagged 搜索兜底 (search fallback). Also hot-reloaded via the web console.
 
-#### 搜索摘要模式（summary_mode）
+#### Search summary mode (summary_mode)
 
-默认（`summary_mode` 不设或 `false`）：命中 `no_search` 上游时，**整请求转走** `search_fallback` 上游（它自己支持搜索，直接出结果）。回答用的是兜底模型而非主力模型。
+Default (`summary_mode` unset or `false`): on hitting a `no_search` upstream, **the whole request transfers** to the `search_fallback` upstream (which supports search itself and answers directly). The answer comes from the fallback model, not the main one.
 
-`summary_mode: true` 走另一种路径：**主力不换**，用搜索上游当"搜索+摘要服务员"，代理分两步自建 Kimi 格式响应直接返回客户端，不调用主 ark：
+`summary_mode: true` takes a different path: **the main model stays**, the search upstream serves as a "search + summarize attendant", and the proxy builds a Kimi-format response in two steps returned straight to the client — the main ARK is never called:
 
-1. **step1 搜索**：把原始请求（`web_search` 工具，model 改成 `search_fallback.model`）发给搜索上游，非流式拿回 `server_tool_use` + `web_search_tool_result`（标题/URL）。
-2. **step2 摘要**：把 step1 结果作为上下文回传**同一搜索上游**，流式生成每条结果的明文摘要。详细程度由 `summary_level` 控制（`low`/`mid`/`high`/`max`，默认 `low`），`max_tokens` 随档位递增（2048/4096/8192/16384）；`max` 档遇到步骤/方法/代码/公式会完整逐字复述。可选 `summary_thinking: true` 开 thinking 提升质量。
-3. **组装返回**：按 Kimi 格式拼 `server_tool_use` -> `web_search_tool_result` -> 摘要文本的 SSE 流返回客户端。
+1. **Step 1, search**: send the original request (the `web_search` tool, model swapped to `search_fallback.model`) to the search upstream, non-streaming, getting back `server_tool_use` + `web_search_tool_result` (titles/URLs).
+2. **Step 2, summarize**: feed step 1's results back to **the same search upstream** as context, streaming a plaintext summary of each result. Verbosity is controlled by `summary_level` (`low`/`mid`/`high`/`max`, default `low`), with `max_tokens` growing per level (2048/4096/8192/16384); the `max` level restates steps/methods/code/formulas completely and verbatim. Optional `summary_thinking: true` turns thinking on for better quality.
+3. **Assemble and return**: build an SSE stream of `server_tool_use` -> `web_search_tool_result` -> summary text in Kimi format and return it to the client.
 
-这样 Claude Desktop 的下拉搜索列表（读 `web_search_tool_result` 的标题/URL）和模型回答（读摘要文本）都能正常工作，且摘要比上游自带的更详细。step1/step2 任一失败时自动降级为整请求转走 `search_fallback`（老行为），不会报错中断。
+This keeps Claude Desktop's dropdown search list (which reads the `web_search_tool_result` titles/URLs) and the model's answer (which reads the summary text) both working, with summaries more detailed than the upstream's built-in ones. If step1/step2 fails, it automatically degrades to transferring the whole request to `search_fallback` (the old behavior) — no error, no interruption.
 
-适用：搜索上游支持 `web_search` 但自带摘要不够详细，或想让摘要格式可控。注意搜索上游必须能返回标准 `server_tool_use` + `web_search_tool_result` 块（Kimi 可以；DeepSeek 视接口而定）。
+Applies when: the search upstream supports `web_search` but its built-in summaries aren't detailed enough, or you want the summary format under your control. Note the search upstream must return standard `server_tool_use` + `web_search_tool_result` blocks (Kimi can; DeepSeek depends on the API).
 
 ```json
 "search_fallback": {
@@ -375,18 +376,18 @@ Claude Code `/fast` 模式在请求体里加 `"speed":"fast"` 字段、请求头
 }
 ```
 
-- 命中时打 `[路由] #N 搜索摘要模式 <原model> -> <兜底url>` 与 `[搜索摘要] #N ...` 日志。
+- A hit logs `[路由] #N 搜索摘要模式 <original model> -> <fallback url>` and `[搜索摘要] #N ...` lines.
 
-### 增强搜索（routes 内 enhance_search）
+### Enhanced search (enhance_search inside routes)
 
-上面 `search_fallback.summary_mode` 处理的是「主力不支持搜索」的兜底场景。**增强搜索**处理反过来：主力本身**支持搜索**，但你不想用主力自带搜索，想让代理用 kimi 摘要模式（step1 搜索 + step2 摘要）来回答。
+`search_fallback.summary_mode` above handles the fallback scenario "the main upstream doesn't support search". **Enhanced search** handles the reverse: the main upstream **does** support search, but you don't want its built-in search — you want the proxy to answer with the kimi summary mode (step1 search + step2 summary).
 
-在 `routes` 条目内加 `enhance_search` 对象（省略即不启用）：
+Add an `enhance_search` object inside a `routes` entry (omitted = disabled):
 
-- **触发条件**：请求带搜索工具 **且** 命中的 `routes` 规则 `no_search` 不为 `true`（即支持搜索）**且** 该规则配了 `enhance_search`。
-- **行为**：不调主力，用**该 route 自己的 `url`/`api`/`model`** 走 kimi 摘要模式（同上 step1+step2+自构响应），摘要参数用该 route 的 `enhance_search.summary_level`/`enhance_search.summary_thinking`。
-- **与 `search_fallback.summary_mode` 区别**：后者是 `no_search:true` 时的兜底，搜索上游用 `search_fallback` 配的；前者是 `no_search:false` 的主力主动改走摘要，搜索上游用 `routes` 条目自己配的。两者互斥：`no_search:true` 走 `search_fallback`，`no_search:false` + `enhance_search` 走增强搜索。
-- **降级**：step1/step2 失败时降级为整请求转走该 route 上游（主力正常透传）。
+- **Trigger**: the request carries a search tool **and** the hit `routes` rule doesn't have `no_search` as `true` (i.e. it supports search) **and** that rule has `enhance_search` configured.
+- **Behavior**: the main model isn't called; **the route's own `url`/`api`/`model`** runs the kimi summary mode (same step1+step2+self-built response as above), with summary parameters from that route's `enhance_search.summary_level`/`enhance_search.summary_thinking`.
+- **Versus `search_fallback.summary_mode`**: the latter is the fallback when `no_search:true`, using the upstream configured in `search_fallback`; the former is a search-capable main actively switching to summaries, using the upstream configured on the `routes` entry itself. Mutually exclusive: `no_search:true` goes `search_fallback`; `no_search:false` + `enhance_search` goes enhanced search.
+- **Degradation**: on step1/step2 failure, degrades to transferring the whole request to that route's upstream (the main passes through normally).
 
 ```json
 "routes": [
@@ -403,155 +404,156 @@ Claude Code `/fast` 模式在请求体里加 `"speed":"fast"` 字段、请求头
 ]
 ```
 
-- 命中时打 `[路由] #N 增强搜索 <原model> -> <route url> (model <原> -> <route model>)`。
+- A hit logs `[路由] #N 增强搜索 <original model> -> <route url> (model <original> -> <route model>)`.
 
-### 图片 + 搜索同时出现
+### Image + search in the same request
 
-请求若同时带图片和搜索工具，代理**按搜索处理**：整个请求走 `search_fallback`（`summary_mode` 则两步摘要），不管请求体里是否含图片。没有证据表明实际会出现"多模态+搜索"的组合，所以不为它单独找"既认图又能搜"的兜底；若搜索上游不支持图片，带图过去可能被上游报错，代理原样透传。
+If a request carries both an image and a search tool, the proxy **treats it as search**: the whole request goes `search_fallback` (two-step summary under `summary_mode`), regardless of the image. There's no evidence a "multimodal + search" combination occurs in practice, so no dedicated "sees images and searches" fallback is sought; if the search upstream doesn't accept images, sending one over may make the upstream error, and the proxy passes that through.
 
-- 搜索请求 -> 一律 `search_fallback`（不管含不含图片）。
-- 纯图片请求（无搜索）-> `multimodal_fallback`；没配则透传原 route（上游不支持图片则报错，代理透传）。
+- Search request -> always `search_fallback` (image or not).
+- Pure image request (no search) -> `multimodal_fallback`; unconfigured = pass through to the original route (if the upstream rejects images, the proxy passes the error through).
 
-> 能力兜底只在 model 路由分支触发，分类器路由、fast 路由不参与。两个兜底都未配时退回原行为。
+> Capability fallbacks only trigger in the model-route branch; classifier and fast routes don't participate. With neither fallback configured, behavior reverts to the original.
 
-## 全局流式化（convertAlltoStream）
+## Global stream-ification (convertAlltoStream)
 
-分类器、搜索 step1 等**非流式请求**在网页控制台上看不到吐字、没有首字/tok/s 统计——上游按非流式直接返回整段 JSON，代理原样透传，页面只能看到"一次性到达"。
+**Non-streaming requests** like the classifier and search step1 show no live token flow on the web console and get no first-token/tok-s stats — the upstream returns one whole JSON non-streamed, the proxy passes it through as-is, and the page only sees "arrived all at once".
 
-`convertAlltoStream`（顶层配置，默认 `false`）开启后，代理把**所有**非流式请求悄悄改为流式发给上游：
+With `convertAlltoStream` (top-level config, default `false`) on, the proxy silently rewrites **all** non-streaming requests to streaming before sending them upstream:
 
-- **请求侧**：`stream:false`（或省略）的 `/v1/messages` 请求，body 里 `stream` 字段被改写为 `true` 再发上游（流式定位 + 文本替换，不改动其它字段）。
-- **网页监控**：上游按流式回 SSE 时，代理边收边 tee 到在途流页面——实时可见吐字，首字延迟、流式时长、tok/s 统计与普通流式请求完全一致。
-- **回传侧（客户端无感知）**：代理把整个流收完（直到 `message_stop`），**原样重建**非流式 message JSON--所有内容块（文本、thinking、`server_tool_use`、`web_search_tool_result` 含 `encrypted_content`、`tool_use` 参数等）按流里原样保留拼回，一次性以 `application/json` 返回。调用方不知道自己的非流式请求被改成过流式。
-- **model 回写**：路由改写过 model 的请求，重建时 model 字段回写客户端原始 model（与流式透传一致）。
-- **可靠性**：流中途断开（未见 `message_stop`）时**未向客户端写任何字节**，代理按重试节奏整体重发（重发流式请求、重收一次流）；重试等待期间**不发 SSE ping 保活**（会污染非流式响应，静默等待）。重试用尽透传 502。
-- **影响范围**：只作用于 Anthropic Messages 请求（`/v1/messages`）；已是流式的请求、搜索摘要模式（自构响应）不受影响。上游没按流式回（返回普通 JSON）则直接透传。
+- **Request side**: for `/v1/messages` requests with `stream:false` (or omitted), the body's `stream` field is rewritten to `true` before going upstream (streaming field location + textual replacement; no other field touched).
+- **Web monitoring**: as the upstream answers with SSE, the proxy tees while receiving into the in-flight streams page — live token flow, first-token latency, streaming duration, and tok/s stats exactly like ordinary streaming requests.
+- **Return side (client notices nothing)**: the proxy collects the entire stream (until `message_stop`), then **rebuilds** the non-streaming message JSON exactly as streamed — all content blocks (text, thinking, `server_tool_use`, `web_search_tool_result` including `encrypted_content`, `tool_use` arguments, etc.) reassembled as they appeared in the stream — and returns it in one shot as `application/json`. The caller never knows its non-streaming request was stream-ified.
+- **model write-back**: for requests whose model was route-rewritten, the rebuilt JSON writes the model field back to the client's original model (consistent with streaming pass-through).
+- **Reliability**: if the stream breaks midway (no `message_stop` seen), **no byte has been written to the client**, and the proxy resends the whole request per the retry cadence (resending the streaming request, collecting the stream once more); during retry waits **no SSE ping keepalive is sent** (it would pollute the non-streaming response — waits are silent). Exhausted retries pass through a 502.
+- **Scope**: only applies to Anthropic Messages requests (`/v1/messages`); already-streaming requests and search summary mode (self-built responses) are unaffected. If the upstream doesn't answer with a stream (returns plain JSON), it's passed straight through.
 
-## Responses API 监听口（responses_listen）
+## Responses API listener (responses_listen)
 
-`responses_listen`（顶层配置；空 = 不启用，配置模板演示值 `127.0.0.1:8081`）让代理在指定地址额外开一个 **OpenAI Responses API** 端点，把只说 Responses 协议的工具（Codex CLI 等）接到任意 Anthropic 上游：
+`responses_listen` (top-level config; empty = disabled, config-template demo value `127.0.0.1:8081`) opens an extra **OpenAI Responses API** endpoint at the given address, connecting Responses-only tools (Codex CLI etc.) to any Anthropic upstream:
 
 ```json
 "responses_listen": "127.0.0.1:8081"
 ```
 
-- **接入方式**：工具指向 `http://127.0.0.1:8081/v1`，按 Responses 协议 POST `/v1/responses`（`/responses` 也认）。请求里的 model 名照常参与主管线路由匹配——在 `routes` 里加一条对应 pattern（如 `gpt-5*`）即可指定走哪个 Anthropic 上游、改写成什么模型。
-- **Codex CLI 接入**：一键搞定——网页控制台「配置」标签下方按当前编辑框**实时生成** Windows / macOS·Linux 两行终端命令（DeepSeek 文档同款格式：地址取 `responses_listen`；`routes` 每个 pattern 的代表名全部写进 Codex `/model` 菜单（纯 `*` 兜底路由的代表名固定叫 `Fallback`；`pattern` 不允许全字叫 `Fallback` 或 `fast_route`——保留名，撞名的路由不生效也不进菜单，网页会红字提醒；配了 `fast_route` 且带 `model` 时菜单追加 `fast_route` 条目，选中即走 fast 通道），下拉选中项为默认模型；脚本由本代理烤制下发、零交互），复制到对应终端回车即运行；或运行仓库根目录的交互版 `codex-setup.ps1`（Windows）/ `codex-setup.sh`（macOS/Linux）（仿 DeepSeek 官方脚本：备份后外科手术式改写 config.toml、写模型目录、选 9 还原）。手动配置：编辑 `~/.codex/config.toml`（Windows 为 `%USERPROFILE%\.codex\config.toml`）——顶层写 `model_provider = "proxy429"`、`model = "gpt-5-codex"`（参与路由匹配与 thinking 查表）、`preferred_auth_method = "apikey"` 与 `forced_login_method = "api"`（免去官方账号登录），再加 `[model_providers.proxy429]` 段：`base_url = "http://127.0.0.1:8081/v1"`、`wire_api = "responses"`、`experimental_bearer_token = "任意占位"`（代理不校验 token，真实 key 由路由 `api` 注入）。结构与 cc-switch 接管 Codex 时写入的一致；改完重启 Codex（config.toml 不热加载）。注意系统代理坑：Windows 系统代理开启时 Codex 走该代理且不认其例外清单，`127.0.0.1` 的请求会被劫到代理服务器报 503（代理侧零日志）——Windows 一键脚本已自动写入用户级 `NO_PROXY`（含 `127.0.0.1`）绕过，macOS/Linux 脚本只做体检并给出 `export NO_PROXY=...` 提示，手动配置需自行 `setx NO_PROXY "localhost,127.0.0.1,::1"` 后重启 Codex。多模型切换：加 `[profiles.名字]` 各设 `model`（`codex --profile 名字` 启动）或临时 `codex --model 名字`，代理按模型名路由、无需改动。逐步教程见 `使用说明.md`「让 Codex CLI 走代理」。
-- **翻译**：`instructions`/system 消息 → `system`；扁平 `input[]` 重新嵌套成 Anthropic messages（`function_call` 并入 assistant 的 tool_use、连续 `function_call_output` 合并进一条 user 的 tool_result，不完整工具轮自动丢弃、首条非 user 自动补前导）；`max_output_tokens` → `max_tokens`（缺省 32000）。
-- **thinking 映射**（与 cc-switch 3.20.0 的 thinking_optimizer 完全一致）：`reasoning.effort` 按模型分类走两条路径——adaptive 模型（fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6，子串匹配）翻成 `thinking:{"type":"adaptive"}` + `output_config.effort`（low/medium/high/max），其中 fable-5/mythos-5/mythos-preview/sonnet-5 不带 effort 也默认开；fable-5/mythos-5 关不掉 thinking，显式 `effort:"none"` 翻成 adaptive + `effort:"low"`。其余模型翻成 `thinking:{"type":"enabled","budget_tokens":N}`（low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576，上限压到 max_tokens 一半、不足 1024 不开）。工具续轮缺签名 thinking 回放、或 thinking 与强制 tool_choice 冲突时按 cc-switch 同款规则降级/报错。查表用客户端发来的 model 名（路由改写之前）。完整映射表见 `使用说明.md`「Responses 翻译映射表」。
-- **工具体系**（与 cc-switch 3.20.0 对齐）：function 工具与 `web_search` 托管工具 → Anthropic tools（web_search 映射 `web_search_20250305`，cc-switch 反而是丢弃的）；`custom` freeform 工具（如 Codex 的 apply_patch）→ 包装成 `{"input": string}` 的 JSON Schema，原始工具定义内嵌 description，响应拆包回 `custom_tool_call`（流式走 `custom_tool_call_input.done` 事件）；`namespace`（MCP）工具 → 子工具拍平成 `ns__name`（超 64 字节截断加 sha256 后缀），响应还原成带 `namespace` 字段的 function_call；`tool_search` → 固定代理工具。工具结果里的图片媒体（MCP image 块、JSON 字符串嵌套、整串 data URL）自动剥离成 Anthropic image 块而非字符串化；`input_file` → document 块（附件认不出标准形态——blob:/file: 本地 URL、file_id 云端引用等——时序列化成文本兜底，不静默丢）；`tool_choice` 全形状映射（required/auto/none/function/custom/tool_search，未知形状降级 auto）；Anthropic 模型 Read 工具调用的 `pages:""` 怪癖自动清理。
-- **响应**：Anthropic 内容块实时翻回 Responses 事件/对象——text → message 项（`output_text.delta`）、thinking → reasoning 项（摘要文本 + `encrypted_content`）、tool_use → function_call/custom_tool_call/tool_search_call 项（按工具注册表还原身份）、搜索结果 → `web_search_call` 项；usage 合并（缓存读计入 `input_tokens_details.cached_tokens`，缓存写计入 `cache_write_tokens`）。客户端 `stream:true` 拿 SSE 事件流，`stream:false` 拿一次性 JSON。Kimi（k3-256k 等）在请求带 web_search 工具时响应里以 `Search results for query: ` 开头的搜索回声行（连同其后的 query 一起）会被翻译层整行删除——转发给客户端与回放给上游的历史同套规则，避免 query 回声在上下文里累积、诱发连续同类搜索；剥完为空的文本块整体丢弃，无参 server_tool_use、空 web_search_tool_result 等空搜索结构两个方向都不产出、不回放；客户端历史回放的 `web_search_call` 调用项（哪怕带 query/来源）也一律不上行——其 id 是代理自造（`ws_`+响应 id）、上游搜索注册表从未登记，上行必 400 并连坐信封还原的真搜索对被 fail-soft 一起剥掉（生产实证：搜索块出生 33 秒的追问即被拒），搜索内容的唯一回放载体是搜索信封。模型模仿历史把多条裸前言重复粘在正文开头时仍会剥光前言留下正文。剥离是确定性纯文本规则、逐请求逐消息无条件应用（不含回声的文本一字节不动），请求体逐轮保持一致，前缀缓存不受影响。客户端界面不再堆搜索回声行，真实搜索以结果链接（sources）照常翻译为 `web_search_call` 项。
-- **思考块信封**：Anthropic 签名 thinking 块被 base64 自封装进 reasoning 项的 `encrypted_content`（前缀 `p429-ant-thinking-v1:`），客户端下轮回放历史时还原成 thinking 块发给上游——多轮工具调用的思考链不丢，且自包含、不依赖上游解密。
-- **搜索块信封**：一次搜索的 `server_tool_use` + `web_search_tool_result` 成对块（含全部 `encrypted_content` 正文）同样自封装进一个 reasoning 项（前缀 `p429-ant-search-v2:`）随响应发给客户端；封入时把调用块的 id 归一为结果块的 `srvtoolu_` id——Kimi 流式搜索给的调用块 id 是 `tool_` 开头、搜索注册表从未登记，原样回放必 400 `tool_call_id is not found`（受控实验：改写后同体 200），非流式搜索两者天生一致不受影响。下轮客户端原样回放时还原成完整 Anthropic 搜索块上行——模型据此直接读上次搜索到的正文，追问不再原关键字重搜（客户端历史里的 `web_search_call` 调用项只是展示件、不回放，见上段）。信封内存归属信息（上游 url + key 哈希 + 生成时的模型名），且整个 payload 用 api key 派生的掩码异或混淆（前缀 `p429-ant-search-v2:`；混淆非加密，求性能——客户端历史里不躺明文 url/key 信息，key 不对异或出来不是 JSON 自然跳过，换 key 后旧信封自动作废）：本请求路由预测与信封不同源时跳过还原（还原也解不开，省 token）；模型不同不拦——实测同 endpoint 同 key 跨模型回放照常解密。信封带封入时刻，但代理不设固定存活期上限——实测封入 1.7 小时的搜索 id 仍存活，固定上限会误杀活信封。取而代之的是每对话自适应水位：还原后上游报 `400 tool_call_id`（搜索 id 注册表有存活期，旧对话的搜索块可能已过期）时，代理自动剥掉回放的搜索块立即重试一次（不占重试预算、400 不透给客户端）——无感降级为「没还原」，模型需要时会重新搜；同时把本次被剥信封里最老的封入时刻记为该对话的「水位」（只升不降），此后不比水位新的信封直接不还原（主动剥块，不撞 400、不占重试）——注册表按龄淘汰，同龄与更老的必死，水位随每次兜底自动逼近真实存活期。无 ts 的老信封（v2 初版）视同最老：有水位时一并剥，无水位时乐观还原。被剥过块的流在状态页显示红色 `[剥N]`（N = 本流剥掉的回放搜索块总数，含水位剥与 400 兜底剥）：在途流挂在 model 列，最近完成流挂在缓存命中率后（如 `81%[剥2]`）；其中多少是水位剥的、多少是 400 兜底剥的，拆分看日志 `[剥块]`/`[兜底]` 行。空搜索（无 query）不封信封。
-- **管线复用**：翻译层把请求内部转交给主 `/v1/messages` handler，上游永远走流式——路由（pattern/分类器/fast/多模态/搜索兜底）、429 重试保活、网页控制台在途流监控与统计全部照常生效。
-- **原生透传（routes 条目 `url_response_api`）**（已实现，未实测，故未写进使用文档）：命中路由配了该字段时 Responses 口请求跳过翻译、原文直达该字段指定的原生 Responses 上游。待实测验证后再补文档。
+- **How to connect**: point the tool at `http://127.0.0.1:8081/v1`, POSTing per the Responses protocol to `/v1/responses` (`/responses` also accepted). The request's model name participates in main-pipeline route matching as usual — add a matching pattern (e.g. `gpt-5*`) in `routes` to choose which Anthropic upstream it goes to and what model it's rewritten to.
+- **Codex CLI setup**: one click does it — below the web console's 「配置」 (Config) tab, two terminal commands for Windows / macOS·Linux are **generated live** from the editor contents above (same format as DeepSeek's docs: the address comes from `responses_listen`; one representative name per `routes` pattern is written into Codex's `/model` menu — a pure `*` catch-all route's representative is fixed as `Fallback`; no `pattern` may be literally named `Fallback` or `fast_route` — reserved names; a colliding route neither takes effect nor enters the menu, and the web page warns in red; with `fast_route` configured and carrying a `model`, the menu gains a `fast_route` entry that takes the fast lane when selected; the dropdown selection becomes the default model; the script is baked and served by the proxy itself, zero-interaction), then paste into the corresponding terminal and hit enter. Or run the interactive `codex-setup.ps1` (Windows) / `codex-setup.sh` (macOS/Linux) from the repo root (modeled on DeepSeek's official script: backup, then surgical config.toml edits, model catalog written, choose 9 to restore). Manual setup: edit `~/.codex/config.toml` (Windows: `%USERPROFILE%\.codex\config.toml`) — top-level `model_provider = "proxy429"`, `model = "gpt-5-codex"` (participates in route matching and thinking lookup), `preferred_auth_method = "apikey"` and `forced_login_method = "api"` (no official-account login), plus a `[model_providers.proxy429]` section: `base_url = "http://127.0.0.1:8081/v1"`, `wire_api = "responses"`, `experimental_bearer_token = "any placeholder"` (the proxy doesn't validate the token; the real key is injected by the route's `api`). Same structure as what cc-switch writes when taking over Codex; restart Codex afterwards (config.toml isn't hot-loaded). Watch the system-proxy trap: with a Windows system proxy on, Codex uses it and ignores its exception list — requests to `127.0.0.1` get hijacked to the proxy server and 503 (with zero log on this proxy's side). The Windows one-click script already writes a user-level `NO_PROXY` (including `127.0.0.1`) to bypass this; the macOS/Linux scripts only check and suggest `export NO_PROXY=...`; for manual setup run `setx NO_PROXY "localhost,127.0.0.1,::1"` yourself and restart Codex. Multi-model switching: add `[profiles.name]` sections each setting `model` (start with `codex --profile name`) or ad-hoc `codex --model name`; the proxy routes by model name and needs no changes. A step-by-step tutorial is in `docs/usage.md`, "Getting Codex CLI on the proxy".
+- **Translation**: `instructions`/system messages → `system`; the flat `input[]` is re-nested into Anthropic messages (`function_call` merged into assistant tool_use, consecutive `function_call_output`s merged into one user's tool_result; incomplete tool turns are dropped wholesale, a leading non-user message gets an auto-inserted leading user); `max_output_tokens` → `max_tokens` (default 32000).
+- **thinking mapping** (identical to cc-switch 3.20.0's thinking_optimizer): `reasoning.effort` takes one of two paths by model class — adaptive models (fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6, substring match) translate to `thinking:{"type":"adaptive"}` + `output_config.effort` (low/medium/high/max), of which fable-5/mythos-5/mythos-preview/sonnet-5 default on even without effort; fable-5/mythos-5 can't disable thinking — an explicit `effort:"none"` translates to adaptive + `effort:"low"`. Other models translate to `thinking:{"type":"enabled","budget_tokens":N}` (low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576, capped at half of max_tokens, not opened under 1024). A tool-continuation turn missing signed-thinking replay, or thinking conflicting with a forced tool_choice, degrades/errors per cc-switch's same rules. The lookup uses the client-sent model name (before route rewriting). The full mapping table is in `docs/usage.md`, "Responses translation mapping".
+- **Tool system** (aligned with cc-switch 3.20.0): function tools and the `web_search` managed tool → Anthropic tools (web_search maps to `web_search_20250305` — cc-switch drops it instead); `custom` freeform tools (like Codex's apply_patch) → wrapped into a `{"input": string}` JSON Schema with the original tool definition inlined into the description, responses unpacked back into `custom_tool_call` (streaming via the `custom_tool_call_input.done` event); `namespace` (MCP) tools → sub-tools flattened to `ns__name` (truncated plus a sha256 suffix past 64 bytes), responses restored to function_calls carrying the `namespace` field; `tool_search` → fixed proxy tool. Image media in tool results (MCP image blocks, JSON-string nesting, whole-string data URLs) is automatically stripped into native Anthropic image blocks instead of being stringified; `input_file` → document block (attachments in unrecognized shapes — blob:/file: local URLs, file_id cloud references, etc. — serialize into text as fallback, never silently dropped); `tool_choice` mapped in all shapes (required/auto/none/function/custom/tool_search; unknown shapes degrade to auto); the `pages:""` quirk Anthropic models attach to Read tool calls is auto-cleaned.
+- **Responses**: Anthropic content blocks translate back into Responses events/objects in real time — text → message items (`output_text.delta`), thinking → reasoning items (summary text + `encrypted_content`), tool_use → function_call/custom_tool_call/tool_search_call items (identity restored via the tool registry), search results → `web_search_call` items; usage merged (cache reads count into `input_tokens_details.cached_tokens`, cache writes into `cache_write_tokens`). A client with `stream:true` gets the SSE event stream; `stream:false` gets a one-shot JSON. In responses from Kimi (k3-256k etc.) when the request carries the web_search tool, search-echo lines starting with `Search results for query: ` (together with the query that follows) are deleted whole by the translation layer — the same rules apply to what's forwarded to the client and to history replayed upstream, preventing query echoes from accumulating in the context and inducing repeated same-kind searches; text blocks stripped to empty are dropped wholesale, and empty search structures (no-argument server_tool_use, empty web_search_tool_result, etc.) are neither produced nor replayed in either direction; `web_search_call` call items replayed from client history (even with query/sources) never go upstream either — their ids are proxy-minted (`ws_` + response id), never registered in the upstream search registry, so going upstream must 400 and drag the envelope-restored real search pair into being fail-soft stripped along (production evidence: a follow-up just 33 seconds after the search blocks were born was already rejected); the sole replay carrier of search content is the search envelope. When the model imitates history by gluing several bare preambles onto the body's start, the preambles are still stripped bare, keeping the body. Stripping is deterministic plain-text rules applied unconditionally per request per message (echo-free text isn't touched by a single byte), the request body stays consistent turn over turn, and prefix caching is unaffected. The client UI no longer piles up search-echo lines; real searches still translate as `web_search_call` items with result links (sources) as usual.
+- **Thinking-block envelopes**: Anthropic signed thinking blocks are base64 self-encapsulated into the reasoning item's `encrypted_content` (prefix `p429-ant-thinking-v1:`); when the client replays history next turn they're restored into thinking blocks sent upstream — the thinking chain across multi-turn tool calls isn't lost, and it's self-contained, not relying on the upstream to decrypt.
+- **Search-block envelopes**: one search's paired `server_tool_use` + `web_search_tool_result` blocks (including all `encrypted_content` bodies) are likewise self-encapsulated into a reasoning item (prefix `p429-ant-search-v2:`) sent to the client with the response; at sealing time the call block's id is normalized to the result block's `srvtoolu_` id — Kimi streaming search gives the call block a `tool_`-prefixed id that the search registry never registered, so replaying it verbatim must 400 with `tool_call_id is not found` (controlled experiment: the same body with the id rewritten returned 200); non-streaming search has the two ids naturally consistent and is unaffected. When the client replays it verbatim next turn, it's restored into complete Anthropic search blocks going upstream — the model reads last search's body directly from them, and follow-ups no longer re-search the same keyword (the `web_search_call` call items in client history are display-only and not replayed — see the previous paragraph). The envelope carries attribution info (upstream url + key hash + the model name at sealing time), and the whole payload is XOR-obfuscated with a mask derived from the api key (prefix `p429-ant-search-v2:`; obfuscation, not encryption, for performance — no plaintext url/key info lies in client-side history; a wrong key XORs into non-JSON and is naturally skipped, so changing keys automatically invalidates old envelopes): when this request's route prediction and the envelope aren't same-origin, restoration is skipped (it couldn't be de-obfuscated anyway — saves tokens); a different model doesn't block — field-tested decrypting fine cross-model on the same endpoint and key. The envelope carries its sealing moment, but the proxy sets no fixed TTL ceiling — field tests showed a search id sealed 1.7 hours prior still alive, and a fixed ceiling would kill live envelopes. Instead there's a per-conversation adaptive watermark: when after restoration the upstream reports `400 tool_call_id` (the search id registry has a TTL; an old conversation's search blocks may have expired), the proxy automatically strips the replayed search blocks and retries immediately (not consuming the retry budget, the 400 not passed to the client) — an imperceptible degradation to "not restored", and the model re-searches if needed; at the same time, the oldest sealing moment among the stripped envelopes is recorded as that conversation's "watermark" (monotonically rising), and from then on envelopes no newer than the watermark are not restored at all (proactively stripped — no 400 hit, no retry spent) — the registry expires by age, so same-age and older ones are certainly dead, and the watermark converges on the true TTL with every fallback. Old ts-less envelopes (first v2) count as oldest: stripped when a watermark exists, optimistically restored without one. Streams whose blocks were stripped show a red `[剥N]` on the status page (N = total replayed search blocks stripped this stream, watermark strips and 400-fallback strips combined): in-flight streams carry it on the model column, recent-finished streams after the cache-hit rate (e.g. `81%[剥2]`); how many were watermark strips versus 400-fallback strips is broken down in the `[剥块]`/`[兜底]` log lines. Empty searches (no query) get no envelope.
+- **Pipeline reuse**: the translation layer hands the request internally to the main `/v1/messages` handler, and upstream traffic is always streaming — routing (pattern/classifier/fast/multimodal/search fallback), 429 retry keepalive, and the web console's in-flight monitoring and statistics all apply as usual.
+- **Native passthrough (`url_response_api` on a routes entry)** (implemented, not yet field-tested — deliberately left out of the usage docs): when the hit route carries this field, Responses-port requests skip translation and the original goes straight to the native Responses upstream named by the field. Documentation will be completed after field verification.
 
-**状态页「看请求体/看返回体」的数据源**：看请求体 = 下游→代理的请求体原文（客户端发给代理的）；看返回体 = 代理→下游的回传流（客户端实际收到的）。不是代理→上游的请求体/响应体——上游侧是代理内部实现，对用户是黑盒。观测点设在客户端视角的边界上：用户想知道的是「我发了什么、我收到了什么」。
-- **限制**：改动保存重载即生效（监听口动态启停，不像主 `listen` 那样需重启）；与主端口一样永远仅本机可连；端口被占用只告警禁用、不影响主代理。不支持 computer use 类计算机操作工具（无对应客户端与上游，cc-switch 同样不支持）、`store:true` 服务端状态与 `/v1/models` 列举。
+**Data source of the status page's 「看请求体」/「看返回体」 (view request/response body)**: request and response bodies are recorded per link side, and the viewer's 「链路」 (link) button switches sides. The default 代理↔上游 (proxy↔upstream) side: the request body is what the proxy actually sent upstream (for translated streams, the translated Anthropic body; for rewritten native streams, the rewritten body), and the response body is the raw stream from upstream. The 下游↔代理 (downstream↔proxy) side: the request body is what the client sent the proxy verbatim, and the response body is what the client actually received. Only streams whose two sides differ are stored twice — Responses translated streams always differ (one body per protocol); for convertAlltoStream-rebuilt JSON streams, the downstream-side response body is the rebuilt one-shot JSON; native streams only get a separately stored downstream-side request body when the request body was rewritten (classifier thinking-off, route model rewrite, etc.). Switching to a side with no record automatically falls back to the other side, with a hint beside the button (the endpoint truthfully reports the actual side via the `X-Proxy429-Side` response header). Both observation points sit on the proxy's boundary: what the user wants to know is "what did the client send/receive" and "what did the proxy actually send to/receive from upstream".
 
-## 429 重试保活（SSE ping）
+- **Limits**: changes take effect on save+reload (the listener starts/stops dynamically, unlike the main `listen` which needs a restart); localhost-only, same as the main port; a busy port only warns and disables the listener without affecting the main proxy. Not supported: computer-use-style computer-operation tools (no corresponding client or upstream; cc-switch doesn't support them either), `store:true` server-side state, and `/v1/models` listing.
 
-代理遇到 429/5xx 自动重试时，重试期间不会向 Claude Code 发任何字节（还没连上成功响应）。Claude Code 流式请求长时间收不到数据会触发客户端超时，报 "API error" 并自带重试 0/10--这时代理还在重试，两边各干各的。
+## 429 retry keepalive (SSE ping)
 
-为避免此问题，代理在**首次重试时**向客户端发一个 `200` + SSE 流开头，并在 backoff 等待期间每 `ping_interval_s` 秒发一个 Anthropic 标准 `event: ping` 保活事件。Claude Code 收到 ping 即认为连接活着，不会超时。重试成功后无缝接上上游的正常 SSE 流（`message_start` 等跟在 ping 后，客户端忽略 ping）。
+When the proxy auto-retries on 429/5xx, it sends no bytes to Claude Code during the retries (no successful response is connected yet). A streaming Claude Code request that receives no data for a long time triggers the client timeout, reports "API error", and starts its own retry 0/10 — while the proxy is still retrying on its side, the two working independently.
 
-- **backoff 可中断**：重试等待改用 `select` 监听客户端断开，客户端超时/取消时代理立即停止重试（旧版 `time.Sleep` 不可中断，客户端断了还在傻睡 + 白烧上游配额）。
-- **重试用尽兜底**：已发 `200` 保活头后无法再改状态码透传 429，改发一个 SSE `event: error`（`overloaded_error`）让 Claude Code 识别错误。正常 429 暂时代理能重试成功，不触发；只有持续限流用尽才走这里。
-- **正常请求零影响**：无 429 时全程不发 ping，走原透传逻辑，不多发任何字节。
-- 日志：`[保活] #N 重试中(状态码 429)，开启 SSE ping 保活` / `[保活] #N 客户端已断开，停止重试`。
+To avoid this, on the **first retry** the proxy sends the client a `200` + SSE stream header, and during backoff waits sends an Anthropic-standard `event: ping` keepalive every `ping_interval_s` seconds. Receiving pings, Claude Code considers the connection alive and doesn't time out. After a successful retry, the upstream's normal SSE stream (with `message_start` etc. following the pings; the client ignores pings) picks up seamlessly.
 
-> 该机制假设 Claude Code 超时是"无数据超时"（ping 能重置）。若实测 ping 保活开启后 Claude Code 仍超时，说明是别的超时类型，需进一步排查。
+- **Interruptible backoff**: retry waits use `select` to watch for client disconnect; on client timeout/cancel the proxy stops retrying immediately (the old `time.Sleep` wasn't interruptible — the client was gone and it kept sleeping, burning upstream quota).
+- **Fallback on exhausted retries**: after the `200` keepalive header has been sent, the status code can no longer be changed to pass a 429 through, so an SSE `event: error` (`overloaded_error`) is sent instead for Claude Code to recognize the error. Ordinary 429s are retried successfully by the proxy for now and never trigger this; only persistent rate-limiting that exhausts retries lands here.
+- **Zero impact on normal requests**: without 429s no ping is ever sent; the original pass-through logic runs without a single extra byte.
+- Logs: `[保活] #N 重试中(状态码 429)，开启 SSE ping 保活` (keepalive: retrying on 429, SSE ping on) / `[保活] #N 客户端已断开，停止重试` (client disconnected, retry stopped).
 
-## 网页控制台
+> This mechanism assumes Claude Code's timeout is a "no-data timeout" (resettable by pings). If Claude Code still times out with ping keepalive on in practice, it's a different timeout type and needs further investigation.
 
-代理的**唯一 UI** 是一个浏览器网页控制台，全平台一致（不再有终端分屏 TUI）。挂在代理同端口的 `/__logs` 路径，仅本机访问（`isLocalRequest` 限制 `127.0.0.1`/`::1`/`localhost`，远程请求返回 403，即使代理 `listen` 在 `0.0.0.0` 暴露到内网也不会泄露日志/配置）。三个标签：
+## Web console
+
+The proxy's **only UI** is a browser-based web console, identical across platforms (no more terminal split-screen TUI). It's mounted at the `/__logs` path on the proxy's own port, localhost-only (`isLocalRequest` restricts to `127.0.0.1`/`::1`/`localhost`; remote requests get 403, so even with `listen` on `0.0.0.0` exposing the port to the LAN, no logs/config leak). Three tabs:
 
 ```
-状态卡片（示例，实际为网页渲染）：
+Status cards (example; actually rendered as a web page):
 v c639d56-1606  active 3 | waiting 1 | bytesForward 2.3KB | rate 12KB/s
 cacheRead 0 | input 24 | output 80 | retries 0 | classifiers 0
 avgFirstByte 1.23s | tps 45.6
 
-在途流：
-#  model      阶段        字节    状态
-1  glm-5.2    转发中      4.2KB   200
-2  glm-5.2    等首字      0B      -
-3  glm-5.2    等首字      0B      -
+In-flight streams:
+#  model      stage       bytes   status
+1  glm-5.2    forwarding  4.2KB   200
+2  glm-5.2    awaiting    0B      -
+3  glm-5.2    awaiting    0B      -
 ```
 
-- **状态**：状态卡片 + 在途流表格。卡片字段：`active`/`waiting`（进行中/等首字）、`bytesForward`（累计转发字节）、`rate`（每秒字节速率，用两次轮询间增量算）、`cacheRead`/`input`/`output`（从 SSE `usage` 解析的累计 token）、`retries`（累计重试次数）、`classifiers`（累计命中分类器特征次数，无论是否分流/关思考都计；卡片悬停看命中/关思考两数、点击放大明细）、`classifierNoThink`（其中实际关思考的改写次数）、`avgFirstByte`（最近 `recent_sample_window` 次平均首字延迟）、`tps`（加权 token 吞吐）。在途流表格列：`#`/model/阶段/字节/状态。首列状态灯（⚪请求 / 🟡等首字节 / 🟢转发中）旁显示当前灯色已持续的秒数，只在灯变色时清零（黄灯内的路由与多次重试不单独清零）；黄灯内正在等首字节时，状态灯与总时长之间另有 `[尝试N: Xs]` = 本次尝试已等待的时长（每次尝试重新起算；重试退避中显示 `[退避中]`），黄灯总时长 = 各次尝试 + 退避之和。最近完成流表的「缓存年龄」列按会话+路由显示该会话该路由最近一次缓存写入距现在过了多久（m:ss 递增；上游缓存真实存活期是动态的，这列不再猜倒计时，只说明这份缓存是多久前写的，还能不能用请对照「缓存命中」弹窗的实测区间判断）——同会话同路由的最新一条流显示年龄，被更新的同键流刷新后旧行显示 `-`，无会话标识的流（count_tokens 探针、裸 API 无 metadata）恒 `-`；年龄从流开始时刻起算，会话标识取客户端请求自带字段（Claude Code 的 `metadata.user_id` 内 `session_id`、Codex 的 `prompt_cache_key`），代理只读不改；黄灯（等待首字节）阶段被下游断开的 499 流不刷新缓存（本行显 `-`，锚停留再上一次同键流），绿灯（流式中）断开的 499 照常刷新（本行作为新锚）；同会话同路由有在途流正在吐字（绿灯转发中）时缓存实际刚被刷新，该键最新完成行冻结显示 `[m:ss]`（方括号内为刷新那一刻旧锚的年龄，数字不变；列头问号有悬停说明），新锚等该流完成后生效；点击「缓存命中」卡片，弹窗底部「实测缓存时间」表列出各上游实测的缓存存活时间（模型、URL、下界 ≥、≥形成、上界 <、<形成、观测次数；按 URL+模型归类，不看其他参数：同会话相邻流后条命中率 ≥95% 记区间下界「至少活了间隔那么久」取最大值，前条命中过后条命中率 <50% 记区间上界「没活过间隔那么久」取最小值——不看严格归零，系统提示词等公共前缀的残留命中不算活着；两侧矛盾时（上游缓存时间中途变化或被提前驱逐）以较新观测为准、被否一侧作废重测、观测次数同步归零重计；「≥形成」「<形成」两列 = 各自界数值形成至今的时长（m:ss 递增），该界数值变化（含作废重测）即重新起算，只新增支撑观测、数值不变时不重置，无该界观测时随界同显 -；纯展示、内存态，重启或清空统计即清零）；开始时刻距今 5 分钟内的「会话+路由最新一条」完成流不会被「保留完成流 N」挤出列表（行数可因此超 N）。在途流与最近完成流表的「API」列把协议来源与思考值合一格：名 = 协议来源（橙 `[Anthropic]`=Anthropic 口原生、紫 `[translate]`=Responses 口翻译），名后 `[值]` = **实际发给上游**的思考配置最短形态（翻译映射、分类器关思考等代理改写全部生效后的最终口径），**其颜色 = 词汇口径**（思考是针对上游的：上游收到的都是 Anthropic 格式，所以紫名后跟橙值）——橙=Anthropic thinking（直连原样或翻译映射后）；`关`=thinking 关或 effort none/off、`开 N`=enabled+budget_tokens N、`adaptive`=自适应无档、`low`/`high`/`max` 等档位词=adaptive 的 effort、无 `[值]`=请求体未带思考字段；如 Codex 发 effort high 翻译到 Anthropic 上游显 `[translate][开 16384]`（紫名橙值）。搜索摘要模式触发时，step1/step2 会作为独立子流显示在在途流表格（model 列标「搜索step1·模型」「搜索step2·模型」），完成后进入「最近完成的流」，可点击查看透传内容。完成流状态码列中非 200 的状态码加方括号显示（如 `[499]`、`[400]`），一眼挑出异常流；重试/预算用尽的流代理会向下游透传兜底 error 事件（overloaded_error），状态码列显 `[重试尽]`；发生过退避重试的流在状态码后追加金色 `[重试N次]`（N = 重试次数，如 `200[重试2次]`；`[重试尽]` 时同样带，可对照 `max_retries` 看是否打满）；499 = 上游响应没发完这个连接就结束了（最常见是下游主动取消——取消会传导成上游断连，上游提供商后台同样记 499，两边口径一致；nginx 惯例 client closed request）；上游完整发完后下游才断开的（Codex 收完 response.completed 即关连接）仍记 200，与上游后台一致。在途流（随转发实时增加）与最近完成流的 model 列后都会以 `[Read*1][Edit*3]` 形式（金色）列出该流响应中调用过的工具（`web_search` 等服务端工具也计，按首次出现顺序；同名 N 次合并显 `*N`（原始次数），单次调用显 `*1`，参数结构体为空的单次调用显 `*0`——如 Kimi 空搜索的无参调用，一眼区分空搜索与真搜索）。点击在途流/完成流的行回看该流：默认看输出（「显示解析/显示原始」切换）；「看请求体」回看导致该流的请求体（JSON 自动美化，非完整 JSON 按原文显示）；请求体与输出都按链路侧记录、点「链路」按钮切换（默认 代理↔上游 侧：实发上游的请求体与上游回来的原始流；另一侧 下游↔代理：客户端发出/实际收到的；两侧同文的流不双存，切到无记录侧自动回退并在按钮旁提示）。浏览一律只给前 256KB；勾选「储存完整结构体」（默认关，重启复位）后，新开始的请求额外记录完整请求体与输出（不设上限，占内存），查看器出现「下载请求体/下载输出」按钮可下载完整文件（JSON 美化后保存，非 JSON 按原文），以及「交互式JSON」按钮——把请求体/输出渲染成可按键折叠展开的 JSON 树（默认全部折叠，点键名行懒展开；输出是 SSE 事件流时解析成事件数组再成树），取消勾选立即清空已存的完整副本、下载与交互按钮消失。数据残缺的流不会静默当成完整版：请求体只剩截断版的「下载请求体」置灰（悬停见原因），无完整输出副本的「下载输出」置灰，交互式JSON 对这两类直接提示不看。Responses 翻译流两侧恒不同，恒双存（下游侧是客户端 Responses 原文与实收回传，上游侧是翻译后的 Anthropic 体与上游 SSE 原始流）。「清空统计」按钮清空上述累计统计与最近完成的流列表（在途流与流的 # 编号不清，避免与在途流撞号；内存日志另有「清空日志」按钮）。
-- **日志**：最近 500 行日志（`logRing` 内存环形缓冲），自动滚到底、粘性滚动（手动向上滚时暂停跟随，回到底部恢复）。无翻页键/滚轮冲突，纯浏览器原生滚动。
-- **配置**：配置文件编辑器。载入当前 `config.json` 内容（`GET /__config` 返回 `{path, content, exists}`），保存时 `POST /__config` 先 `json.Unmarshal` 进 `Config` 校验 JSON 合法性，**非法 JSON 直接返回 400 且不写盘**（避免把损坏配置写到磁盘导致下次启动失败），合法才写文件并调 `reloadConfig()` 热生效；另有「仅重载」按钮 `POST /__reload` 只调 `reloadConfig` 不改文件。
+- **状态 (Status)**: status cards + the in-flight streams table. Card fields: `active`/`waiting` (in progress / awaiting first byte), `bytesForward` (total forwarded bytes), `rate` (bytes per second, computed from the delta between polls), `cacheRead`/`input`/`output` (cumulative tokens parsed from SSE `usage`), `retries` (cumulative retries), `classifiers` (cumulative requests matching the classifier fingerprint — counted whether or not rerouted / thinking-off; hover the card for the hit/thinking-off pair, click for an enlarged breakdown), `classifierNoThink` (of those, how many actually got thinking-off rewrites), `avgFirstByte` (mean first-token latency over the last `recent_sample_window` requests), `tps` (weighted token throughput). In-flight table columns: `#`/model/stage/bytes/status. The first column's status light (⚪ request / 🟡 awaiting first byte / 🟢 forwarding) shows the seconds the current color has lasted, zeroed only when the color changes (routing and repeated retries inside a yellow light don't re-zero); while waiting for the first byte inside a yellow light, between the light and the total duration there's also `[尝试N: Xs]` = how long the current attempt has waited (re-counted per attempt; during retry backoff it shows `[退避中]`), and the yellow light's total = sum of all attempts + backoffs. The recent-finished streams table's 「缓存年龄」 (cache age) column shows, per session+route, how long ago that session's most recent cache write on that route was (m:ss counting up; the upstream cache's true TTL is dynamic — this column no longer guesses a countdown, it only says how long ago this cache was written; for whether it's still usable, judge against the measured ranges in the 「缓存命中」 popup) — the newest stream of a session+route shows an age, older rows with the same key show `-` after refresh, and streams without a session identifier (count_tokens probes, bare API calls without metadata) always show `-`; age counts from the stream's start, and the session identifier comes from client-request fields (Claude Code's `session_id` inside `metadata.user_id`, Codex's `prompt_cache_key`) — the proxy only reads, never modifies; a 499 stream disconnected by the downstream during the yellow-light (awaiting first byte) stage doesn't refresh the cache (this row shows `-`, the anchor stays on the previous same-key stream); a 499 disconnected during the green-light (streaming) stage refreshes as usual (this row becomes the new anchor); while a same-session same-route in-flight stream is producing output (green forwarding), the cache was actually just refreshed, so that key's latest finished row freezes as `[m:ss]` (inside the brackets, the old anchor's age at refresh time, unchanging; the column header's question mark has a hover explanation), and the new anchor takes effect when that stream finishes; clicking the 「缓存命中」 (cache hit) card opens a popup whose bottom 「实测缓存时间」 (measured cache time) table lists each upstream's measured cache survival time (model, URL, lower bound ≥, ≥ formed, upper bound <, < formed, observation count; grouped by URL+model name, other parameters ignored: when two adjacent same-session streams see the latter at ≥95% hit rate, it records one lower-bound observation "lived at least the interval" (max kept); when an earlier stream hit and a later one falls below 50%, it records one upper-bound observation "didn't live the interval" (min kept) — strict zeroing isn't required, residual hits on common prefixes like the system prompt don't count as alive; when the two sides contradict (the upstream's cache time changed mid-way or was evicted early), the newer observation wins, the refuted side is discarded and re-measured, and its observation count zeroes and restarts; the "≥ formed"/"< formed" columns = how long ago each bound's value was established (m:ss counting up) — a bound's value changing (including discard-and-re-measure) restarts its clock, merely adding supporting observations with the value unchanged doesn't reset it, and a bound with no observations shows - along with the bound; measurements are display-only, purely in-memory, cleared on restart or 「清空统计」/clear-stats); a session+route's latest finished stream whose start was within the last 5 minutes isn't pushed off the list by "keep N finished streams" (row count may exceed N). The in-flight and recent-finished tables' 「API」 column merges protocol origin and thinking value into one cell: the name = protocol origin (orange `[Anthropic]` = native Anthropic port, purple `[translate]` = Responses port translated), and the `[value]` after the name = the shortest form of the thinking config **actually sent upstream** (the final state after translation mapping, classifier thinking-off, and all other proxy rewrites), **its color = the vocabulary** (thinking targets the upstream: upstreams always receive Anthropic format, so a purple name is followed by an orange value) — orange = Anthropic thinking (either direct-as-is or after translation mapping); `off` = thinking disabled or effort none/off (the Responses-port explicit-off shows `关`), `on N` = enabled+budget_tokens N (shown as `开 N` in the Chinese UI), `adaptive` = adaptive without a level, `low`/`high`/`max` etc. level words = adaptive effort, no `[value]` = the request carried no thinking field; e.g. Codex sending effort high translated to an Anthropic upstream shows `[translate][on 16384]` (purple name, orange value). When search summary mode triggers, step1/step2 appear as independent sub-streams in the in-flight table (model column labeled 「搜索step1·模型」/「搜索step2·模型」 — search step1/step2 · model), and move into 「最近完成的流」 (recently finished streams) when done, clickable to inspect the passthrough content. In the finished-stream status column, non-200 statuses display bracketed (e.g. `[499]`, `[400]`) so abnormal streams stand out; a stream that exhausted retries/budget gets a fallback error event passed downstream (overloaded_error) and shows `[重试尽]` (retries exhausted); a stream that had backoff retries gets a gold `[重试N次]` appended after the status (N = retry count, e.g. `200[重试2次]`; also attached with `[重试尽]`, so you can check against `max_retries`); 499 = the connection ended before the upstream finished sending its response (most commonly the downstream actively cancelled — the cancellation propagates into an upstream disconnect; upstream providers' dashboards also record 499, so both sides agree; the nginx convention "client closed request"); when the downstream disconnects only after the upstream finished in full (Codex closing the connection right after response.completed), it's still recorded as 200, consistent with the upstream dashboard. Both in-flight streams (growing live as forwarding proceeds) and recent-finished streams list the tools called in that stream's response after the model column as `[Read*1][Edit*3]` (in gold) — server-side tools like `web_search` count too, in first-appearance order; N calls of the same name collapse to `*N` (the raw count), a single call shows `*1`, and a single call with an empty argument object shows `*0` — e.g. Kimi empty-search no-arg calls, telling empty searches from real ones at a glance. Clicking an in-flight/finished row replays that stream: the output by default (「显示解析/显示原始」 toggles parsed/raw); 「看请求体」 replays the request body that caused the stream (JSON auto-prettified, non-well-formed JSON shown verbatim); request and response bodies are both recorded per link side, switchable via the 「链路」 (link) button (default 代理↔上游 side: the request body actually sent upstream and the raw stream back from it; the other side 下游↔代理: what the client sent/actually received; identical sides aren't double-stored, and switching to a side with no record falls back automatically with a hint beside the button). Browsing always caps at the first 256KB; with 「储存完整结构体」 (store full payloads; default off, resets on restart) ticked, newly started requests additionally record the complete request body and output (uncapped, in memory), and the viewer gains 「下载请求体/下载输出」 (download request body / output) buttons for the complete files (saved JSON-prettified, non-JSON verbatim), plus an 「交互式JSON」 (interactive JSON) button — rendering the request body/output as a key-collapsible JSON tree (all collapsed by default, click a key line to lazily expand; SSE event-stream outputs are parsed into an event array first); unticking immediately clears the stored full copies and the download/interactive buttons vanish. Streams with incomplete data are never silently treated as complete: 「下载请求体」 is greyed when only a truncated request body remains (hover for why), 「下载输出」 is greyed without a full output copy, and interactive JSON outright refuses both kinds. Responses translated streams always differ between sides and are always double-stored (the downstream side holds the client's Responses original and the actual reply; the upstream side holds the translated Anthropic body and the upstream's raw SSE). The 「清空统计」 (clear stats) button clears the cumulative stats above and the recent-finished list (in-flight streams and the # numbering are not cleared, to avoid colliding with in-flight numbers; the in-memory log has its own 「清空日志」/clear-log button).
+- **日志 (Logs)**: the last 500 log lines (`logRing` in-memory ring buffer), auto-scrolls to the bottom with sticky scrolling (scrolling up manually pauses following; returning to the bottom resumes). No paging keys / wheel conflicts — pure native browser scrolling.
+- **配置 (Config)**: the config-file editor. Loads the current `config.json` contents (`GET /__config` returns `{path, content, exists}`); saving `POST /__config` first `json.Unmarshal`s into `Config` to validate JSON legality — **illegal JSON gets a straight 400 and is never written to disk** (avoiding a broken config on disk that would fail the next startup); only legal JSON is written and then `reloadConfig()` hot-applies; there's also a 「仅重载」 (reload only) button whose `POST /__reload` just calls `reloadConfig` without touching the file.
 
-页面每 500ms 轮询一次 `/__logs/data`（返回最近日志 + 全量状态计数 + 在途流列表 JSON）。**关闭浏览器标签页即隐藏，代理继续运行不受影响**。
+The page polls `/__logs/data` every 500ms (returning recent logs + full status counters + the in-flight stream list as JSON). **Closing the browser tab merely hides it — the proxy keeps running unaffected.**
 
-**状态卡片字段含义**：
-- **v版本**：exe 版本号 = git 短 hash + 构建时分（如 `c639d56-1606`），用于确认跑的是哪个 exe。用 `build.sh` 构建才会注入，直接 `go build` 会显示 `dev`。
-- **active / waiting**：当前进行中的请求数（active = 已发上游、转发中或重试等待；waiting = 等首字节阶段）。
-- **bytesForward / rate**：累计已转发字节 + 每秒更新一次的字节速率。每转发一段 SSE 就涨，是「正在迸出」的直接体感。
-- **cacheRead / input / output**：从 SSE 的 `usage` 解析的累计 token（另统计 `cache_creation` 缓存写入，ARK 的 `usage` 不含 `cache_creation_input_tokens`，按 0 计）。「缓存命中」卡片 = cache_read / (input + cache_read + cache_creation)，与 Claude Code 的 cache hit 算法一致：缓存写入不算命中、但计入总输入，漏掉它会虚高命中率。点卡片可看按上游模型分组的明细（含写入量）。**中途断开的流（客户端按 Esc、网络掉线）不计入聚合**：它们只收到 `message_start` 的预估 usage（Kimi 实测 `start.input` 含 cache_read 且 `start.cr=0`，真实拆分在 `message_delta` 才到），计入会把整个上下文算成未命中输入、显著拉低命中率；这类流整体回滚已计的增量，日志标 `[中断]`。
-- **retries**：启动至今的累计重试次数（每重试一次 +1；含状态码 429/5xx、首字节超时/网络错误、200 体内错误三种触发；预算耗尽放弃的不计）。
-- **classifiers**：启动至今命中分类器（安全判断）特征的请求数——无论是否分流 classifier_route、是否关思考都计。状态页「分类器」卡片悬停可看到命中总量与关思考改写数两个数，点击打开明细弹窗（含关思考占比），交互与「重试」卡片相同。
-- **classifierNoThink**：其中实际被改写关掉 thinking 的累计次数（`classifier_thinking_disabled` 开启时才会发生；已是关思考形态的请求不产生改写，不计）。
-- **avgFirstByte**：最近 `recent_sample_window` 次请求的**平均首字延迟**（秒）--从请求发出到上游吐出第一个 body 数据字节。只统计正常透传（情况 C）的流；收到第一个字节即入窗更新，不必等整流结束。
-- **tps**：最近 `recent_sample_window` 次请求的**加权 token 吞吐**--Σoutput_tokens / Σ流式时长（第一个字节到最后一个字节）。用加权而非简单平均，避免短请求拉偏整体吞吐。
+**Status card field meanings**:
+- **v-version**: the exe's version = git short hash + build HHMM (e.g. `c639d56-1606`), for confirming which exe is running. Only injected when built with `build.sh`; a bare `go build` shows `dev`.
+- **active / waiting**: requests currently in progress (active = sent upstream, forwarding or awaiting retry; waiting = in the first-byte stage).
+- **bytesForward / rate**: cumulative forwarded bytes + a once-per-second byte rate. It grows with every SSE chunk forwarded — the direct feel of "tokens pouring out".
+- **cacheRead / input / output**: cumulative tokens parsed from SSE `usage` (`cache_creation` cache writes are also tracked; ARK's `usage` has no `cache_creation_input_tokens`, counted as 0). The 「缓存命中」 (cache hit) card = cache_read / (input + cache_read + cache_creation), consistent with Claude Code's cache-hit algorithm: cache writes don't count as hits but do count into total input — omitting them would inflate the hit rate. Click the card for a per-upstream-model breakdown (including write volume). **Streams disconnected midway (client Esc, network drop) don't count into the aggregates**: they only received `message_start`'s estimated usage (Kimi field tests show `start.input` includes cache_read with `start.cr=0`, the real split arriving only in `message_delta`), so counting them would book the whole context as uncached input and visibly drag down the hit rate; such streams roll back the deltas already counted, and the log marks `[中断]` (interrupted).
+- **retries**: cumulative retry count since startup (+1 per retry; includes all three triggers — status 429/5xx, first-byte timeout/network error, and 200-body errors; giving up on budget exhaustion isn't counted).
+- **classifiers**: requests matching the classifier (safety-check) fingerprint since startup — counted whether or not classifier_route reroutes and whether or not thinking is turned off. Hovering the Status page's 「分类器」 (classifier) card shows the two numbers (total hits and thinking-off rewrites); clicking opens a breakdown popup (with the thinking-off share), same interaction as the 「重试」 (retries) card.
+- **classifierNoThink**: of those, how many actually got the thinking-off rewrite (only happens with `classifier_thinking_disabled` on; requests already in thinking-off shape produce no rewrite and don't count).
+- **avgFirstByte**: mean first-token latency (seconds) over the last `recent_sample_window` requests — from sending the request to the upstream's first body data byte. Only normally-passed-through (case C) streams count; a stream enters the window as soon as its first byte arrives, no need to wait for it to finish.
+- **tps**: weighted token throughput over the last `recent_sample_window` requests — Σoutput_tokens / Σstreaming duration (first byte to last byte). Weighted rather than simply averaged, so short requests don't skew the overall throughput.
 
-> **关于 token 实时性**：ARK（及标准 Anthropic）只在流**末尾**的 `message_delta` 事件里发一次 `usage`，流过程中的 `content_block_delta` / `thinking_delta` 不带 token 计数。所以 token 字段在流过程中保持不变，到流结束才一次性更新为准确值。要看「正在迸出」的实时变化，看 `bytesForward`/`rate` 和在途流表格里的字节--它们随转发实时跳。
+> **About token realtimeness**: ARK (and standard Anthropic) only sends `usage` once, in the `message_delta` event at the **end** of the stream; the mid-stream `content_block_delta` / `thinking_delta` carry no token counts. So token fields stay constant during a stream and update to their accurate values at the end. For a live feel of "pouring out", watch `bytesForward`/`rate` and the bytes in the in-flight table — they jump as forwarding proceeds.
 
-实现要点：
+Implementation notes:
 
-- 日志统一进内存环形缓冲 `logRing`（500 行），供网页「日志」标签轮询；同时写 stderr（windowsgui 子系统或无终端时 stderr 为空操作，不落盘）。`log_file` 非空时再追加写入文件。
-- `reloadConfig()` 返回 error，网页「配置」标签保存重载失败时能把错误回显给用户；行为不变（重读配置、原子替换、清空累计统计、不重新监听端口）。
-- 端点全走 `isLocalRequest` 守卫：`GET /__config`、`POST /__config`（校验 + 写盘 + 重载）、`POST /__reload`（仅重载）、`GET /__logs`（HTML 页）、`GET /__logs/data`（状态 + 日志 JSON）。
+- Logs uniformly go to the in-memory ring buffer `logRing` (500 lines) for the web Logs tab to poll; also written to stderr (a no-op under the windowsgui subsystem or without a terminal — nothing hits disk). A non-empty `log_file` additionally appends to the file.
+- `reloadConfig()` returns an error, so the web Config tab can display the failure back to the user on save+reload failure; behavior is unchanged (re-read config, atomic swap, clear cumulative stats, no port re-bind).
+- All endpoints go through the `isLocalRequest` guard: `GET /__config`, `POST /__config` (validate + write + reload), `POST /__reload` (reload only), `GET /__logs` (HTML page), `GET /__logs/data` (status + log JSON).
 
-## 系统托盘 / 菜单栏（跨平台）
+## System tray / menu bar (cross-platform)
 
-启动后状态栏出现状态灯图标：macOS 在菜单栏（`.app` 打包，`LSUIElement=true` 无 Dock 图标）、Windows/Linux 在系统托盘。功能：
+After startup a status-light icon appears: in the menu bar on macOS (`.app` packaging, `LSUIElement=true`, no Dock icon), in the system tray on Windows/Linux. Features:
 
-- **右键图标**：菜单仅 `查看日志` + `退出代理` 两项，**全平台一致**（不再有「显示窗口」「打开配置文件」「刷新重载配置」--配置编辑与重载已移入网页控制台）。
-- **查看日志**：用默认浏览器打开网页控制台 `http://<listen>/__logs`（状态/日志/配置三标签，见上节）；**关闭浏览器标签页即隐藏，代理继续运行不受影响**。仅本机可访问（非 `127.0.0.1`/`::1`/`localhost` 请求返回 403）。
-- **状态灯图标**：三态变色--**灰色**(空闲，无请求) / **黄色**(已发上游、等首字节) / **绿色**(流式转发中)。并行请求时显示高优先级(绿>黄>灰)。每 200ms 检查一次状态，state/active/waiting 任一变化时更新图标和悬停文字。
-- **悬停 tooltip**：鼠标移到图标上显示多行文字，带当前数量。空闲时 `Proxy429` / `idle`；有请求时按状态分行：`active N` / `waiting N`，两态并存时都显示。数量变化也会刷新，所以能实时看到几个流在跑。
+- **Right-click the icon**: the menu has only 「查看日志」 (View logs) + 「退出代理」 (Quit proxy), **identical across platforms** (no more "show window" / "open config file" / "refresh reload config" — config editing and reload moved into the web console).
+- **View logs**: opens the web console `http://<listen>/__logs` in the default browser (Status/Logs/Config tabs, see above); **closing the browser tab merely hides it — the proxy keeps running unaffected**. Localhost-only (non-`127.0.0.1`/`::1`/`localhost` requests get 403).
+- **Status-light icon**: three colors — **grey** (idle, no requests) / **yellow** (sent upstream, awaiting first byte) / **green** (streaming forward). With parallel requests the higher priority shows (green > yellow > grey). State is checked every 200ms; any change in state/active/waiting updates the icon and hover text.
+- **Hover tooltip**: hovering the icon shows multi-line text with current counts. Idle: `Proxy429` / `idle`; with requests, one line per state: `active N` / `waiting N`, both shown when coexisting. Count changes also refresh, so you can see live how many streams are running.
 
-平台差异：
+Platform differences:
 
-| 平台 | 托盘位置 | 托盘实现 | cgo |
+| Platform | Tray location | Tray implementation | cgo |
 |------|----------|----------|-----|
-| Windows | 系统托盘 | `fyne.io/systray`（纯 Go syscall） | 否 |
-| macOS | 菜单栏 | `fyne.io/systray`（Cocoa/AppKit） | 是（需 clang，macOS 自带） |
-| Linux | 状态区 | `fyne.io/systray`（D-Bus StatusNotifier） | 否 |
+| Windows | system tray | `fyne.io/systray` (pure Go syscall) | no |
+| macOS | menu bar | `fyne.io/systray` (Cocoa/AppKit) | yes (needs clang, bundled with macOS) |
+| Linux | status area | `fyne.io/systray` (D-Bus StatusNotifier) | no |
 
-> 三平台代理功能完全一致（重试、路由、分类器、保活、网页控制台统计）；唯一差异是托盘位置（macOS 菜单栏 vs Windows/Linux 系统托盘）。Windows 用 GUI 子系统（`-H=windowsgui`）构建，启动不弹控制台窗口，纯托盘运行；日志看网页控制台或 `log_file`。
+> Proxy features are identical across the three platforms (retries, routing, classifier, keepalive, web-console stats); the only difference is tray location (macOS menu bar vs Windows/Linux system tray). Windows builds use the GUI subsystem (`-H=windowsgui`): no console window on launch, pure tray operation; logs via the web console or `log_file`.
 
-实现要点：
+Implementation notes:
 
-- 跨平台托盘用 `fyne.io/systray`：`tray.go` 一套代码管菜单/状态灯/tooltip/状态轮询，`systray.Run` 占主线程（macOS 要求 UI 事件循环在主线程），HTTP 服务在 goroutine 里并发跑。
-- 状态灯图标纯 Go 生成（无 cgo/无 GDI）：画 32x32 抗锯齿实心圆，macOS/Linux 编码成 PNG，Windows 封装成 BMP-entry ICO（`LoadImageW` 必定支持）。
+- Cross-platform tray via `fyne.io/systray`: one set of code in `tray.go` handles menu/status light/tooltip/status polling; `systray.Run` occupies the main thread (macOS requires the UI event loop on the main thread), and the HTTP service runs concurrently in a goroutine.
+- The status-light icon is generated in pure Go (no cgo/no GDI): a 32x32 anti-aliased solid circle, encoded as PNG for macOS/Linux and wrapped as a BMP-entry ICO for Windows (`LoadImageW` certainly supports it).
 
-## 本地测试
+## Local testing
 
-`test/` 目录里是可以脱离 ARK 本地复测用的文件：
+The `test/` directory holds files for local re-testing without ARK:
 
-- `test/mock_429.go`：mock 服务器，用 `?mode=` 切换三种上游行为——`429`（状态码重试）、`bodyerr`（200+体内错误重试）、`ok`（正常透传，带 `usage` 和 `message_delta`，能在网页控制台「状态」标签看到 token 跳动）。还会打印收到的 `thinking`/`reasoning_effort`/`max_tokens`，验证分类器改写是否生效。
-- `test/config_test.json`：测试配置，指向本地 mock，重试间隔小、关掉了 `Retry-After`，方便快速复测。
+- `test/mock_429.go`: a mock server switching among three upstream behaviors via `?mode=` — `429` (status-code retry), `bodyerr` (200 + in-body error retry), `ok` (normal pass-through, with `usage` and `message_delta`, so the web console's Status tab shows tokens ticking). It also prints the received `thinking`/`reasoning_effort`/`max_tokens` for verifying the classifier rewrite.
+- `test/config_test.json`: test config pointing at the local mock, with small retry intervals and `Retry-After` disabled for fast iteration.
 
-复测流程（项目根目录执行）：
+Re-test flow (run from the project root):
 
 ```bash
-# 终端1：起 mock（监听 9099）
+# Terminal 1: start the mock (listens on 9099)
 go run ./test
 
-# 终端2：起代理，指向 mock（Windows 用 .\proxy429.exe）
+# Terminal 2: start the proxy pointed at the mock (Windows: .\proxy429.exe)
 ./proxy429 -config test/config_test.json
 
-# 终端3：发请求测三种情况
+# Terminal 3: fire requests for the three cases
 curl -i -X POST "http://127.0.0.1:8081/v1/messages?mode=429" -d '{"model":"t","messages":[{"role":"user","content":"hi"}]}'
 curl -i -X POST "http://127.0.0.1:8081/v1/messages?mode=bodyerr" -d '{"model":"t","messages":[{"role":"user","content":"hi"}]}'
 curl -i -X POST "http://127.0.0.1:8081/v1/messages?mode=ok" -d '{"model":"t","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-看网页控制台「日志」标签的 `[改写]`/`[尝试 N]`/`[完成]` 日志确认行为。测完关掉代理（托盘菜单「退出代理」；或 macOS/Linux `Ctrl+C`、Windows `taskkill /F /IM proxy429.exe`）并关掉 mock。
+Confirm behavior via the `[改写]`/`[尝试 N]`/`[完成]` lines on the web console's Logs tab. When done, stop the proxy (tray menu 「退出代理」; or `Ctrl+C` on macOS/Linux, `taskkill /F /IM proxy429.exe` on Windows) and stop the mock.
 
-## 观察限流
+## Observing rate limits
 
-日志会打印每次重试（`[尝试 N] 上游响应状态码: 429` 接着 `→ 状态码 429，等待 ... 后重试`），跑一段时间就能看出这家提供商到底多爱 429。
+The log prints every retry (`[尝试 N] 上游响应状态码: 429` followed by `→ 状态码 429，等待 ... 后重试`) — run it for a while and you'll see exactly how fond this provider is of 429s.

@@ -8,9 +8,10 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// detectSystemLang 读当前用户的 Windows 显示语言（HKCU\Control Panel\International\
-// LocaleName，如 zh-CN / en-US），zh 开头判中文，其余判英文；读不到回退英文。
-// 注意：HKCU 是「运行本进程的用户」的 hive——服务/计划任务以其他账户跑时读到的是那个账户的区域设置。
+// detectSystemLang reads the current user's Windows display language (HKCU\Control Panel\International\
+// LocaleName, e.g. zh-CN / en-US): a zh prefix means Chinese, anything else English; unreadable falls back to English.
+// Note: HKCU is the hive of the user running this process — services/scheduled tasks running
+// under another account read that account's locale.
 func detectSystemLang() string {
 	k, err := registry.OpenKey(registry.CURRENT_USER, `Control Panel\International`, registry.QUERY_VALUE)
 	if err != nil {

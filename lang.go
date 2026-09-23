@@ -1,18 +1,20 @@
-// lang.go — 网页控制台界面语言：默认跟随操作系统语言（探测不到用英文），
-// 网页顶栏可手动切换；选择存配置目录下的 program-settings.txt（程序设置与路由配置
-// 分离，不写进 config*.json），之后每次启动继承该选择，直到再次手动改动
-// （改回「跟随系统」则从 program-settings.txt 删掉该键恢复自动探测）。
-// 旧配置文件里的 ui_lang 由 resolveProgramUILang 在启动时一次性迁移。
+// lang.go — web console UI language: follows the OS language by default (English
+// when undetectable); the page top bar allows manual switching. The choice is stored
+// in program-settings.txt under the config directory (program settings stay separate
+// from routing config, never written into config*.json) and is inherited on every
+// launch until changed again (choosing "follow system" deletes the key from
+// program-settings.txt and restores auto-detection).
+// A legacy ui_lang key in config files is migrated once at startup by resolveProgramUILang.
 package main
 
 import (
 	"sync/atomic"
 )
 
-// uiLang 是当前生效的界面语言（"zh"/"en"），仅经 applyUILang 写入、页面 handler 读取。
+// uiLang is the active UI language ("zh"/"en"); written only via applyUILang, read by page handlers.
 var uiLang atomic.Value
 
-// applyUILang 应用配置里的语言选择：空值回退到操作系统语言探测。
+// applyUILang applies the configured language choice; an empty value falls back to OS language detection.
 func applyUILang(cfgLang string) {
 	if cfgLang == "zh" || cfgLang == "en" {
 		uiLang.Store(cfgLang)
@@ -21,7 +23,7 @@ func applyUILang(cfgLang string) {
 	uiLang.Store(detectSystemLang())
 }
 
-// currentUILang 返回当前生效的界面语言（main 启动时必已初始化，兜底英文）。
+// currentUILang returns the active UI language (always initialized at main startup; English as fallback).
 func currentUILang() string {
 	if v := uiLang.Load(); v != nil {
 		return v.(string)

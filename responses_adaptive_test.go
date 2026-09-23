@@ -1,14 +1,14 @@
 package main
 
-// adaptive thinking / output_config.effort 的测试（对照 cc-switch thinking_optimizer.rs
-// 与 transform_codex_anthropic.rs 312-425）。
+// Tests for adaptive thinking / output_config.effort (mirroring cc-switch thinking_optimizer.rs
+// and transform_codex_anthropic.rs 312-425).
 
 import (
 	"testing"
 )
 
 func TestThinkingModelClassification(t *testing.T) {
-	// 映射表照抄 cc-switch thinking_optimizer.rs；归一化：小写 + '.'/'_' → '-'。
+	// Mapping table copied from cc-switch thinking_optimizer.rs; normalization: lowercase + '.'/'_' → '-'.
 	adaptive := []string{
 		"claude-fable-5", "anthropic/claude-fable-5", "claude-mythos-5",
 		"claude-mythos-preview", "claude-sonnet-5", "anthropic/claude-opus-4.8",
@@ -24,14 +24,14 @@ func TestThinkingModelClassification(t *testing.T) {
 			t.Errorf("usesAdaptiveThinking(%q)=true, want false", m)
 		}
 	}
-	// 默认开 adaptive 的子集。
+	// The subset that defaults to adaptive on.
 	if !adaptiveThinkingIsDefault("claude-fable-5") || !adaptiveThinkingIsDefault("claude-sonnet-5") {
 		t.Errorf("fable-5/sonnet-5 应默认开 adaptive")
 	}
 	if adaptiveThinkingIsDefault("claude-opus-4-8") {
 		t.Errorf("opus-4-8 不应默认开 adaptive")
 	}
-	// 关不掉 thinking 的只有 fable-5/mythos-5。
+	// Only fable-5/mythos-5 can't disable thinking.
 	if !thinkingCannotBeDisabled("claude-fable-5") || !thinkingCannotBeDisabled("claude-mythos-5") {
 		t.Errorf("fable-5/mythos-5 应关不掉 thinking")
 	}
@@ -66,7 +66,7 @@ func TestCodexEffortToAnthropic(t *testing.T) {
 }
 
 func TestAdaptiveThinkingDefaultModel(t *testing.T) {
-	// 默认开 adaptive 的模型不带 reasoning：thinking:adaptive，无 output_config。
+	// A default-adaptive model without reasoning: thinking:adaptive, no output_config.
 	body := map[string]interface{}{"model": "claude-fable-5", "input": "hi"}
 	out, _, err := responsesToAnthropic(body)
 	if err != nil {
@@ -78,14 +78,14 @@ func TestAdaptiveThinkingDefaultModel(t *testing.T) {
 	if _, ok := out["output_config"]; ok {
 		t.Errorf("无 effort 不应有 output_config: %v", out["output_config"])
 	}
-	// thinking 开着 → temperature 不透传。
+	// Thinking on → temperature not passed through.
 	if _, ok := out["temperature"]; ok {
 		t.Errorf("thinking 开启不应透传 temperature")
 	}
 }
 
 func TestAdaptiveThinkingEffortMapping(t *testing.T) {
-	// 非默认 adaptive 的模型（opus-4-8）：带 effort 才开 adaptive + output_config。
+	// A non-default-adaptive model (opus-4-8): only opens adaptive + output_config when effort is present.
 	body := map[string]interface{}{
 		"model": "claude-opus-4-8", "input": "hi",
 		"reasoning": map[string]interface{}{"effort": "high"},
@@ -100,7 +100,7 @@ func TestAdaptiveThinkingEffortMapping(t *testing.T) {
 	if objStr(asObj(out["output_config"]), "effort") != "high" {
 		t.Errorf("output_config=%v, want effort=high", out["output_config"])
 	}
-	// 不带 effort：非默认 adaptive 模型什么都不开。
+	// Without effort: a non-default-adaptive model opens nothing.
 	out2, _, err := responsesToAnthropic(map[string]interface{}{"model": "claude-opus-4-8", "input": "hi"})
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -111,7 +111,7 @@ func TestAdaptiveThinkingEffortMapping(t *testing.T) {
 }
 
 func TestAdaptiveThinkingExplicitNone(t *testing.T) {
-	// 关不掉的 fable-5 + 显式 none：仍 adaptive，effort 压成 low。
+	// Un-disableable fable-5 + explicit none: still adaptive, effort clamped to low.
 	body := map[string]interface{}{
 		"model": "claude-fable-5", "input": "hi", "temperature": 0.5,
 		"reasoning": map[string]interface{}{"effort": "none"},
@@ -129,7 +129,7 @@ func TestAdaptiveThinkingExplicitNone(t *testing.T) {
 	if _, ok := out["temperature"]; ok {
 		t.Errorf("thinking 开启不应透传 temperature")
 	}
-	// 能关的 opus-4-8 + 显式 none：thinking:disabled，无 output_config，temperature 透传。
+	// Disable-able opus-4-8 + explicit none: thinking:disabled, no output_config, temperature passed through.
 	body["model"] = "claude-opus-4-8"
 	out2, _, err := responsesToAnthropic(body)
 	if err != nil {
@@ -146,8 +146,8 @@ func TestAdaptiveThinkingExplicitNone(t *testing.T) {
 	}
 }
 
-// toolTurnBody 构造一轮「无签名 thinking 回放的工具续轮」请求：
-// function_call 后只有 function_call_output，没有 reasoning 信封。
+// toolTurnBody builds a "tool-continuation without signed thinking replay" request:
+// a function_call followed by only function_call_output, no reasoning envelope.
 func toolTurnBody(model string) map[string]interface{} {
 	return map[string]interface{}{
 		"model": model,
@@ -162,9 +162,9 @@ func toolTurnBody(model string) map[string]interface{} {
 }
 
 func TestThinkingHistoryInvalid(t *testing.T) {
-	// 工具续轮缺签名 thinking 回放：
-	// 关不掉的 fable-5 → 报错；能关的 adaptive 模型（sonnet-5）→ thinking:disabled；
-	// 非 adaptive 模型带 effort → budget 路径跳过、什么都不开。
+	// Tool continuation missing signed thinking replay:
+	// un-disableable fable-5 → error; disable-able adaptive model (sonnet-5) → thinking:disabled;
+	// non-adaptive model with effort → budget path skipped, nothing opened.
 	if _, _, err := responsesToAnthropic(toolTurnBody("claude-fable-5")); err == nil {
 		t.Errorf("fable-5 历史无效应报错")
 	}
@@ -187,7 +187,7 @@ func TestThinkingHistoryInvalid(t *testing.T) {
 }
 
 func TestThinkingHistoryValidWithEnvelope(t *testing.T) {
-	// 同构工具续轮，但带 reasoning 信封回放签名 thinking → 历史有效，正常开 thinking。
+	// Same-shape tool continuation, but with a reasoning envelope replaying signed thinking → history valid, thinking opens normally.
 	enc := encodeThinkingEnvelope(map[string]interface{}{
 		"type": "thinking", "thinking": "想", "signature": "sig_abc",
 	})
@@ -214,7 +214,7 @@ func TestForcedToolChoiceThinkingConflict(t *testing.T) {
 		"type": "function", "name": "get_weather",
 		"parameters": map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 	}
-	// 关不掉的 fable-5（默认 adaptive 开着）+ 强制 tool_choice → 报错。
+	// Un-disableable fable-5 (default adaptive on) + forced tool_choice → error.
 	body := map[string]interface{}{
 		"model": "claude-fable-5", "input": "hi",
 		"tools":       []interface{}{tool},
@@ -223,8 +223,8 @@ func TestForcedToolChoiceThinkingConflict(t *testing.T) {
 	if _, _, err := responsesToAnthropic(body); err == nil {
 		t.Errorf("fable-5 强制 tool_choice 应报错")
 	}
-	// 能关的 opus-4-8 + effort high + 强制 tool_choice → thinking:disabled、
-	// 删 output_config、恢复 temperature，tool_choice 保留。
+	// Disable-able opus-4-8 + effort high + forced tool_choice → thinking:disabled,
+	// output_config deleted, temperature restored, tool_choice kept.
 	body["model"] = "claude-opus-4-8"
 	body["reasoning"] = map[string]interface{}{"effort": "high"}
 	body["temperature"] = 0.7
@@ -250,7 +250,7 @@ func TestTrailingTurnSupportsThinking(t *testing.T) {
 	userText := map[string]interface{}{"role": "user", "content": []interface{}{
 		map[string]interface{}{"type": "text", "text": "hi"},
 	}}
-	// 纯 user 提问 → true。
+	// Pure user question → true.
 	if !trailingTurnSupportsThinking([]map[string]interface{}{userText}) {
 		t.Errorf("纯 user 应支持 thinking")
 	}
@@ -261,25 +261,25 @@ func TestTrailingTurnSupportsThinking(t *testing.T) {
 	toolResult := map[string]interface{}{"role": "user", "content": []interface{}{
 		map[string]interface{}{"type": "tool_result", "tool_use_id": "c1", "content": "结果"},
 	}}
-	// 签名 thinking + id 配对 → true。
+	// Signed thinking + paired ids → true.
 	if !trailingTurnSupportsThinking([]map[string]interface{}{userText, assistantWithThinking, toolResult}) {
 		t.Errorf("签名 thinking 配对应支持")
 	}
-	// 缺签名 thinking → false。
+	// Missing signed thinking → false.
 	assistantNoThinking := map[string]interface{}{"role": "assistant", "content": []interface{}{
 		map[string]interface{}{"type": "tool_use", "id": "c1", "name": "t", "input": map[string]interface{}{}},
 	}}
 	if trailingTurnSupportsThinking([]map[string]interface{}{userText, assistantNoThinking, toolResult}) {
 		t.Errorf("缺签名 thinking 不应支持")
 	}
-	// id 不配对 → false。
+	// Unpaired ids → false.
 	badResult := map[string]interface{}{"role": "user", "content": []interface{}{
 		map[string]interface{}{"type": "tool_result", "tool_use_id": "c9", "content": "结果"},
 	}}
 	if trailingTurnSupportsThinking([]map[string]interface{}{userText, assistantWithThinking, badResult}) {
 		t.Errorf("id 不配对不应支持")
 	}
-	// 末条非 user → false。
+	// Last message not user → false.
 	if trailingTurnSupportsThinking([]map[string]interface{}{userText, assistantWithThinking}) {
 		t.Errorf("末条 assistant 不应支持")
 	}

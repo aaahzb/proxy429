@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// testSSEAllBlocks 构造含全部块类型的 SSE 流：
-// thinking + server_tool_use + web_search_tool_result（含 encrypted_content 整块内联）+ tool_use（input_json_delta 分段）+ text。
-// server_tool_use 带 query 才算真搜索——空 query 会被 Responses 翻译层当 Kimi 空搜索占位丢弃。
+// testSSEAllBlocks builds an SSE stream with every block type:
+// thinking + server_tool_use + web_search_tool_result (with encrypted_content inlined whole) + tool_use (input_json_delta in fragments) + text.
+// A server_tool_use only counts as a real search with a query — an empty query is dropped by the Responses translation layer as a Kimi empty-search placeholder.
 func testSSEAllBlocks() string {
 	return "" +
 		`event: message_start` + "\n" +
@@ -49,9 +49,9 @@ func testSSEAllBlocks() string {
 		`data: {"type":"message_stop"}` + "\n\n"
 }
 
-// TestCollectStreamToJSONAllBlocks 验证所有块类型原样重建：
-// thinking（delta 累积）、server_tool_use、web_search_tool_result（encrypted_content 原样）、
-// tool_use（input_json_delta 拼成对象）、text，以及 usage 合并与 model 回写。
+// TestCollectStreamToJSONAllBlocks verifies all block types rebuild as-is:
+// thinking (delta accumulation), server_tool_use, web_search_tool_result (encrypted_content verbatim),
+// tool_use (input_json_delta assembled into an object), text, plus usage merging and model write-back.
 func TestCollectStreamToJSONAllBlocks(t *testing.T) {
 	resetStats()
 	sse := testSSEAllBlocks()
@@ -81,7 +81,7 @@ func TestCollectStreamToJSONAllBlocks(t *testing.T) {
 	if m["stop_reason"] != "end_turn" {
 		t.Errorf("stop_reason=%v, want end_turn", m["stop_reason"])
 	}
-	// usage 合并：start 的 input/cache_read + delta 的 output。
+	// Usage merge: start's input/cache_read + delta's output.
 	usage, _ := m["usage"].(map[string]interface{})
 	if usage["input_tokens"] != float64(77) || usage["cache_read_input_tokens"] != float64(11) || usage["output_tokens"] != float64(9) {
 		t.Errorf("usage 合并错误: %v", usage)
@@ -98,7 +98,7 @@ func TestCollectStreamToJSONAllBlocks(t *testing.T) {
 	if b1["type"] != "server_tool_use" || b1["id"] != "call_00_x" || b1["name"] != "web_search" {
 		t.Errorf("server_tool_use 块重建错误: %v", b1)
 	}
-	// web_search_tool_result：encrypted_content 必须原样保留（回放解密依赖它）。
+	// web_search_tool_result: encrypted_content must be preserved verbatim (replay decryption depends on it).
 	b2, _ := content[2].(map[string]interface{})
 	items, _ := b2["content"].([]interface{})
 	if len(items) != 1 {
@@ -108,7 +108,7 @@ func TestCollectStreamToJSONAllBlocks(t *testing.T) {
 	if r0["encrypted_content"] != "ENC_BLOB_123" || r0["url"] != "https://example.com/a" || r0["title"] != "测试结果" {
 		t.Errorf("web_search_result 重建错误: %v", r0)
 	}
-	// tool_use：input_json_delta 拼出的字符串要解析成对象。
+	// tool_use: the string assembled from input_json_delta must be parsed into an object.
 	b3, _ := content[3].(map[string]interface{})
 	inp, _ := b3["input"].(map[string]interface{})
 	if inp["city"] != "北京" {

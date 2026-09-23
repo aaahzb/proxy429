@@ -1,8 +1,8 @@
 package main
 
-// config.example.json 是新建配置/首运的模板（go:embed 进 exe），本测试保证模板里的
-// 每个字段都真实存在于 Config 结构体（DisallowUnknownFields 严格解码，幻觉字段直接报错），
-// 演示用的枚举值也都是代码里真实消费的值。
+// config.example.json is the template for new configs / first run (go:embed'ed into the exe); this test ensures every field
+// in the template really exists in the Config struct (DisallowUnknownFields strict decoding fails on hallucinated fields),
+// and that the demo enum values are values the code actually consumes.
 
 import (
 	"bytes"
@@ -18,7 +18,7 @@ func TestConfigExampleMatchesStruct(t *testing.T) {
 		t.Fatalf("config.example.json 严格解码失败（模板含结构体不存在的字段？）: %v", err)
 	}
 
-	// 关键字段非空：模板必须能作为一份完整演示。
+	// Key fields non-empty: the template must work as a complete demo.
 	if c.Listen == "" || c.Upstream == "" {
 		t.Errorf("listen/upstream 不能为空: %+v", c)
 	}
@@ -29,7 +29,7 @@ func TestConfigExampleMatchesStruct(t *testing.T) {
 		t.Errorf("retry_status_codes 不能为空")
 	}
 
-	// 演示枚举值必须是 summaryLevelConfig 真实识别的档位。
+	// The demo enum value must be a level summaryLevelConfig actually recognizes.
 	validLevel := map[string]bool{"low": true, "mid": true, "high": true, "max": true}
 	for i, r := range c.Routes {
 		if r.Pattern == "" || r.URL == "" {
@@ -43,7 +43,7 @@ func TestConfigExampleMatchesStruct(t *testing.T) {
 		t.Errorf("search_fallback.summary_level=%q 不是真实档位", c.SearchFallback.SummaryLevel)
 	}
 
-	// debug 字段按约定不进模板。
+	// The debug field is excluded from the template by convention.
 	var raw map[string]interface{}
 	if err := json.Unmarshal(configExampleBytes, &raw); err != nil {
 		t.Fatalf("模板不是合法 JSON: %v", err)
@@ -53,14 +53,14 @@ func TestConfigExampleMatchesStruct(t *testing.T) {
 	}
 }
 
-// TestConfigCoversAllStructFields 反向核对：Config 结构体里出现的每个 json 字段
-// （debug 除外）都应该在模板里演示出来，防止以后加了新字段忘记补演示。
+// TestConfigCoversAllStructFields is the reverse check: every json field on the Config struct
+// (except debug) should be demonstrated in the template, so adding a new field can't forget its demo.
 func TestConfigCoversAllStructFields(t *testing.T) {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(configExampleBytes, &raw); err != nil {
 		t.Fatalf("模板不是合法 JSON: %v", err)
 	}
-	// Config 结构体全字段（debug 字段列入豁免）。
+	// All Config struct fields (the debug field is exempted).
 	exempt := map[string]bool{"search_debug_dir": true}
 	for _, f := range []string{
 		"listen", "upstream", "max_retries", "base_delay_s",

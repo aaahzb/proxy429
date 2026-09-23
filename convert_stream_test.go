@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-// --- convertAlltoStream：全局非流式改流式 ---
+// --- convertAlltoStream: global non-streaming to streaming conversion ---
 
-// TestForceStreamTrue 验证把顶层 stream 字段改写为 true（流式定位+文本替换，不重序列化）。
+// TestForceStreamTrue verifies rewriting the top-level stream field to true (streaming locate + text replacement, no re-serialization).
 func TestForceStreamTrue(t *testing.T) {
 	cases := []struct {
 		name string
@@ -37,7 +37,7 @@ func TestForceStreamTrue(t *testing.T) {
 	}
 }
 
-// testSSEStream 构造一段 Anthropic SSE 流（message_start -> 文本 -> message_delta -> message_stop）。
+// testSSEStream builds an Anthropic SSE stream (message_start -> text -> message_delta -> message_stop).
 func testSSEStream() string {
 	return "" +
 		`event: message_start` + "\n" +
@@ -54,7 +54,7 @@ func testSSEStream() string {
 		`data: {"type":"message_stop"}` + "\n\n"
 }
 
-// TestCollectStreamToJSON 验证把完整 SSE 流重建为非流式 message JSON 一次性返回。
+// TestCollectStreamToJSON verifies rebuilding a complete SSE stream into a non-streaming message JSON returned in one shot.
 func TestCollectStreamToJSON(t *testing.T) {
 	resetStats()
 	sse := testSSEStream()
@@ -87,7 +87,7 @@ func TestCollectStreamToJSON(t *testing.T) {
 	if m["id"] != "msg_123" {
 		t.Errorf("id=%v, want msg_123", m["id"])
 	}
-	// 路由改写场景：model 回写客户端原始 model。
+	// Route-rewrite scenario: model is written back to the client's original model.
 	if m["model"] != "claude-opus-4-1" {
 		t.Errorf("model=%v, want 回写 claude-opus-4-1", m["model"])
 	}
@@ -114,10 +114,10 @@ func TestCollectStreamToJSON(t *testing.T) {
 	}
 }
 
-// TestCollectStreamToJSONInterrupted 验证流中途断开时不写任何内容给客户端（可整体重试）。
+// TestCollectStreamToJSONInterrupted verifies nothing is written to the client when the stream breaks midway (wholesale retry stays possible).
 func TestCollectStreamToJSONInterrupted(t *testing.T) {
 	resetStats()
-	// 缺少 message_stop：流不完整。
+	// Missing message_stop: the stream is incomplete.
 	sse := `event: message_start` + "\n" +
 		`data: {"type":"message_start","message":{"id":"msg_1","model":"x","usage":{"input_tokens":5}}}` + "\n\n" +
 		`event: content_block_delta` + "\n" +
@@ -140,7 +140,7 @@ func TestCollectStreamToJSONInterrupted(t *testing.T) {
 	}
 }
 
-// TestHandlerConvertAllToStream 端到端：非流式请求被改为流式发上游，客户端收到非流式 JSON。
+// TestHandlerConvertAllToStream end-to-end: a non-streaming request is converted to streaming upstream, and the client receives non-streaming JSON.
 func TestHandlerConvertAllToStream(t *testing.T) {
 	resetStats()
 	var gotBody map[string]interface{}
@@ -174,14 +174,14 @@ func TestHandlerConvertAllToStream(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	// 上游收到的请求应已被改为流式、且 model 已被路由改写。
+	// The request the upstream received should have been converted to streaming, with model rewritten by routing.
 	if s, ok := gotBody["stream"].(bool); !ok || !s {
 		t.Errorf("上游收到 stream=%v, want true", gotBody["stream"])
 	}
 	if gotBody["model"] != "deepseek-v4-flash" {
 		t.Errorf("上游收到 model=%v, want deepseek-v4-flash（路由改写）", gotBody["model"])
 	}
-	// 客户端收到的应是非流式 JSON（无 SSE 痕迹），且 model 回写原值。
+	// The client should receive non-streaming JSON (no SSE traces), with model written back to the original value.
 	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type=%q, want application/json", ct)
 	}
@@ -197,7 +197,7 @@ func TestHandlerConvertAllToStream(t *testing.T) {
 	}
 }
 
-// TestHandlerConvertAllToStreamDisabled 验证配置关闭时非流式请求原样透传。
+// TestHandlerConvertAllToStreamDisabled verifies non-streaming requests pass through unchanged when the config is off.
 func TestHandlerConvertAllToStreamDisabled(t *testing.T) {
 	resetStats()
 	var gotStream interface{}

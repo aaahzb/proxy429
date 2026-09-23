@@ -21,7 +21,7 @@
     {
       "pattern": "claude-opus*",
       "url": "https://api.deepseek.com",
-      "api": "sk-deepseek-替换成你的key",
+      "api": "sk-deepseek-replace-with-your-key",
       "model": "deepseek-V4-pro",
       "text_only": true,
       "no_search": true,
@@ -30,7 +30,7 @@
     {
       "pattern": "claude-haiku*",
       "url": "https://api.deepseek.com",
-      "api": "sk-deepseek-替换成你的key",
+      "api": "sk-deepseek-replace-with-your-key",
       "model": "deepseek-V4-pro",
       "enhance_search": {
         "summary_thinking": false,
@@ -40,42 +40,42 @@
     {
       "pattern": "claude-sonnet*",
       "url": "https://your-vl-upstream.example.com",
-      "api": "替换成多模态上游的key",
+      "api": "replace-with-your-multimodal-upstream-key",
       "model": "kimi-vl",
       "no_search": true
     },
     {
       "pattern": "gpt-5*",
       "url": "https://api.deepseek.com",
-      "api": "sk-deepseek-替换成你的key",
+      "api": "sk-deepseek-replace-with-your-key",
       "model": "deepseek-V4-pro"
     },
     {
       "pattern": "codex-fable*",
       "url": "https://api.anthropic.com",
-      "api": "sk-ant-替换成你的key",
+      "api": "sk-ant-replace-with-your-key",
       "model": "claude-fable-5",
       "thinking": "adaptive"
     }
   ],
   "classifier_route": {
     "url": "https://api.deepseek.com",
-    "api": "sk-deepseek-替换成你的key",
+    "api": "sk-deepseek-replace-with-your-key",
     "model": "deepseek-v4-flash"
   },
   "fast_route": {
     "url": "https://api.deepseek.com",
-    "api": "sk-deepseek-替换成你的key",
+    "api": "sk-deepseek-replace-with-your-key",
     "model": "deepseek-v4-pro"
   },
   "multimodal_fallback": {
     "url": "https://your-multimodal-upstream.example.com",
-    "api": "替换成多模态上游的key",
+    "api": "replace-with-your-multimodal-upstream-key",
     "model": "kimi-vl"
   },
   "search_fallback": {
     "url": "https://api.deepseek.com",
-    "api": "sk-deepseek-替换成你的key",
+    "api": "sk-deepseek-replace-with-your-key",
     "model": "deepseek-search",
     "summary_mode": false,
     "summary_thinking": false,

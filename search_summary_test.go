@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// TestSearchAndRespond 验证摘要模式：mock Kimi 上游（step1 非流式搜索结果 + step2 流式摘要），
-// searchAndRespond 应构建 Kimi 格式 SSE（server_tool_use + web_search_tool_result + 摘要 text_delta）。
+// TestSearchAndRespond verifies summary mode: mock Kimi upstream (step1 non-streaming search results + step2 streaming summary);
+// searchAndRespond should build Kimi-format SSE (server_tool_use + web_search_tool_result + summary text_delta).
 func TestSearchAndRespond(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
@@ -20,7 +20,7 @@ func TestSearchAndRespond(t *testing.T) {
 		_ = json.Unmarshal(body, &m)
 		stream, _ := m["stream"].(bool)
 		if !stream {
-			// step1：非流式 JSON，返回 server_tool_use + web_search_tool_result。
+			// step1: non-streaming JSON returning server_tool_use + web_search_tool_result.
 			resp := map[string]any{
 				"id":          "msg_step1",
 				"model":       "kimi-for-coding",
@@ -37,7 +37,7 @@ func TestSearchAndRespond(t *testing.T) {
 			w.Write(b)
 			return
 		}
-		// step2：流式 SSE，返回摘要文本。
+		// step2: streaming SSE returning the summary text.
 		w.Header().Set("content-type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", `{"type":"message_start","message":{"model":"kimi-for-coding"}}`)
@@ -90,7 +90,7 @@ func TestSearchAndRespond(t *testing.T) {
 	}
 }
 
-// TestSearchAndRespondStep1Fail 验证 step1 失败时返回 false（handler 应降级）。
+// TestSearchAndRespondStep1Fail verifies false is returned when step1 fails (the handler should degrade).
 func TestSearchAndRespondStep1Fail(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
@@ -116,8 +116,8 @@ func TestSearchAndRespondStep1Fail(t *testing.T) {
 	}
 }
 
-// TestSearchAndRespondStep2Fallback 验证 step2 失败时分级降级：step2(thinking) 失败 -> mid(关thinking) 重试成功。
-// mock：step1 返回搜索结果；stream+含 thinking 返回 500；stream+不含 thinking 返回 mid 摘要。
+// TestSearchAndRespondStep2Fallback verifies graded degradation on step2 failure: step2(thinking) fails -> mid (thinking off) retry succeeds.
+// mock: step1 returns search results; stream+with-thinking returns 500; stream+without-thinking returns the mid summary.
 func TestSearchAndRespondStep2Fallback(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +126,7 @@ func TestSearchAndRespondStep2Fallback(t *testing.T) {
 		_ = json.Unmarshal(body, &m)
 		stream, _ := m["stream"].(bool)
 		if !stream {
-			// step1：非流式搜索结果
+			// step1: non-streaming search results
 			resp := map[string]any{
 				"id": "msg_step1", "model": "kimi-for-coding", "stop_reason": "end_turn",
 				"content": []map[string]any{
@@ -141,7 +141,7 @@ func TestSearchAndRespondStep2Fallback(t *testing.T) {
 			w.Write(b)
 			return
 		}
-		// stream=true：step2(含 thinking) 失败，降级 mid(不含 thinking) 返回摘要。
+		// stream=true: step2 (with thinking) fails, degraded mid (without thinking) returns the summary.
 		if strings.Contains(string(body), `"thinking"`) {
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(`{"error":"step2 down"}`))
@@ -176,7 +176,7 @@ func TestSearchAndRespondStep2Fallback(t *testing.T) {
 	}
 }
 
-// TestSearchAndRespondStep2AllFail 验证 step2 与 mid 都失败时，直接返回 step1 搜索结果（无摘要文本）。
+// TestSearchAndRespondStep2AllFail verifies that when both step2 and mid fail, step1's search results are returned directly (no summary text).
 func TestSearchAndRespondStep2AllFail(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
@@ -199,7 +199,7 @@ func TestSearchAndRespondStep2AllFail(t *testing.T) {
 			w.Write(b)
 			return
 		}
-		// stream=true：step2 与 mid 都失败
+		// stream=true: both step2 and mid fail
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error":"all fail"}`))
 	})
@@ -221,11 +221,11 @@ func TestSearchAndRespondStep2AllFail(t *testing.T) {
 		t.Fatal("应返回 true（返回 step1 结果）")
 	}
 	out := rec.Body.String()
-	// 应含 step1 搜索结果
+	// Should contain step1's search results
 	if !strings.Contains(out, "web_search_tool_result") || !strings.Contains(out, "Result 3 Title") {
 		t.Errorf("step1 搜索结果缺失，输出: %s", out)
 	}
-	// 应有 message_stop 收尾
+	// Should have a message_stop ending
 	if !strings.Contains(out, "message_stop") {
 		t.Errorf("缺 message_stop 收尾")
 	}
@@ -245,21 +245,21 @@ func readAll(t *testing.T, r interface{ Read([]byte) (int, error) }) []byte {
 	return buf
 }
 
-// TestSummaryLevelConfig 验证四档摘要级别返回不同指令与 max_tokens。
+// TestSummaryLevelConfig verifies the four summary levels return different instructions and max_tokens.
 func TestSummaryLevelConfig(t *testing.T) {
 	cases := []struct {
 		level   string
 		wantMax int
-		wantKey string // 指令中应包含的关键词
+		wantKey string // Keywords the instruction should contain
 	}{
 		{"low", 2048, "short"},
-		{"", 2048, "short"}, // 空默认 low
+		{"", 2048, "short"}, // Empty defaults to low
 		{"mid", 4096, "medium-detail"},
 		{"high", 8192, "detailed comprehensive"},
-		{"HIGH", 8192, "detailed comprehensive"}, // 大小写不敏感
-		{"max", 16384, "verbatim"},               // max：完整复述步骤/方法/代码/公式
-		{"full", 16384, "verbatim"},              // full 等同 max
-		{"unknown", 2048, "short"},               // 未知回退 low
+		{"HIGH", 8192, "detailed comprehensive"}, // Case-insensitive
+		{"max", 16384, "verbatim"},               // max: full restatement of steps/methods/code/formulas
+		{"full", 16384, "verbatim"},              // full equals max
+		{"unknown", 2048, "short"},               // Unknown falls back to low
 	}
 	for _, c := range cases {
 		instr, max := summaryLevelConfig(c.level, "test query")
@@ -270,7 +270,7 @@ func TestSummaryLevelConfig(t *testing.T) {
 			t.Errorf("level=%q 指令缺关键词 %q: %s", c.level, c.wantKey, instr)
 		}
 	}
-	// 四档指令应互不相同
+	// The four level instructions should all differ
 	low, _ := summaryLevelConfig("low", "test query")
 	mid, _ := summaryLevelConfig("mid", "test query")
 	high, _ := summaryLevelConfig("high", "test query")

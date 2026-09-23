@@ -1,4 +1,4 @@
-// lang_test.go — 界面语言：program-settings.txt 存取、系统语言探测回退、启动迁移、网页切换写程序设置。
+// lang_test.go — UI language: program-settings.txt persistence, system-language detection fallback, startup migration, web switching writes program settings.
 package main
 
 import (
@@ -11,8 +11,8 @@ import (
 	"testing"
 )
 
-// TestLoadConfigUILangIgnored 界面语言已迁出配置文件：Config 不再有 ui_lang 字段，
-// 配置里残留的 ui_lang（含旧版会报错的非法值）按未知字段忽略，加载不报错。
+// TestLoadConfigUILangIgnored: the UI language has moved out of config files: Config no longer has a ui_lang field;
+// a leftover ui_lang in a config (including legacy values that used to be rejected) is ignored as an unknown field; loading doesn't fail.
 func TestLoadConfigUILangIgnored(t *testing.T) {
 	for _, lang := range []string{"zh", "en", "fr", ""} {
 		body := `{"upstream":"http://x","ui_lang":"` + lang + `"}`
@@ -26,7 +26,7 @@ func TestLoadConfigUILangIgnored(t *testing.T) {
 	}
 }
 
-// TestApplyUILangFallback 配置未指定语言时回退到系统探测（结果必为 zh/en 之一）。
+// TestApplyUILangFallback: when the config doesn't specify a language, fall back to system detection (the result is always zh or en).
 func TestApplyUILangFallback(t *testing.T) {
 	applyUILang("")
 	if got := currentUILang(); got != "zh" && got != "en" {
@@ -42,9 +42,9 @@ func TestApplyUILangFallback(t *testing.T) {
 	}
 }
 
-// TestUILangHandlerWritesProgramSettings 网页切换语言：POST 写 program-settings.txt
-// （配置目录下，程序设置与路由配置分离）并热生效；配置文件逐字节不被改动
-// （根除自动重排）；传空串 = 跟随系统（删该键）。非法值 → 400 且程序设置不动。
+// TestUILangHandlerWritesProgramSettings: web language switching: POST writes program-settings.txt
+// (in the config directory; program settings are separate from routing config) and takes effect hot; the config file is not touched byte-wise
+// (auto-reformatting is eradicated); an empty string = follow the system (the key is deleted). An illegal value → 400 and program settings untouched.
 func TestUILangHandlerWritesProgramSettings(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -72,7 +72,7 @@ func TestUILangHandlerWritesProgramSettings(t *testing.T) {
 		return w
 	}
 
-	// 切英文 → program-settings.txt 出现 ui-lang=en，生效语言变 en，配置文件不动
+	// Switch to English → ui-lang=en appears in program-settings.txt, the effective language becomes en, the config file untouched
 	if w := post(`{"lang":"en"}`); w.Code != http.StatusOK {
 		t.Fatalf("POST en 状态码=%d: %s", w.Code, w.Body.String())
 	}
@@ -86,7 +86,7 @@ func TestUILangHandlerWritesProgramSettings(t *testing.T) {
 		t.Errorf("切换后 currentUILang=%q, want en", got)
 	}
 
-	// 传空串 → 删键回退系统语言，配置文件仍不动
+	// Empty string → key deleted, falling back to the system language; the config file still untouched
 	if w := post(`{"lang":""}`); w.Code != http.StatusOK {
 		t.Fatalf("POST 空 状态码=%d: %s", w.Code, w.Body.String())
 	}
@@ -97,7 +97,7 @@ func TestUILangHandlerWritesProgramSettings(t *testing.T) {
 		t.Errorf("配置文件被改动:\n%q", data)
 	}
 
-	// 非法值 → 400，program-settings.txt 不被改动
+	// Illegal value → 400, program-settings.txt untouched
 	before, _ := os.ReadFile(programSettingsPath())
 	if w := post(`{"lang":"fr"}`); w.Code != http.StatusBadRequest {
 		t.Errorf("POST fr 状态码=%d, want 400", w.Code)
@@ -108,7 +108,7 @@ func TestUILangHandlerWritesProgramSettings(t *testing.T) {
 	}
 }
 
-// TestRenderLogViewerEN 英文渲染：关键静态文案被替换、lang 属性变 en、中文母版不含残留标记。
+// TestRenderLogViewerEN English rendering: key static copy is replaced, the lang attribute becomes en, and the Chinese master page retains no leftover markers.
 func TestRenderLogViewerEN(t *testing.T) {
 	en := renderLogViewerEN(logViewerHTML)
 	for _, want := range []string{
@@ -127,26 +127,26 @@ func TestRenderLogViewerEN(t *testing.T) {
 	if strings.Contains(en, `<html lang="zh">`) {
 		t.Errorf("英文页不应残留 lang=zh")
 	}
-	// 中文母版不受影响
+	// The Chinese master page is unaffected
 	if !strings.Contains(logViewerHTML, `<html lang="zh">`) {
 		t.Errorf("中文母版 lang=zh 被改动")
 	}
 }
 
-// TestRenderLogViewerENNoChinese 兜底防漏：英文渲染后的页面里不允许残留任何
-// 中文字符（JS 注释除外——渲染前剥掉 // 行注释再查）。新增中文文案没补英文
-// 对照时本测试会立刻报出来。
+// TestRenderLogViewerENNoChinese is the leak-proof backstop: no Chinese characters may remain in the English-rendered page
+// (except JS comments — // line comments are stripped before the check). Adding Chinese copy without
+// an English counterpart makes this test fail immediately.
 func TestRenderLogViewerENNoChinese(t *testing.T) {
 	en := renderLogViewerEN(logViewerHTML)
-	// 页尾 i18n 脚本的 I18N 对照表故意以中文为键（翻译浏览器弹窗用），
-	// 整段脚本豁免检查
+	// The I18N table in the page-footer i18n script deliberately uses Chinese as keys (for translating browser dialogs),
+	// so the whole script block is exempt from the check
 	if i := strings.Index(en, "// ---- 界面语言（i18n）----"); i >= 0 {
 		if j := strings.Index(en[i:], "</script>"); j >= 0 {
 			en = en[:i] + en[i+j:]
 		}
 	}
-	// thinkEn 函数体故意含中文字面量（匹配服务端下发的「关」「开 N」运行时值），
-	// 是翻译逻辑本身而非待翻译文案，整段豁免
+	// The thinkEn function body deliberately contains Chinese literals (matching the server-pushed runtime values 「关」「开 N」);
+	// it's the translation logic itself, not copy to be translated, so the whole block is exempt
 	if i := strings.Index(en, "function thinkEn("); i >= 0 {
 		if j := strings.Index(en[i:], "\n}"); j >= 0 {
 			en = en[:i] + en[i+j+2:]
@@ -158,7 +158,7 @@ func TestRenderLogViewerENNoChinese(t *testing.T) {
 		if strings.HasPrefix(trimmed, "//") {
 			continue
 		}
-		// 行内 // 之后也是注释（JS 行注释），只查注释前的代码部分
+		// Text after an inline // is also a comment (JS line comment); only the code part before it is checked
 		if idx := strings.Index(line, "//"); idx >= 0 {
 			line = line[:idx]
 		}
@@ -166,9 +166,9 @@ func TestRenderLogViewerENNoChinese(t *testing.T) {
 		b.WriteByte('\n')
 	}
 	body := b.String()
-	// 语言切换器的选项标签按惯例用母语书写（中文/English），豁免
+	// The language switcher's option labels are written in their native tongues by convention (中文/English); exempt
 	body = strings.ReplaceAll(body, `<option value="zh">中文</option>`, `<option value="zh"></option>`)
-	// 剥掉 CSS 块注释（/* ... */，页面里只有 CSS 用这种注释）
+	// Strip CSS block comments (/* ... */, the only block-comment kind in the page)
 	for {
 		i := strings.Index(body, "/*")
 		if i < 0 {
@@ -196,8 +196,8 @@ func TestRenderLogViewerENNoChinese(t *testing.T) {
 	}
 }
 
-// TestSetTopLevelJSONValue 锁定文本级顶层键编辑：改值/删除/追加都只动目标键，
-// 其余字段的内容、顺序与排版（缩进、换行风格）逐字节保留；入参不被原地修改。
+// TestSetTopLevelJSONValue locks text-level top-level key editing: set/delete/append touch only the target key;
+// every other field's content, order, and formatting (indentation, newline style) is preserved byte for byte; the input is not modified in place.
 func TestSetTopLevelJSONValue(t *testing.T) {
 	cases := []struct {
 		name string
@@ -244,8 +244,8 @@ func TestSetTopLevelJSONValue(t *testing.T) {
 	}
 }
 
-// TestLogViewerHandlerZHDocBody 中文界面下文档弹窗正文必须被 logViewerDocZH 替换，
-// 不得残留 __DOC_BODY__ 占位（00c08ab 的回归：zh 分支漏了替换）。
+// TestLogViewerHandlerZHDocBody: in the Chinese UI the doc popup body must be replaced by logViewerDocZH,
+// with no __DOC_BODY__ placeholder left (regression of 00c08ab: the zh branch missed the replacement).
 func TestLogViewerHandlerZHDocBody(t *testing.T) {
 	old := currentUILang()
 	applyUILang("zh")
@@ -263,9 +263,9 @@ func TestLogViewerHandlerZHDocBody(t *testing.T) {
 	}
 }
 
-// TestResolveProgramUILangMigration 启动迁移：program-settings.txt 无 ui-lang 而旧配置
-// 文件带 ui_lang 时，迁移到 program-settings.txt、从配置里删掉该键（文本级，其余排版
-// 逐字节保留）并立即生效；program-settings.txt 已有值时优先，不再看配置、不再动配置。
+// TestResolveProgramUILangMigration startup migration: when program-settings.txt has no ui-lang but a legacy config
+// file carries ui_lang, migrate it into program-settings.txt and delete the key from the config (text-level; every other byte
+// of formatting preserved), effective immediately; when program-settings.txt already has a value it wins — the config is neither read nor touched.
 func TestResolveProgramUILangMigration(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -297,7 +297,7 @@ func TestResolveProgramUILangMigration(t *testing.T) {
 		t.Errorf("迁移后配置应为:\n%q\ngot:\n%q", want, data)
 	}
 
-	// program-settings.txt 已有值优先：配置再带 ui_lang 也不覆盖程序设置、不动配置
+	// An existing value in program-settings.txt wins: even if the config still carries ui_lang it neither overrides the program setting nor gets modified
 	if err := os.WriteFile(path, []byte(orig), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -313,8 +313,8 @@ func TestResolveProgramUILangMigration(t *testing.T) {
 	}
 }
 
-// TestProgramSettingsRoundTrip 程序设置读写：设值/改值/删键，注释与其他键的行
-// 原样保留；删除不存在的键不出错；统一 LF 与末尾换行。
+// TestProgramSettingsRoundTrip program-settings read/write: set/change/delete keys; comments and other keys' lines
+// are preserved verbatim; deleting a nonexistent key doesn't error; LF line endings and a trailing newline throughout.
 func TestProgramSettingsRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -337,27 +337,27 @@ func TestProgramSettingsRoundTrip(t *testing.T) {
 	if err := writeProgramSetting("ui-lang", "zh"); err != nil {
 		t.Fatal(err)
 	}
-	// 手工加注释行与另一个键，验证改值/删键都不破坏它们
+	// Manually add a comment line and another key, verifying set/delete don't break them
 	data, _ := os.ReadFile(programSettingsPath())
 	text := "# 程序设置（与路由配置分离）\n" + string(data) + "other=1\n"
 	if err := os.WriteFile(programSettingsPath(), []byte(text), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeProgramSetting("ui-lang", "en"); err != nil { // 改值
+	if err := writeProgramSetting("ui-lang", "en"); err != nil { // Change a value
 		t.Fatal(err)
 	}
 	want := "# 程序设置（与路由配置分离）\nui-lang=en\nother=1\n"
 	if data, _ := os.ReadFile(programSettingsPath()); string(data) != want {
 		t.Errorf("改值后应为:\n%q\ngot:\n%q", want, data)
 	}
-	if err := writeProgramSetting("ui-lang", ""); err != nil { // 删键
+	if err := writeProgramSetting("ui-lang", ""); err != nil { // Delete a key
 		t.Fatal(err)
 	}
 	want = "# 程序设置（与路由配置分离）\nother=1\n"
 	if data, _ := os.ReadFile(programSettingsPath()); string(data) != want {
 		t.Errorf("删键后应为:\n%q\ngot:\n%q", want, data)
 	}
-	if err := writeProgramSetting("no-such-key", ""); err != nil { // 删不存在的键
+	if err := writeProgramSetting("no-such-key", ""); err != nil { // Delete a nonexistent key
 		t.Errorf("删不存在的键不应报错: %v", err)
 	}
 	if got := readProgramSetting("other"); got != "1" {

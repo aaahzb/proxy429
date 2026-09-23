@@ -2,8 +2,8 @@ package main
 
 // cc-switch: https://github.com/farion1231/cc-switch — MIT License, Copyright (c) 2025 Jason Young.
 
-// responses_test.go — Responses API 监听口的翻译层测试。
-// 请求转换用例移植自 cc-switch transform_codex_anthropic.rs 的测试集。
+// responses_test.go — translation-layer tests for the Responses API listener port.
+// Request-conversion cases ported from cc-switch transform_codex_anthropic.rs's test suite.
 
 import (
 	"encoding/json"
@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-// ---- 请求翻译 ----
+// ---- Request translation ----
 
 func TestResponsesToAnthropicSimple(t *testing.T) {
 	body := map[string]interface{}{
@@ -48,8 +48,8 @@ func TestResponsesToAnthropicSimple(t *testing.T) {
 }
 
 func TestResponsesToAnthropicFunctionCallMerging(t *testing.T) {
-	// 两个连续 function_call + 两个 function_call_output：
-	// 调用并入同一条 assistant 消息，结果合并进同一条 user 消息。
+	// Two consecutive function_call + two function_call_output:
+	// calls merge into the same assistant message, results merge into the same user message.
 	body := map[string]interface{}{
 		"model": "gpt-5-codex",
 		"input": []interface{}{
@@ -90,8 +90,8 @@ func TestResponsesToAnthropicFunctionCallMerging(t *testing.T) {
 }
 
 func TestResponsesToAnthropicOrphanOutputDropped(t *testing.T) {
-	// 孤儿 function_call_output（没有配对的 function_call）：整条丢弃，
-	// 留下的空 user 也被清掉，最终只剩开头的用户问题。
+	// Orphan function_call_output (no paired function_call): dropped wholesale,
+	// the emptied user message is also cleaned up, leaving only the opening user question.
 	body := map[string]interface{}{
 		"model": "gpt-5-codex",
 		"input": []interface{}{
@@ -112,7 +112,7 @@ func TestResponsesToAnthropicOrphanOutputDropped(t *testing.T) {
 }
 
 func TestResponsesToAnthropicLeadingUserInserted(t *testing.T) {
-	// 历史以 assistant 开头（压缩/恢复的会话）：自动补前导 user。
+	// History starting with assistant (compacted/resumed session): a leading user is auto-inserted.
 	body := map[string]interface{}{
 		"model": "gpt-5-codex",
 		"input": []interface{}{
@@ -138,7 +138,7 @@ func TestResponsesToAnthropicLeadingUserInserted(t *testing.T) {
 }
 
 func TestResponsesToAnthropicIncompleteToolTurnDropped(t *testing.T) {
-	// assistant tool_use 没有对应 tool_result：整个工具轮丢弃，保留普通对话。
+	// assistant tool_use without a matching tool_result: the whole tool turn is dropped, ordinary conversation kept.
 	body := map[string]interface{}{
 		"model": "gpt-5-codex",
 		"input": []interface{}{
@@ -161,7 +161,7 @@ func TestResponsesToAnthropicIncompleteToolTurnDropped(t *testing.T) {
 			t.Errorf("仍存在未配对的 tool_use: %v", m)
 		}
 	}
-	// 两条 user 各自保留（未配对工具轮丢弃后，两条普通对话不受影响）。
+	// Two user messages each kept (unaffected after the unpaired tool turn is dropped).
 	if len(msgs) != 2 {
 		t.Errorf("messages=%v, want 两条 user", msgs)
 	}
@@ -193,17 +193,17 @@ func TestResponsesToAnthropicThinkingBudget(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 	th := asObj(out["thinking"])
-	// budget 压到 max_tokens/2=16000（默认 max_tokens 32000，16384 超半）。
+	// Budget clamped to max_tokens/2=16000 (default max_tokens 32000; 16384 exceeds half).
 	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("thinking=%v, want enabled/16000（max_tokens 半压顶）", th)
 	}
 }
 
-// TestResponsesToAnthropicThinkStyleOverride 锁定路由 thinking 参数（目标模型思考形态
-// 声明）对翻译判定的覆盖：auto 维持按客户端 model 名查表；budget 强制经典
-// enabled+budget_tokens（即使客户端别名叫 adaptive 表内模型）；adaptive 强制
-// adaptive+output_config.effort（即使客户端名不在表内）；强制后关思考仍允许
-// （cannotDisable 不再套用 fable/mythos 规则）。
+// TestResponsesToAnthropicThinkStyleOverride locks the route thinking parameter (target-model thinking-shape
+// declaration) overriding translation decisions: auto keeps looking up by client model name; budget forces classic
+// enabled+budget_tokens (even when the client alias names a model in the adaptive table); adaptive forces
+// adaptive+output_config.effort (even when the client name isn't in the table); after forcing, turning thinking off is still allowed
+// (cannotDisable no longer applies the fable/mythos rules).
 func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	mk := func(model, effort string) map[string]interface{} {
 		return map[string]interface{}{
@@ -213,7 +213,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 		}
 	}
 
-	// auto：fable-5 表内 → adaptive + effort 映射（high→high）。
+	// auto: fable-5 in the table → adaptive + effort mapping (high→high).
 	out, _, _, err := responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "", false)
 	if err != nil {
 		t.Fatalf("auto err: %v", err)
@@ -223,7 +223,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 		t.Errorf("auto fable-5: thinking=%v output_config=%v, want adaptive/high", th, out["output_config"])
 	}
 
-	// budget 强制：同为 fable-5 别名，路由声明 budget → enabled+16000（压顶），无 output_config。
+	// budget forced: same fable-5 alias, route declares budget → enabled+16000 (capped), no output_config.
 	out, _, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "budget", false)
 	if err != nil {
 		t.Fatalf("budget err: %v", err)
@@ -236,7 +236,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 		t.Errorf("budget 路径不应有 output_config: %v", out["output_config"])
 	}
 
-	// adaptive 强制：gpt-5-codex 不在表内，路由声明 adaptive → adaptive+effort high。
+	// adaptive forced: gpt-5-codex not in the table, route declares adaptive → adaptive+effort high.
 	out, _, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "high"), nil, nil, "adaptive", false)
 	if err != nil {
 		t.Fatalf("adaptive err: %v", err)
@@ -246,7 +246,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 		t.Errorf("adaptive gpt-5-codex: thinking=%v output_config=%v, want adaptive/high", th, out["output_config"])
 	}
 
-	// 强制 adaptive + 显式关（effort none）→ disabled（cannotDisable 被覆盖，允许关）。
+	// forced adaptive + explicit off (effort none) → disabled (cannotDisable overridden, off allowed).
 	out, _, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "adaptive", false)
 	if err != nil {
 		t.Fatalf("adaptive none err: %v", err)
@@ -255,7 +255,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 		t.Errorf("adaptive+none: thinking=%v, want disabled", out["thinking"])
 	}
 
-	// budget 强制 + 显式关 → disabled。
+	// budget forced + explicit off → disabled.
 	out, _, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "none"), nil, nil, "budget", false)
 	if err != nil {
 		t.Fatalf("budget none err: %v", err)
@@ -265,9 +265,9 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 }
 
-// TestResponsesThinkMode 锁定状态页「API」列思考值的 Responses 口径：reasoning.effort 只显
-// 档位词（"effort·" 前缀多余——Responses 口径由列绿色承担），显式关闭值
-// （none/off/disabled，大小写不敏感）归并为 "关"；无 reasoning / 无 effort / reasoning 非对象都返回空（列显 -）。
+// TestResponsesThinkMode locks the Responses-side vocabulary of the status page's 「API」 column thinking values: reasoning.effort shows only
+// the level word (an "effort·" prefix would be redundant — the column's green carries the Responses family), explicit-off values
+// (none/off/disabled, case-insensitive) merge into "关"; no reasoning / no effort / non-object reasoning all return empty (column shows -).
 func TestResponsesThinkMode(t *testing.T) {
 	cases := []struct {
 		name string
@@ -330,7 +330,7 @@ func TestResponsesToAnthropicToolChoiceAndTools(t *testing.T) {
 	}
 }
 
-// ---- 思考块信封 ----
+// ---- Thinking-block envelopes ----
 
 func TestThinkingEnvelopeRoundTrip(t *testing.T) {
 	blk := map[string]interface{}{
@@ -347,7 +347,7 @@ func TestThinkingEnvelopeRoundTrip(t *testing.T) {
 	if objStr(dec, "thinking") != "先想一想" || objStr(dec, "signature") != "sig_abc" {
 		t.Errorf("还原块=%v", dec)
 	}
-	// 无签名的 thinking 不编码；乱码/别家信封解不出。
+	// Unsigned thinking isn't encoded; garbled/foreign envelopes don't decode.
 	if encodeThinkingEnvelope(map[string]interface{}{"type": "thinking", "thinking": "x"}) != "" {
 		t.Errorf("无签名 thinking 不应编码")
 	}
@@ -356,7 +356,7 @@ func TestThinkingEnvelopeRoundTrip(t *testing.T) {
 	}
 }
 
-// ---- 响应翻译（非流式 JSON→JSON）----
+// ---- Response translation (non-streaming JSON→JSON) ----
 
 func TestAnthropicToResponsesObject(t *testing.T) {
 	msg := map[string]interface{}{
@@ -408,9 +408,9 @@ func TestAnthropicToResponsesObject(t *testing.T) {
 	}
 }
 
-// ---- 流式状态机 ----
+// ---- Streaming state machine ----
 
-// feedSSEToConv 把 SSE 文本逐块喂给状态机。
+// feedSSEToConv feeds SSE text into the state machine block by block.
 func feedSSEToConv(conv *anthToRespStream, sse string) {
 	for _, block := range strings.Split(sse, "\n\n") {
 		block = strings.TrimSpace(block)
@@ -456,24 +456,24 @@ func TestAnthToRespStreamAllBlocks(t *testing.T) {
 			t.Errorf("事件流缺 %s", want)
 		}
 	}
-	// response.created 必须先于 output_item.added。
+	// response.created must come before output_item.added.
 	if strings.Index(joined, "response.created") > strings.Index(joined, "response.output_item.added") {
 		t.Errorf("事件顺序错误：created 应最先")
 	}
 
 	final := conv.buildFinalResponse()
 	output := asArr(final["output"])
-	// reasoning + web_search_call(调用) + web_search_call(来源) + function_call + message = 5
+	// reasoning + web_search_call(call) + web_search_call(sources) + function_call + message = 5
 	if len(output) != 5 {
 		t.Fatalf("output 数=%d, want 5: %v", len(output), output)
 	}
-	// reasoning 项的信封能还原 thinking 块（含签名）。
+	// The reasoning item's envelope restores the thinking block (signature included).
 	rs := asObj(output[0])
 	dec := decodeThinkingEnvelope(objStr(rs, "encrypted_content"))
 	if dec == nil || objStr(dec, "signature") != "sig_abc" {
 		t.Errorf("reasoning 信封还原失败: %v", dec)
 	}
-	// 真搜索：调用项 action 带 query，结果项 action 带 sources。
+	// Real search: the call item's action carries query, the result item's action carries sources.
 	var wsActions []map[string]interface{}
 	for _, it := range output {
 		if objStr(asObj(it), "type") == "web_search_call" {
@@ -489,7 +489,7 @@ func TestAnthToRespStreamAllBlocks(t *testing.T) {
 	if len(asArr(wsActions[1]["sources"])) != 1 {
 		t.Errorf("搜索结果项 action=%v, want 1 条 sources", wsActions[1])
 	}
-	// function_call 参数拼全。
+	// function_call arguments fully assembled.
 	var fcItem map[string]interface{}
 	for _, it := range output {
 		if objStr(asObj(it), "type") == "function_call" {
@@ -503,7 +503,7 @@ func TestAnthToRespStreamAllBlocks(t *testing.T) {
 	if err := json.Unmarshal([]byte(objStr(fcItem, "arguments")), &args); err != nil || args["city"] != "北京" {
 		t.Errorf("arguments=%v", objStr(fcItem, "arguments"))
 	}
-	// usage 合并：input 77+cache 11=88，output 9。
+	// usage merge: input 77+cache 11=88, output 9.
 	usage := asObj(final["usage"])
 	if toInt64(usage["input_tokens"]) != 88 || toInt64(usage["output_tokens"]) != 9 {
 		t.Errorf("usage=%v", usage)
@@ -513,10 +513,10 @@ func TestAnthToRespStreamAllBlocks(t *testing.T) {
 	}
 }
 
-// testSSEEmptySearchTriplet 构造 Kimi k3-256k 实测的「空搜索三连」流：
-// 空前言 text 块（"Search results for query: "，query 为空）+ 无 id/input 的
-// server_tool_use + content 为空的 web_search_tool_result，随后 thinking + 正文。
-// （在线探针实证：请求带 web_search 工具时每轮响应开头都有这组占位。）
+// testSSEEmptySearchTriplet builds the "empty-search triple" stream observed live on Kimi k3-256k:
+// an empty-preamble text block ("Search results for query: ", query empty) + an id-less/input-less
+// server_tool_use + a content-empty web_search_tool_result, followed by thinking + body.
+// (Online probe evidence: every response starts with this placeholder set when the request carries the web_search tool.)
 func testSSEEmptySearchTriplet() string {
 	return "" +
 		`event: message_start` + "\n" +
@@ -555,8 +555,8 @@ func testSSEEmptySearchTriplet() string {
 		`data: {"type":"message_stop"}` + "\n\n"
 }
 
-// TestAnthToRespStreamDropsEmptySearchTriplet 验证流式路径整块丢弃空搜索三连：
-// 前言文本不出现在事件流、不产生 web_search_call 项，thinking/正文不受影响。
+// TestAnthToRespStreamDropsEmptySearchTriplet verifies the streaming path drops the empty-search triple wholesale:
+// the preamble text never appears in the event stream, no web_search_call item is produced, thinking/body unaffected.
 func TestAnthToRespStreamDropsEmptySearchTriplet(t *testing.T) {
 	var events []string
 	conv := newAnthToRespStream(func(ev string) { events = append(events, ev) }, "k3-256k", nil)
@@ -576,7 +576,7 @@ func TestAnthToRespStreamDropsEmptySearchTriplet(t *testing.T) {
 	}
 	final := conv.buildFinalResponse()
 	output := asArr(final["output"])
-	// 只剩 reasoning + message（前言/空调用/空结果三项被丢）。
+	// Only reasoning + message remain (preamble/empty-call/empty-result dropped).
 	if len(output) != 2 {
 		t.Fatalf("output 数=%d, want 2: %v", len(output), output)
 	}
@@ -593,16 +593,16 @@ func TestAnthToRespStreamDropsEmptySearchTriplet(t *testing.T) {
 	}
 }
 
-// TestAnthToRespStreamStripsRepeatedPreamble 复刻实测流：前言重复两次、逐 token 粘在
-// 正文开头（Kimi 模型从历史模仿前言模式的产物）。翻译后正文应只剩 "我确认一下"，
-// 且吐字 delta 拼接起来也不含前言。
+// TestAnthToRespStreamStripsRepeatedPreamble reproduces the observed stream: the preamble repeats twice, glued token by token
+// onto the body's start (the Kimi model imitating the preamble pattern from history). After translation the body should be just "我确认一下",
+// and the concatenated output deltas shouldn't contain the preamble either.
 func TestAnthToRespStreamStripsRepeatedPreamble(t *testing.T) {
 	sse := "" +
 		`event: message_start` + "\n" +
 		`data: {"type":"message_start","message":{"id":"msg_k4","type":"message","role":"assistant","model":"k3-256k","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}` + "\n\n" +
 		`event: content_block_start` + "\n" +
 		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n"
-	// 前言按实测的碎 delta 形状逐段喂入。
+	// The preamble is fed in fragments matching the observed broken-delta shape.
 	for _, d := range []string{"Search", " results", " for", " query", ":",
 		" Search", " results", " for", " query", ":", " ", "我", "确认一下"} {
 		b, _ := json.Marshal(map[string]interface{}{"type": "text_delta", "text": d})
@@ -622,7 +622,7 @@ func TestAnthToRespStreamStripsRepeatedPreamble(t *testing.T) {
 	if !conv.completed {
 		t.Fatalf("流未完成")
 	}
-	// 事件流里的 output_text.delta 拼起来应恰好是正文，不含前言。
+	// The output_text.delta events concatenated should be exactly the body, preamble-free.
 	var deltas strings.Builder
 	for _, ev := range events {
 		for _, line := range strings.Split(ev, "\n") {
@@ -648,8 +648,8 @@ func TestAnthToRespStreamStripsRepeatedPreamble(t *testing.T) {
 	}
 }
 
-// TestAnthToRespStreamDropsSearchQueryEcho 复刻 08-30 天气会话实测形状：单条前言后紧跟
-// 真 query 文本。query 回声行整行删除——事件流与最终输出都不含该行（该块不产生任何事件）。
+// TestAnthToRespStreamDropsSearchQueryEcho reproduces the observed 08-30 weather-session shape: a single preamble immediately followed by
+// the real query text. The query echo line is deleted whole — neither the event stream nor the final output contains that line (the block produces no events at all).
 func TestAnthToRespStreamDropsSearchQueryEcho(t *testing.T) {
 	sse := "" +
 		`event: message_start` + "\n" +
@@ -686,7 +686,7 @@ func TestAnthToRespStreamDropsSearchQueryEcho(t *testing.T) {
 	}
 }
 
-// TestAnthropicToResponsesObjectDropsEmptySearch 验证非流式 JSON 整转路径同样过滤空搜索三连。
+// TestAnthropicToResponsesObjectDropsEmptySearch verifies the non-streaming JSON wholesale-conversion path also filters the empty-search triple.
 func TestAnthropicToResponsesObjectDropsEmptySearch(t *testing.T) {
 	msg := map[string]interface{}{
 		"id": "msg_k2", "model": "k3-256k", "stop_reason": "end_turn",
@@ -710,8 +710,8 @@ func TestAnthropicToResponsesObjectDropsEmptySearch(t *testing.T) {
 	}
 }
 
-// TestAnthropicToResponsesObjectKeepsRealSearch 验证真搜索的结构化项不受影响：
-// 调用项带 query、结果项带 sources；query 回声文本行整行删除（不再进输出）。
+// TestAnthropicToResponsesObjectKeepsRealSearch verifies real search's structured items are unaffected:
+// the call item carries query, the result item carries sources; the query echo text line is deleted whole (no longer enters the output).
 func TestAnthropicToResponsesObjectKeepsRealSearch(t *testing.T) {
 	msg := map[string]interface{}{
 		"id": "msg_k3", "model": "k3-256k", "stop_reason": "end_turn",
@@ -727,7 +727,7 @@ func TestAnthropicToResponsesObjectKeepsRealSearch(t *testing.T) {
 	}
 	out := anthropicToResponsesObject(msg, "k3-256k", nil, nil, false)
 	output := asArr(out["output"])
-	// 回声文本已删：web_search_call(调用) + web_search_call(来源) + message(答案) = 3
+	// Echo text deleted: web_search_call(call) + web_search_call(sources) + message(answer) = 3
 	if len(output) != 3 {
 		t.Fatalf("output 数=%d, want 3: %v", len(output), output)
 	}
@@ -748,16 +748,16 @@ func TestAnthropicToResponsesObjectKeepsRealSearch(t *testing.T) {
 	}
 }
 
-// TestStripRepeatedPreamble 锁定前言分流规则：≥2 条连续前言才剥光（模型模仿签名），
-// 单条前言+文本与无前言文本一律原样保留（回声行整行删除是 stripSearchQueryEcho 的职责）。
+// TestStripRepeatedPreamble locks the preamble split rules: only ≥2 consecutive preambles are stripped bare (the model's imitation signature);
+// single preamble+text and preamble-free text are kept as-is (whole-line echo deletion is stripSearchQueryEcho's job).
 func TestStripRepeatedPreamble(t *testing.T) {
 	const m = "Search results for query: "
 	cases := []struct{ in, want string }{
 		{"", ""},
 		{"正文", "正文"},
-		{m, m}, // 单条纯前言：本函数不动（整行删除在 stripSearchQueryEcho）
-		{m + "广州 天气", m + "广州 天气"}, // 单条前言+query：本函数不动
-		{m + m, ""}, // 重复纯前言：剥光为空
+		{m, m}, // Single bare preamble: untouched by this function (whole-line deletion lives in stripSearchQueryEcho)
+		{m + "广州 天气", m + "广州 天气"}, // Single preamble+query: untouched by this function
+		{m + m, ""}, // Repeated bare preambles: stripped to empty
 		{m + m + "我确认一下", "我确认一下"},
 		{m + m + m + "我确认一下", "我确认一下"},
 	}
@@ -768,21 +768,21 @@ func TestStripRepeatedPreamble(t *testing.T) {
 	}
 }
 
-// TestStripSearchQueryEcho 锁定回声行删除规则：单条前言开头的行（含 query）整行删除；
-// 重复裸前言粘连正文剥光留正文；无回声的文本逐字节原样；删除留下的行首空行去掉。
+// TestStripSearchQueryEcho locks the echo-line deletion rules: lines starting with a single preamble (query included) are deleted whole;
+// repeated bare preambles glued to body text are stripped bare keeping the body; echo-free text passes byte for byte; line-leading blank lines left by deletion are removed.
 func TestStripSearchQueryEcho(t *testing.T) {
 	const m = "Search results for query: "
 	cases := []struct{ in, want string }{
 		{"", ""},
 		{"正文", "正文"},
-		{"a\n\nb", "a\n\nb"},        // 无回声：空行原样保留，逐字节不动
-		{m, ""},                     // 纯前言
-		{strings.TrimSpace(m), ""},  // 无尾空格的裸前言形态
-		{m + "广州 天气", ""},           // 回声行独占一块：删空
-		{m + "广州 天气\n正文", "正文"},     // 回声行+正文：删行留正文
-		{m + "广州 天气\n\n\n正文", "正文"}, // 删除留下的行首空行去掉
-		{"前文\n" + m + "广州\n后文", "前文\n后文"}, // 文本中间的回声行也删（历史回放方向）
-		{m + m + "我确认一下", "我确认一下"},        // 模仿签名：剥裸前言留同行正文
+		{"a\n\nb", "a\n\nb"},        // No echo: blank lines kept as-is, not a byte touched
+		{m, ""},                     // Pure preamble
+		{strings.TrimSpace(m), ""},  // Bare-preamble form without the trailing space
+		{m + "广州 天气", ""},           // An echo line owning a whole block: deleted empty
+		{m + "广州 天气\n正文", "正文"},     // Echo line + body: delete the line, keep the body
+		{m + "广州 天气\n\n\n正文", "正文"}, // Line-leading blank lines left by deletion are removed
+		{"前文\n" + m + "广州\n后文", "前文\n后文"}, // Echo lines mid-text are also deleted (history replay direction)
+		{m + m + "我确认一下", "我确认一下"},        // Imitation signature: strip bare preambles, keep the same-line body
 		{m + m + m + "我确认一下", "我确认一下"},
 	}
 	for _, c := range cases {
@@ -792,8 +792,8 @@ func TestStripSearchQueryEcho(t *testing.T) {
 	}
 }
 
-// TestConvertInputDropsSearchQueryEcho 验证上游回放方向：整段请求体各消息文本里的
-// 回声行删除（只剩回声的助手消息整条消失），Codex 丢成空壳的 web_search_call 不回放。
+// TestConvertInputDropsSearchQueryEcho verifies the upstream replay direction: echo lines are deleted from message texts
+// across the whole request body (an assistant message reduced to only echo vanishes wholesale), and web_search_call items Codex hollowed out aren't replayed.
 func TestConvertInputDropsSearchQueryEcho(t *testing.T) {
 	const m = "Search results for query: "
 	items := []interface{}{
@@ -818,8 +818,8 @@ func TestConvertInputDropsSearchQueryEcho(t *testing.T) {
 	if strings.Contains(string(b), "web_search") {
 		t.Errorf("空 web_search 结构不应回放: %s", b)
 	}
-	// user(广州天气如何) + assistant(今天广州晴，25°C) + user(详细说说) = 3 条
-	// （只剩回声的那条助手消息整块消失）
+	// user(广州天气如何) + assistant(今天广州晴，25°C) + user(详细说说) = 3 messages
+	// (the assistant message reduced to only echo vanishes wholesale)
 	if len(msgs) != 3 {
 		t.Fatalf("消息数=%d, want 3: %s", len(msgs), b)
 	}
@@ -828,11 +828,11 @@ func TestConvertInputDropsSearchQueryEcho(t *testing.T) {
 	}
 }
 
-// TestConvertInputKeepsNonEmptySearch 验证回放方向的搜索结构取舍：web_search_call
-// 调用项（哪怕带 query/来源）一律不还原——其 id 是代理自造，上游注册表从未登记，
-// 上行必 400 且连坐信封对被剥（生产 #3/#19 实证）；已是 Anthropic 形状的
-// server_tool_use/web_search_tool_result 有内容原样上行；空壳（无 input/无
-// content/无有效来源）删除。
+// TestConvertInputKeepsNonEmptySearch verifies search-structure triage in the replay direction: web_search_call
+// call items (even with query/sources) are never restored — their ids are proxy-minted, never registered in the upstream registry,
+// so going upstream must 400 with the envelope pair punished along (production #3/#19 evidence); ones already in Anthropic shape
+// server_tool_use/web_search_tool_result go upstream as-is when content-bearing; shells (no input/no
+// content/no valid sources) are deleted.
 func TestConvertInputKeepsNonEmptySearch(t *testing.T) {
 	items := []interface{}{
 		map[string]interface{}{"type": "message", "role": "user", "content": "查下 pandas 版本"},
@@ -840,14 +840,14 @@ func TestConvertInputKeepsNonEmptySearch(t *testing.T) {
 			"action": map[string]interface{}{"type": "search", "query": "pandas 最新版本",
 				"sources": []interface{}{
 					map[string]interface{}{"type": "url", "url": "https://pandas.pydata.org"},
-					map[string]interface{}{"type": "url"}, // 无 URL 的来源
+					map[string]interface{}{"type": "url"}, // Sources without URLs
 				}}},
 		map[string]interface{}{"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
 			"input": map[string]interface{}{"query": "广州天气"}},
-		map[string]interface{}{"type": "server_tool_use", "id": "srvtoolu_2", "name": "web_search"}, // 无 input：删
+		map[string]interface{}{"type": "server_tool_use", "id": "srvtoolu_2", "name": "web_search"}, // No input: delete
 		map[string]interface{}{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1",
 			"content": []interface{}{map[string]interface{}{"type": "web_search_result", "url": "https://a.cn"}}},
-		map[string]interface{}{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_2"}, // 无 content：删
+		map[string]interface{}{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_2"}, // No content: delete
 		map[string]interface{}{"type": "message", "role": "assistant", "content": "pandas 2.3"},
 	}
 	msgs, err := convertInputToMessages(items, buildToolRegistry(nil), nil, nil)
@@ -861,7 +861,7 @@ func TestConvertInputKeepsNonEmptySearch(t *testing.T) {
 	if strings.Contains(string(b), "ws_1") {
 		t.Errorf("web_search_call 调用项不应还原上行（代理自造 id 必 400）: %s", b)
 	}
-	// user + assistant（只剩防御性覆盖的 srvtoolu_1 一对 + 文本）
+	// user + assistant (left with only the defensively covered srvtoolu_1 pair + text)
 	if len(msgs) != 2 {
 		t.Fatalf("消息数=%d, want 2: %s", len(msgs), b)
 	}
@@ -875,7 +875,7 @@ func TestConvertInputKeepsNonEmptySearch(t *testing.T) {
 			t.Errorf("块[%d].type=%q, want %q", i, got, wt)
 		}
 	}
-	// 原样上行的一对：id 保持原生注册 id
+	// The pair going upstream as-is: ids stay the natively registered ids
 	stu := asObj(content[0])
 	if objStr(asObj(stu["input"]), "query") != "广州天气" || objStr(stu, "id") != "srvtoolu_1" {
 		t.Errorf("原样上行的 server_tool_use 不对: %v", stu)
@@ -886,9 +886,9 @@ func TestConvertInputKeepsNonEmptySearch(t *testing.T) {
 	}
 }
 
-// TestConvertInputMediaFallback 验证附件部件不静默丢：标准形态（data URL 图片、
-// 顶层裸 input_file）正常转 image/document 块；认不出的形态（blob: URL、file_id
-// 云端引用）序列化成文本块兜底（见 pushMediaPart）。
+// TestConvertInputMediaFallback verifies attachment parts aren't silently dropped: standard shapes (data URL images,
+// top-level bare input_file) convert normally into image/document blocks; unrecognized shapes (blob: URLs, file_id
+// cloud references) serialize into text blocks as fallback (see pushMediaPart).
 func TestConvertInputMediaFallback(t *testing.T) {
 	items := []interface{}{
 		map[string]interface{}{"type": "input_image",
@@ -918,7 +918,7 @@ func TestConvertInputMediaFallback(t *testing.T) {
 	if !strings.Contains(s, "file-abc123") {
 		t.Errorf("file_id 附件应序列化成文本兜底，不应静默丢: %s", s)
 	}
-	// 全部进同一条 user 消息：image + document + 文本兜底×2 = 4 块
+	// All into the same user message: image + document + text fallback×2 = 4 blocks
 	if len(msgs) != 1 {
 		t.Fatalf("消息数=%d, want 1: %s", len(msgs), s)
 	}
@@ -927,7 +927,7 @@ func TestConvertInputMediaFallback(t *testing.T) {
 	}
 }
 
-// TestTranslatingWriterNonStream 验证 stream:false 客户端拿到一次性 Responses JSON。
+// TestTranslatingWriterNonStream verifies a stream:false client gets a one-shot Responses JSON.
 func TestTranslatingWriterNonStream(t *testing.T) {
 	rec := httptest.NewRecorder()
 	tw := newTranslatingWriter(rec, false, "gpt-5-codex", nil)
@@ -954,13 +954,13 @@ func TestTranslatingWriterNonStream(t *testing.T) {
 	}
 }
 
-// TestTranslatingWriterStreamSplitWrite 验证流式客户端 + 残行跨 Write 的解析。
+// TestTranslatingWriterStreamSplitWrite verifies a streaming client + parsing of partial lines across Writes.
 func TestTranslatingWriterStreamSplitWrite(t *testing.T) {
 	rec := httptest.NewRecorder()
 	tw := newTranslatingWriter(rec, true, "gpt-5-codex", nil)
 	tw.Header().Set("Content-Type", "text/event-stream")
 	tw.WriteHeader(200)
-	// 把一个完整 SSE 块从中间劈开分两次写，模拟残行。
+	// Split a complete SSE block in half across two writes, simulating a partial line.
 	full := testSSEAllBlocks()
 	mid := len(full) / 2
 	if _, err := tw.Write([]byte(full[:mid])); err != nil {
@@ -984,8 +984,8 @@ func TestTranslatingWriterStreamSplitWrite(t *testing.T) {
 	}
 }
 
-// TestResponsesHandlerEndToEnd 端到端：Responses 请求 → 翻译 → 主管线 → 假上游 SSE →
-// 翻译回 Responses JSON（非流式客户端）。
+// TestResponsesHandlerEndToEnd end-to-end: Responses request → translation → main pipeline → fake-upstream SSE →
+// translated back to a Responses JSON (non-streaming client).
 func TestResponsesHandlerEndToEnd(t *testing.T) {
 	resetStats()
 	var gotBody map[string]interface{}
@@ -1020,8 +1020,8 @@ func TestResponsesHandlerEndToEnd(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	// 上游收到的应是翻译后的 Anthropic 请求：system 来自 instructions，stream 被强制 true，
-	// model 被路由改写。
+	// What the upstream receives should be the translated Anthropic request: system from instructions, stream forced true,
+	// model rewritten by routing.
 	if objStr(gotBody, "system") != "Be helpful." {
 		t.Errorf("上游 system=%v", gotBody["system"])
 	}
@@ -1036,7 +1036,7 @@ func TestResponsesHandlerEndToEnd(t *testing.T) {
 		t.Errorf("上游 messages=%v", gotBody["messages"])
 	}
 
-	// 客户端拿到 Responses JSON。
+	// The client gets a Responses JSON.
 	var m map[string]interface{}
 	if err := json.Unmarshal(body, &m); err != nil {
 		t.Fatalf("响应不是 JSON: %v (%s)", err, string(body))
@@ -1044,19 +1044,19 @@ func TestResponsesHandlerEndToEnd(t *testing.T) {
 	if m["object"] != "response" {
 		t.Fatalf("object=%v, body=%s", m["object"], string(body))
 	}
-	// model 回写客户端原名（管线 model 回写逻辑）。
+	// model written back to the client's original name (the pipeline's model write-back logic).
 	if m["model"] != "gpt-5-codex" {
 		t.Errorf("model=%v, want gpt-5-codex", m["model"])
 	}
-	// 搜索信封随行（路由定案后三元组已注入）：原 5 项 + 信封 reasoning 项 = 6。
+	// Search envelope riding along (triple injected after routing settled): original 5 items + envelope reasoning item = 6.
 	if len(asArr(m["output"])) != 6 {
 		t.Errorf("output 数=%d, want 6（含搜索信封项）", len(asArr(m["output"])))
 	}
 }
 
-// TestResponsesFastRouteEntry 验证 Codex 菜单里的 fast 条目（model 名字面名 "fast_route"）被
-// 翻译层注入 speed:"fast"，由主管线 fast 分支接管：上游收到 fast_route.model 改写后的
-// model，且 speed 字段已被移除。
+// TestResponsesFastRouteEntry verifies the Codex menu's fast entry (model name literal "fast_route") gets
+// speed:"fast" injected by the translation layer, and the main pipeline's fast branch takes over: the upstream receives the model
+// rewritten to fast_route.model, with the speed field already removed.
 func TestResponsesFastRouteEntry(t *testing.T) {
 	resetStats()
 	var gotBody map[string]interface{}
@@ -1094,10 +1094,10 @@ func TestResponsesFastRouteEntry(t *testing.T) {
 	}
 }
 
-// TestReconcileResponsesServer 验证监听口随配置动态启停：
-// 启动 → 同地址幂等 → 换地址（旧关新开）→ 停用（关闭）。
+// TestReconcileResponsesServer verifies the listener port starts/stops dynamically with config:
+// startup → same-address idempotent → re-address (old closed, new opened) → disabled (closed).
 func TestReconcileResponsesServer(t *testing.T) {
-	cfg.Store(&Config{}) // handler 每请求 cfg.Load()，不能为 nil
+	cfg.Store(&Config{}) // The handler does cfg.Load() per request; must not be nil
 	freeAddr := func() string {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -1117,18 +1117,18 @@ func TestReconcileResponsesServer(t *testing.T) {
 
 	addr := freeAddr()
 	reconcileResponsesServer(addr)
-	defer reconcileResponsesServer("") // 收尾别留监听
+	defer reconcileResponsesServer("") // Leave no listener behind at wrap-up
 	if err := get(addr); err != nil {
 		t.Fatalf("监听口未起来: %v", err)
 	}
 
-	reconcileResponsesServer(addr) // 同地址幂等，不重新绑定
+	reconcileResponsesServer(addr) // Same address is idempotent, no rebinding
 	if err := get(addr); err != nil {
 		t.Fatalf("同地址 reconcile 后监听丢了: %v", err)
 	}
 
 	addr2 := freeAddr()
-	reconcileResponsesServer(addr2) // 换地址：旧关新开
+	reconcileResponsesServer(addr2) // Address change: old closed, new opened
 	if err := get(addr); err == nil {
 		t.Fatal("旧地址应已关闭")
 	}
@@ -1136,7 +1136,7 @@ func TestReconcileResponsesServer(t *testing.T) {
 		t.Fatalf("新地址未起来: %v", err)
 	}
 
-	reconcileResponsesServer("") // 停用
+	reconcileResponsesServer("") // Disabled
 	if err := get(addr2); err == nil {
 		t.Fatal("停用后地址应已关闭")
 	}

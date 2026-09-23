@@ -1,10 +1,10 @@
 package main
 
-// responses.go — OpenAI Responses API 监听口。
-// 把 Responses 协议请求翻译成 Anthropic Messages 协议，内部调用主 handler 走现有
-// 路由/重试/流式管线，再把 Anthropic 响应翻译回 Responses 协议（流式见 responses_stream.go）。
-// 翻译规则参考 cc-switch transform_codex_anthropic.rs（请求方向）与
-// anthropic_response_to_responses（响应方向），按本代理需要裁剪。
+// responses.go — OpenAI Responses API listener port.
+// Translates Responses-protocol requests into the Anthropic Messages protocol, internally calls the main handler through the existing
+// routing/retry/streaming pipeline, then translates Anthropic responses back to the Responses protocol (streaming see responses_stream.go).
+// Translation rules reference cc-switch transform_codex_anthropic.rs (request direction) and
+// anthropic_response_to_responses (response direction), trimmed to this proxy's needs.
 
 import (
 	"bytes"
@@ -23,89 +23,89 @@ import (
 	"time"
 )
 
-// ctxKeyTranslated 是内部请求 context 的键：标记本请求来自 Responses 翻译口。
-// 主 handler 据此给 flight 打来源标记（网页 API 列显示 [translate]/[Response]）。
-// 用 context 而非 header——copyHeaders 会把 header 透传到上游，context 不会泄露。
+// ctxKeyTranslated is the internal request context key: marks this request as coming from the Responses translation port.
+// The main handler flags the flight's origin from it (the web API column shows [translate]/[Response]).
+// Context rather than a header — copyHeaders would pass a header through to the upstream; context never leaks.
 type ctxKeyTranslatedT struct{}
 
 var ctxKeyTranslated ctxKeyTranslatedT
 
-// ctxKeyConvID 是内部请求 context 的键：把 Responses 请求的会话标识
-// （prompt_cache_key，Codex 恒带；次选 client_metadata.thread_id）递给主 handler，
-// 供"缓存年龄"列按会话锚定。同 ctxKeyTranslated 的理由：用 context 不用 header，不会漏到上游。
+// ctxKeyConvID is the internal request context key: hands the Responses request's session identifier
+// (prompt_cache_key, always present in Codex; second choice client_metadata.thread_id) to the main handler,
+// for the "cache age" column's per-session anchoring. Same rationale as ctxKeyTranslated: context, not headers, so nothing leaks upstream.
 type ctxKeyConvIDT struct{}
 
 var ctxKeyConvID ctxKeyConvIDT
 
-// ctxKeyThink 是内部请求 context 的键：把透传分支的思考模式（reasoning.effort 原样，
-// 状态页「API」列思考值）递给主 handler——透传 body 是 Responses 格式，handler 里的
-// extractThinkMode 认不出（无 thinking 字段），故由 context 单独携带。
-// 翻译分支不用：翻译后 body 的 thinking 就是实际发上游的，handler 直接提取。
-// 同 ctxKeyTranslated：用 context 不用 header，不会漏到上游。
+// ctxKeyThink is the internal request context key: hands the passthrough branch's thinking mode (reasoning.effort as-is,
+// the status page's 「API」 column thinking value) to the main handler — a passthrough body is in Responses format, which the handler's
+// extractThinkMode can't read (no thinking field), so it's carried separately via context.
+// Not needed by the translation branch: the translated body's thinking is what actually goes upstream; the handler extracts it directly.
+// Same as ctxKeyTranslated: context, not headers, so nothing leaks upstream.
 type ctxKeyThinkT struct{}
 
 var ctxKeyThink ctxKeyThinkT
 
-// ctxKeyNone2Low 是内部请求 context 的键：translateNone2Low 升级模式（int，见下）。
-// 主 handler 据此给 flight 打 [off->low] 徽标（仅 n2lStealth），并在上游 400 拒
-// thinking 时回退关思考重试一次（n2lStealth 与 n2lTryOn 都罩）。
+// ctxKeyNone2Low is the internal request context key: the translateNone2Low upgrade mode (int, see below).
+// The main handler badges the flight [off->low] from it (n2lStealth only) and falls back to a thinking-off
+// retry once when the upstream 400-rejects thinking (covers both n2lStealth and n2lTryOn).
 type ctxKeyNone2LowT struct{}
 
 var ctxKeyNone2Low ctxKeyNone2LowT
 
-// translateNone2Low 升级模式（responsesToAnthropicTriple 的第 4 返回值，经 ctxKeyNone2Low 透传）：
+// translateNone2Low upgrade modes (responsesToAnthropicTriple's 4th return value, passed through via ctxKeyNone2Low):
 const (
-	n2lNone    = 0 // 未升级
-	n2lStealth = 1 // 隐式升级：下游显式关思考 → low 发上游；回传剥离思考块（下游无感知）+ [off->low] 徽标
-	n2lTryOn   = 2 // 兜底开思考：工具续轮历史不可回放——代理本要自行关思考（关 = Kimi 把 K3 路由 K2.8
-	// 无思考版），开关开着就改按下游所请档位发（没给/不认识 → low 保底）；不剥思考块——下游
-	// 本来就要思考，块随回传带回签名，下一轮历史自愈
+	n2lNone    = 0 // Not upgraded
+	n2lStealth = 1 // Implicit upgrade: downstream explicitly disabled thinking → sent as low upstream; thinking blocks stripped on return (downstream unaware) + [off->low] badge
+	n2lTryOn   = 2 // Fallback thinking-on: tool-continuation history isn't replayable — the proxy would have disabled thinking itself (off = Kimi routes K3 to the K2.8
+	// no-thinking variant); with the toggle on it instead sends at the downstream-requested level (none/unknown → low as the floor); thinking blocks aren't stripped — the downstream
+	// asked for thinking, so blocks ride the return carrying signatures and next-turn history self-heals
 )
 
-// ctxKeyReqDown 是内部请求 context 的键：Responses 翻译口把下游请求体原文
-// （翻译前的 Responses 格式）递给主 handler，存为双链路记录的下游侧（下游→代理）。
-// 透传分支不设置——body 原样转发，两侧同文无需双存。
-// 同 ctxKeyTranslated：用 context 不用 header，不会漏到上游。
+// ctxKeyReqDown is the internal request context key: the Responses translation port hands the downstream request body's original text
+// (Responses format, before translation) to the main handler, stored as the downstream side (downstream→proxy) of dual-link recording.
+// Not set by the passthrough branch — the body forwards verbatim; both sides identical, no double storage.
+// Same as ctxKeyTranslated: context, not headers, so nothing leaks upstream.
 type ctxKeyReqDownT struct{}
 
 var ctxKeyReqDown ctxKeyReqDownT
 
-// ctxKeyTranslated 的取值：flight.translated 同款三态——
-// translatedResponses 表示 Responses 请求被翻译成 Anthropic 走主管线（API 列 [translate]）；
-// translatedResponsesRaw 表示命中路由配了 url_response_api，Responses 原文透传不翻译（API 列 [Response]）。
+// ctxKeyTranslated's values — the same three states as flight.translated:
+// translatedResponses means a Responses request was translated to Anthropic through the main pipeline (API column [translate]);
+// translatedResponsesRaw means the hit route has url_response_api, so the Responses original passes through untranslated (API column [Response]).
 const (
 	translatedResponses    = "responses"
 	translatedResponsesRaw = "responses-raw"
 )
 
-// thinkingEnvelopePrefix 是思考块信封前缀：把 Anthropic 签名 thinking 块 JSON
-// base64url 后加此前缀，塞进 Responses reasoning.encrypted_content 返回给客户端；
-// 下轮客户端回放历史时识别此前缀还原 thinking 块。自包含、不依赖上游解密
-// （抄 cc-switch reasoning_bridge 的思路，前缀换成自己的避免与别家信封混淆）。
+// thinkingEnvelopePrefix is the thinking-block envelope prefix: an Anthropic signed thinking block JSON is
+// base64url'd with this prefix and tucked into Responses reasoning.encrypted_content returned to the client;
+// when the client replays history next turn, this prefix is recognized and the thinking block restored. Self-contained, no upstream decryption needed
+// (borrowing cc-switch reasoning_bridge's idea, with our own prefix to avoid confusion with other envelopes).
 const thinkingEnvelopePrefix = "p429-ant-thinking-v1:"
 
-// defaultResponsesMaxTokens 是 Responses 请求没带 max_output_tokens 时的默认 max_tokens
-// （Anthropic 必填，缺了 400）。
+// defaultResponsesMaxTokens is the default max_tokens when a Responses request doesn't carry max_output_tokens
+// (Anthropic requires it; missing = 400).
 const defaultResponsesMaxTokens = 32000
 
-// responsesSrv 跟踪 Responses 监听口的运行状态，供配置重载/切换时动态启停（不必重启进程）。
+// responsesSrv tracks the Responses listener port's runtime state, for dynamic start/stop on config reload/switch (no process restart needed).
 var responsesSrv = struct {
 	sync.Mutex
-	addr string       // 当前实际监听的地址（空 = 未在监听）
-	srv  *http.Server // 运行中的 server，供关闭
+	addr string       // Currently listening address (empty = not listening)
+	srv  *http.Server // The running server, for shutdown
 }{}
 
-// reconcileResponsesServer 把 Responses 监听口对齐到配置地址：
-// 地址不变则不动；变了（含新增/停用/改地址）先关旧监听再起新的。
-// 监听失败只告警禁用，不影响主代理。启动、配置重载、切换配置三处都会调用。
+// reconcileResponsesServer aligns the Responses listener port to the configured address:
+// unchanged address → no-op; changed (including added/disabled/re-addressed) → close the old listener first, then start the new.
+// A listen failure only warns and disables; the main proxy is unaffected. Called from startup, config reload, and config switch.
 func reconcileResponsesServer(listen string) {
 	responsesSrv.Lock()
 	defer responsesSrv.Unlock()
 	if listen == responsesSrv.addr {
-		return // 现状已是目标状态（含都为空）
+		return // Current state already equals the target (including both empty)
 	}
 	if responsesSrv.srv != nil {
-		// 立即关闭并释放端口：地址都变了，旧端口上的进行中请求留着也没意义
+		// Close and release the port immediately: the address changed, so in-flight requests on the old port are pointless to keep
 		_ = responsesSrv.srv.Close()
 		responsesSrv.srv = nil
 		responsesSrv.addr = ""
@@ -133,11 +133,11 @@ func reconcileResponsesServer(listen string) {
 	}()
 }
 
-// predictSearchTriple 按路由规则预测本请求的上游归属三元组（搜索信封还原的比对基准）。
-// 只复刻主路径（fast 字面名 > routes 通配 > 默认 upstream）；分类器/text_only/no_search/
-// 增强搜索等条件分支不预测——预测偏差顶多让信封还原后撞 400，主管线 fail-soft 会剥掉
-// 重试（见 handler 的 tool_call_id 兜底），不会错出数据。完全预测不了（无路由命中且
-// 默认 upstream 为空）返回 nil = 信封一律放行。
+// predictSearchTriple predicts this request's upstream attribution triple per the routing rules (the comparison baseline for search-envelope restoration).
+// It replicates only the main path (fast literal name > routes wildcard > default upstream); classifier/text_only/no_search/
+// enhanced-search conditional branches aren't predicted — a prediction miss at worst makes a restored envelope hit a 400, and the main pipeline's fail-soft strips and
+// retries (see the handler's tool_call_id fallback); no wrong data is produced. When prediction is impossible (no route hit and
+// default upstream empty) returns nil = envelopes always pass.
 func predictSearchTriple(c *Config, r *http.Request, model string) *searchTriple {
 	if fr := c.FastRoute; fr != nil && fr.URL != "" && fr.Model != "" && model == "fast_route" {
 		return newSearchTriple(fr.URL, fr.Model, effectiveKey(fr.API, r))
@@ -155,9 +155,9 @@ func predictSearchTriple(c *Config, r *http.Request, model string) *searchTriple
 	return newSearchTriple(c.Upstream, model, effectiveKey("", r))
 }
 
-// matchRouteRule 返回第一条命中 model 的路由（跳过保留名 pattern），未命中返回 nil。
-// 翻译期预测（搜索三元组、路由 thinking 形态）共用这一个匹配点，与主 handler 的
-// 路由循环同序同规则。注意 fast 字面名通道不经此匹配（调用方各自先判 fast）。
+// matchRouteRule returns the first route matching model (skipping reserved-name patterns), nil on no hit.
+// Translation-time prediction (search triple, route thinking shape) shares this single match point, same order
+// and rules as the main handler's route loop. Note the fast literal-name lane doesn't go through this match (callers check fast themselves first).
 func matchRouteRule(c *Config, model string) *RouteRule {
 	for i := range c.Routes {
 		rr := &c.Routes[i]
@@ -171,8 +171,8 @@ func matchRouteRule(c *Config, model string) *RouteRule {
 	return nil
 }
 
-// effectiveKey 算上游请求实际生效的鉴权 token：路由 key 非空用路由 key，
-// 空则透传客户端 Authorization 头值（与主 handler 的鉴权覆盖逻辑同口径）。
+// effectiveKey computes the auth token actually in effect for the upstream request: the route key when non-empty,
+// otherwise the client's Authorization header value passes through (same semantics as the main handler's auth override).
 func effectiveKey(routeAPI string, r *http.Request) string {
 	if routeAPI != "" {
 		return routeAPI
@@ -180,10 +180,10 @@ func effectiveKey(routeAPI string, r *http.Request) string {
 	return r.Header.Get("Authorization")
 }
 
-// responsesHandler 处理一个 Responses API 请求：翻译成 Anthropic 后内部调用主 handler。
+// responsesHandler handles a Responses API request: translated to Anthropic, then internally calls the main handler.
 func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	c := cfg.Load()
-	// 与主 handler 同语义：转发通道永远仅本机可连。
+	// Same semantics as the main handler: the forwarding lane is always localhost-only.
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
@@ -211,8 +211,8 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	clientStream, _ := body["stream"].(bool)
 	origModel, _ := body["model"].(string)
 
-	// 会话标识（状态页"缓存年龄"列用）：Codex 恒带 prompt_cache_key（= 会话 UUID），
-	// 次选 client_metadata.thread_id（Codex 中与前者同值）。只读，不改请求体。
+	// Session identifier (for the status page's "cache age" column): Codex always carries prompt_cache_key (= session UUID),
+	// second choice client_metadata.thread_id (same value as the former in Codex). Read-only; the request body isn't modified.
 	convID, _ := body["prompt_cache_key"].(string)
 	if convID == "" {
 		if cm, ok := body["client_metadata"].(map[string]interface{}); ok {
@@ -220,14 +220,14 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 思考模式（状态页「API」列思考值）：仅透传分支用——透传零修改，上游收到的 reasoning.effort
-	// 就是它；翻译分支不走这里（翻译后 body 的 thinking 由主 handler 从最终 body 提取）。
+	// Thinking mode (the status page's 「API」 column thinking value): passthrough branch only — passthrough is zero-modification, so the reasoning.effort
+	// the upstream receives is exactly it; the translation branch doesn't go through here (the translated body's thinking is extracted by the main handler from the final body).
 	think := responsesThinkMode(body)
 
-	// 原生透传预检：model 命中的路由配了 url_response_api 时，Responses 原文不翻译，
-	// 原样交给主 handler——路由循环里的透传分支会把上游切成该路由的 url_response_api。
-	// 监控流/统计/重试管线与翻译流完全相同（主 handler 按 ctx 标记换 Responses 口径解析）。
-	// 预检只定"翻译还是透传"；真正的路由决策以 handler 为准（配置热重载致路由消失时 handler 报 502）。
+	// Native-passthrough precheck: when the route matched by model has url_response_api, the Responses original isn't translated
+	// and goes to the main handler as-is — the passthrough branch in the route loop switches the upstream to that route's url_response_api.
+	// Monitoring stream/stats/retry pipeline identical to translated streams (the main handler parses per Responses semantics per the ctx flag).
+	// The precheck only decides "translate or passthrough"; the real routing decision is the handler's (a 502 is reported if a config hot-reload removes the route).
 	if matchPassthroughResponsesRoute(c, origModel) != nil {
 		r2 := r.Clone(r.Context())
 		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyTranslated, translatedResponsesRaw))
@@ -241,17 +241,17 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		r2.URL.Path = "/v1/responses"
 		r2.Body = io.NopCloser(bytes.NewReader(raw))
 		r2.ContentLength = int64(len(raw))
-		// 头保留客户端原样：上游就是原生 Responses 服务，Authorization 等在路由命中时被目标 key 覆盖。
+		// Headers keep the client's originals: the upstream is a native Responses service; Authorization etc. are overridden by the target key on route hit.
 		handler(w, r2)
 		return
 	}
 
-	// 翻译期的搜索还原上下文：时间规则剥块计数/对话水位/还原时刻收集；
-	// 随内部请求下发，主 handler 把剥块计数进 flight（[剥N] 显示），
-	// 400 兜底剥块时拿还原时刻学对话水位。
+	// Translation-time search-restoration context: time-rule strip counting / conversation watermark / restore-moment collection;
+	// handed down with the internal request; the main handler feeds the strip count into the flight ([剥N] display)
+	// and learns the conversation watermark from restore moments during 400-fallback stripping.
 	replay := &searchReplayCtx{convID: convID}
-	// 路由声明的思考形态（thinking 参数）：翻译时只知道客户端 model 名，adaptive/budget
-	// 判定默认查客户端名的映射表——目标模型能力与此不一致时按路由配置覆盖。
+	// The route-declared thinking shape (thinking parameter): at translation time only the client model name is known; the adaptive/budget
+	// decision defaults to the client name's mapping table — when the target model's capability disagrees, the route config overrides.
 	thinkStyle := ""
 	if rr := matchRouteRule(c, origModel); rr != nil {
 		thinkStyle = rr.Thinking
@@ -261,12 +261,12 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	// 上游永远走流式（与 convertAlltoStream 同哲学）：网页可监控吐字，回传侧再按客户端需要
-	// 实时翻译 SSE 或收集后一次性返回 Responses JSON。
+	// Upstream always goes streaming (same philosophy as convertAlltoStream): the web page can monitor the output; the return side
+	// translates SSE live or collects and returns a one-shot Responses JSON per the client's needs.
 	anth["stream"] = true
-	// fast_route 在 Codex 菜单里的条目名就是字面名 "fast_route"（Codex 不对照配置校验目录名）：
-	// 选中即注入 speed:"fast"，由主 handler 的 fast 分支接管（改走 fast_route 上游、
-	// model 改写为 fast_route.model）。"fast_route" 同时是路由 pattern 保留名，防撞名截流。
+	// fast_route's entry name in the Codex menu is the literal "fast_route" (Codex doesn't validate catalog names against the config):
+	// selecting it injects speed:"fast", and the main handler's fast branch takes over (rerouting to the fast_route upstream,
+	// model rewritten to fast_route.model). "fast_route" is also a route-pattern reserved name, guarding against name-collision interception.
 	if fr := c.FastRoute; fr != nil && fr.URL != "" && fr.Model != "" && origModel == "fast_route" {
 		anth["speed"] = "fast"
 	}
@@ -276,16 +276,16 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 构造内部请求：路径换成 /v1/messages，头只保留鉴权（路由命中时会被目标 key 覆盖），
-	// 不带 Codex 客户端的 OpenAI 专用头去骚扰 Anthropic 上游。
+	// Building the internal request: path swapped to /v1/messages, only auth headers kept (overridden by the target key on route hit);
+	// Codex client's OpenAI-specific headers aren't taken along to bother the Anthropic upstream.
 	r2 := r.Clone(r.Context())
 	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyTranslated, translatedResponses))
 	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeySearchReplay, replay))
 	if n2l != n2lNone {
 		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyNone2Low, n2l))
 	}
-	// 双链路记录：下游 Responses 原文经 context 带给主 handler 存 reqDown
-	// （与翻译后体必然不同，恒存；透传分支不设置——body 原样转发，两侧同文）。
+	// Dual-link recording: the downstream Responses original goes via context to the main handler for reqDown
+	// (necessarily different from the translated body, always stored; not set by the passthrough branch — body forwards verbatim, both sides identical).
 	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyReqDown, raw))
 	if convID != "" {
 		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyConvID, convID))
@@ -305,22 +305,22 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tw := newTranslatingWriter(w, clientStream, origModel, reg)
-	// translateNone2Low 隐式升级流（下游显式关思考→low）：回传剥离思考块（流式由 conv
-	// 状态机剥离、非流式由 finishBuffered 整转剥离），下游看到的仍是关思考响应；usage
-	// 不碰，如实透传。历史兜底开思考（按下游所请档位）不剥：下游本来就要思考，块随回传
-	// 带回签名。
+	// translateNone2Low implicit-upgrade stream (downstream explicit thinking-off → low): thinking blocks are stripped on return (streaming by the conv
+	// state machine, non-streaming by finishBuffered wholesale conversion); the downstream still sees a thinking-off response; usage
+	// untouched, passed through truthfully. History-fallback thinking-on (at the downstream-requested level) doesn't strip: the downstream asked for thinking; blocks ride the return
+	// carrying signatures.
 	tw.stripThinking = n2l == n2lStealth
 	tw.conv.stripThinking = n2l == n2lStealth
 	handler(tw, r2)
 	tw.finish()
-	// 双链路记录补尾：非流式客户端的下游侧回传是 finish 在 handler 归档之后产出的，
-	// 把 tap 进 flight 的下游侧字节补刷进完成存档（流式客户端在转发中已全量入账，补刷同值无害）。
+	// Dual-link recording tail back-fill: a non-streaming client's downstream-side return is produced by finish after the handler archives,
+	// so the downstream-side bytes tapped into the flight are flushed into the finished archive (streaming clients already fully recorded during forwarding; flushing the same value is harmless).
 	if tw.downFlight != nil {
 		refreshArchivedDown(tw.downFlight)
 	}
 }
 
-// writeResponsesError 返回 Responses 协议风格的错误 JSON。
+// writeResponsesError returns a Responses-protocol-style error JSON.
 func writeResponsesError(w http.ResponseWriter, status int, typ, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -329,7 +329,7 @@ func writeResponsesError(w http.ResponseWriter, status int, typ, msg string) {
 	})
 }
 
-// ---- 小工具：map 取值 ----
+// ---- Helpers: map value extraction ----
 
 func asObj(v interface{}) map[string]interface{} {
 	m, _ := v.(map[string]interface{})
@@ -350,41 +350,41 @@ func objStr(m map[string]interface{}, k string) string { return asStr(m[k]) }
 
 func isMeaningfulText(s string) bool { return strings.TrimSpace(s) != "" }
 
-// ---- 请求翻译：Responses → Anthropic ----
+// ---- Request translation: Responses → Anthropic ----
 
-// responsesToAnthropic 把一个 Responses API 请求体翻译成 Anthropic Messages 请求体。
-// 对照 cc-switch responses_request_to_anthropic。返回的工具注册表记录 custom/
-// namespace/tool_search 工具的原始身份，响应翻译（流式与非流式）据此拆包。
+// responsesToAnthropic translates a Responses API request body into an Anthropic Messages request body.
+// Mirrors cc-switch responses_request_to_anthropic. The returned tool registry records the original identities of custom/
+// namespace/tool_search tools; response translation (streaming and non-streaming) unpacks per it.
 func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, *toolRegistry, error) {
 	out, reg, _, err := responsesToAnthropicTriple(body, nil, nil, "", false)
 	return out, reg, err
 }
 
-// responsesToAnthropicTriple 同 responsesToAnthropic，额外带本请求的路由预测三元组
-// （搜索信封还原的比对基准；nil = 预测不了，信封一律放行）、搜索还原上下文
-// （时间规则剥块计数/对话水位/还原时刻收集；nil = 只转换不统计）与路由声明的目标
-// 模型思考形态 thinkStyle（""/"auto"=按客户端 model 名查表；"adaptive"=强制 adaptive；
-// "budget"=强制 enabled+budget_tokens——路由 thinking 参数，解决路由目标模型与客户端
-// 别名的思考能力不一致，如客户端叫 claude-fable-5 实际路由到只支持 budget 的 Kimi）。
-// none2Low=true（配置 translateNone2Low）时两处升级（第 4 返回值 n2l，三态见常量）：
-// ① 下游显式关思考（effort none/off/disabled）→ low 发上游，n2l=n2lStealth（回传侧剥离
-// 思考块，下游无感知；usage 如实透传）；② 工具续轮历史不可回放（trailingTurnSupportsThinking
-// =false）——代理的兜底本是显式关思考，而关思考恰会触发 Kimi 把 K3 路由到 K2.8 无思考版
-// （正是本参数要防的事）。开关开着时不再降档：按下游所请档位原样发（没给/不认识 → low
-// 保底），n2l=n2lTryOn（不剥思考块：块随回传带回签名，下一轮历史自愈；上游拒则主 handler
-// 400 兜底回退关思考重发——拒绝与档位无关，拒的是「无签名历史却开思考」，故所请档位照发、
-// 被拒再退是安全的）。
-// 动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」——开着思考让 K3 不被降级。
+// responsesToAnthropicTriple is responsesToAnthropic plus this request's route-prediction triple
+// (comparison baseline for search-envelope restoration; nil = unpredictable, envelopes always pass), the search-restoration context
+// (time-rule strip counting / conversation watermark / restore-moment collection; nil = convert only, no stats), and the route-declared target
+// model thinking shape thinkStyle (""/"auto"=look up by client model name; "adaptive"=force adaptive;
+// "budget"=force enabled+budget_tokens — the route thinking parameter, solving target-model vs client-alias
+// thinking-capability mismatches, e.g. the client says claude-fable-5 but actually routes to a budget-only Kimi).
+// none2Low=true (config translateNone2Low) upgrades in two places (4th return value n2l; three states see the constants):
+// ① downstream explicit thinking-off (effort none/off/disabled) → sent as low upstream, n2l=n2lStealth (thinking blocks stripped
+// on return, downstream unaware; usage passed through truthfully); ② tool-continuation history not replayable (trailingTurnSupportsThinking
+// =false) — the proxy's fallback would have been explicit thinking-off, and thinking-off happens to trigger Kimi routing K3 to the K2.8 no-thinking variant
+// (exactly what this parameter guards against). With the toggle on there's no more downgrading: send at the downstream-requested level as-is (none/unknown → low
+// floor), n2l=n2lTryOn (no stripping: blocks ride the return carrying signatures, next-turn history self-heals; if the upstream rejects, the main handler's
+// 400 fallback retreats to thinking-off and resends — the rejection is level-independent, rejecting "unsigned history with thinking on", so sending the requested level
+// and retreating only on rejection is safe).
+// Motivation: Kimi's docs — "turning off thinking routes to the K2.8 Preview no-thinking variant"; keeping thinking on keeps K3 from being downgraded.
 func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx, thinkStyle string, none2Low bool) (map[string]interface{}, *toolRegistry, int, error) {
 	result := map[string]interface{}{}
 	if model := objStr(body, "model"); model != "" {
 		result["model"] = model
 	}
 
-	// 工具注册表先于 messages 转换建立：function_call 回放要靠它反解 namespace 名字。
+	// The tool registry is built before messages conversion: function_call replay needs it to resolve namespace names back.
 	reg := buildToolRegistry(asArr(body["tools"]))
 
-	// instructions + input 里 role=system/developer 的文本 → system（\n\n 拼接）。
+	// instructions + role=system/developer texts from input → system (joined with \n\n).
 	var sysParts []string
 	if ins := objStr(body, "instructions"); isMeaningfulText(ins) {
 		sysParts = append(sysParts, strings.TrimSpace(ins))
@@ -404,7 +404,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		result["system"] = strings.Join(sysParts, "\n\n")
 	}
 
-	// input → messages（字符串形式 = 单条 user 文本）。
+	// input → messages (string form = a single user text).
 	var msgs []map[string]interface{}
 	var err error
 	switch inp := body["input"].(type) {
@@ -422,8 +422,8 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		}
 	}
 
-	// 规整：先丢不完整工具轮（Anthropic 要求 tool_use 与 tool_result 紧邻配对），
-	// 再保证首条是 user；末尾 assistant 文本按 prefill 规则修剪。
+	// Normalization: drop incomplete tool turns first (Anthropic requires tool_use and tool_result adjacent-paired),
+	// then guarantee the first message is user; trailing assistant text is trimmed per prefill rules.
 	msgs = dropIncompleteToolTurns(msgs)
 	msgs = dropEmptyMessages(msgs)
 	msgs = ensureLeadingUserMessage(msgs)
@@ -437,31 +437,31 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	}
 	result["messages"] = msgs
 
-	// max_output_tokens → max_tokens（必填）。
+	// max_output_tokens → max_tokens (required).
 	maxTokens := toInt64(body["max_output_tokens"])
 	if maxTokens <= 0 {
 		maxTokens = defaultResponsesMaxTokens
 	}
 	result["max_tokens"] = maxTokens
 
-	// reasoning.effort → thinking。自适应模型（usesAdaptiveThinking 映射表）走
-	// thinking:{type:"adaptive"} + output_config.effort；其余模型走 enabled+budget_tokens。
-	// 判定默认用客户端发来的 model 名（路由改写在更后面的 handler 里发生），与 cc-switch
-	// 读 body.model 一致。对照 transform_codex_anthropic.rs 312-367。
-	// thinkStyle 非 auto 时按路由声明覆盖判定结果：目标模型能力与客户端别名不一致时
-	// （如别名叫 claude-fable-5 实际路由到只支持 budget 的上游）以路由配置为准。
+	// reasoning.effort → thinking. Adaptive models (usesAdaptiveThinking mapping table) go
+	// thinking:{type:"adaptive"} + output_config.effort; the rest go enabled+budget_tokens.
+	// The decision defaults to the client-sent model name (route rewriting happens later, in the handler), consistent with cc-switch
+	// reading body.model. Mirrors transform_codex_anthropic.rs 312-367.
+	// When thinkStyle isn't auto, the route declaration overrides the decision: when the target model's capability disagrees with the client alias
+	// (e.g. an alias called claude-fable-5 actually routing to a budget-only upstream) the route config wins.
 	effort := objStr(asObj(body["reasoning"]), "effort")
 	model := objStr(body, "model")
 	adaptiveModel := usesAdaptiveThinking(model)
 	cannotDisable := thinkingCannotBeDisabled(model)
 	switch thinkStyle {
 	case "adaptive":
-		// 路由声明目标模型支持 adaptive：强制 adaptive 口径（关思考仍允许——
-		// 目标模型的真实能力由配置方负责，不再套 fable/mythos 的关不掉规则）。
+		// Route declares the target model supports adaptive: force the adaptive form (turning thinking off is still allowed —
+		// the target model's real capability is the configurer's responsibility; the fable/mythos can't-disable rule no longer applies).
 		adaptiveModel = true
 		cannotDisable = false
 	case "budget":
-		// 路由声明目标模型只支持经典 enabled+budget_tokens。
+		// Route declares the target model supports only classic enabled+budget_tokens.
 		adaptiveModel = false
 		cannotDisable = false
 	}
@@ -471,12 +471,12 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	historyValid := trailingTurnSupportsThinking(msgs)
 	thinkingEnabled := false
 	budget := effortToThinkingBudget(effort)
-	// n2l：translateNone2Low 升级模式（三态见常量）——隐式升级（n2lStealth）回传侧
-	// 据此剥离思考块（主 handler 打 [off->low] 徽标）；两种升级上游 400 拒时都回退重试。
+	// n2l: the translateNone2Low upgrade mode (three states see the constants) — the return side strips thinking blocks
+	// per it for implicit upgrades (n2lStealth) (the main handler adds the [off->low] badge); both upgrade kinds retreat and retry on upstream 400 rejection.
 	n2l := n2lNone
-	// upgradeNoneToLow 把关思考升级为 low：adaptive 模型给 thinking:adaptive+effort:low；
-	// budget 模型给 enabled+2048（压顶 maxTokens/2，容不下 1024 下限则放弃升级保持关闭）。
-	// thinkingEnabled 打开后 temperature/top_p 不透传（与正常 thinking 路径同规则）。
+	// upgradeNoneToLow upgrades thinking-off to low: adaptive models get thinking:adaptive+effort:low;
+	// budget models get enabled+2048 (capped at maxTokens/2; abandoned if the 1024 floor doesn't fit, staying off).
+	// With thinkingEnabled on, temperature/top_p aren't passed through (same rule as the normal thinking path).
 	upgradeNoneToLow := func() bool {
 		if adaptiveModel {
 			result["thinking"] = map[string]interface{}{"type": "adaptive"}
@@ -491,17 +491,17 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		if budget < 1024 {
 			return false
 		}
-		thinkingEnabled = true // budget 模型的 thinking 字段由 switch 后的统一尾巴写
+		thinkingEnabled = true // The budget model's thinking field is written by the unified tail after the switch
 		return true
 	}
-	// tryRequestedThinking 按下游所请档位开思考（历史兜底分支用）：adaptive 模型给
-	// output_config.effort = 下游档位（没给/不认识 → low 保底）；budget 模型给对应预算
-	//（没给/不认识 → 2048；压顶 maxTokens/2，容不下 1024 下限则放弃）。
+	// tryRequestedThinking enables thinking at the downstream-requested level (history-fallback branch): adaptive models get
+	// output_config.effort = the downstream level (none/unknown → low floor); budget models get the matching budget
+	// (none/unknown → 2048; capped at maxTokens/2, abandoned if the 1024 floor doesn't fit).
 	tryRequestedThinking := func() bool {
 		if adaptiveModel {
 			e := adaptiveEffort
 			if e == "" {
-				e = "low" // 下游没给档位：low 保底，保持 K3 在思考路径上
+				e = "low" // Downstream gave no level: low floor, keeping K3 on the thinking path
 			}
 			result["thinking"] = map[string]interface{}{"type": "adaptive"}
 			result["output_config"] = map[string]interface{}{"effort": e}
@@ -519,18 +519,18 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			return false
 		}
 		budget = b
-		thinkingEnabled = true // budget 模型的 thinking 字段由 switch 后的统一尾巴写
+		thinkingEnabled = true // The budget model's thinking field is written by the unified tail after the switch
 		return true
 	}
 	switch {
 	case !historyValid:
-		// 工具续轮缺签名 thinking 块可回放：关不掉的模型直接报错（照抄 cc-switch 文案）。
-		// translateNone2Low 开着就不再自行关思考（关 = Kimi 把 K3 路由到 K2.8 无思考版，
-		// 正是本参数要防的事，#11/#12 实况）：下游显式关思考走隐式升级（升 low、回传剥
-		// 思考块）；下游本就要思考（effort 非关档，Codex 常态——它的档位表没有 none）按
-		// 所请档位发（不剥：块随回传带回签名，下一轮历史自愈）——上游拒「无思考历史却开
-		// 思考」与档位无关，主 handler 一次性 400 兜底回退关思考重发。开关关着保持
-		// cc-switch 行为：能关的 adaptive 模型显式关闭，其余模型不开 thinking。
+		// Tool continuation missing a signed thinking block is replayable: models that can't disable thinking error out directly (cc-switch's wording copied).
+		// With translateNone2Low on, the proxy no longer disables thinking itself (off = Kimi routes K3 to the K2.8 no-thinking variant,
+		// exactly what this parameter guards against, #11/#12 live incident): downstream explicit thinking-off goes the implicit upgrade (upgrade to low, strip
+		// thinking blocks on return); a downstream that wanted thinking (effort not an off level, the Codex norm — its level table has no none) is sent at
+		// the requested level (no stripping: blocks ride the return carrying signatures, next-turn history self-heals) — the upstream's rejection of "thinking on without
+		// thinking history" is level-independent; the main handler's one-shot 400 fallback retreats to thinking-off and resends. Toggle off keeps
+		// cc-switch behavior: disable-able adaptive models get explicit disabled; other models get no thinking.
 		if cannotDisable {
 			return nil, nil, n2lNone, fmt.Errorf("Anthropic model requires thinking, but the tool history has no signed thinking block to replay")
 		}
@@ -552,10 +552,10 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		if adaptiveEffort != "" {
 			result["output_config"] = map[string]interface{}{"effort": adaptiveEffort}
 		} else if explicitlyDisabled && cannotDisable {
-			// Fable/Mythos 关不掉 thinking：用 low 表达 Codex 显式的 none。
+			// Fable/Mythos can't disable thinking: use low to express Codex's explicit none.
 			result["output_config"] = map[string]interface{}{"effort": "low"}
 			if none2Low {
-				n2l = n2lStealth // 下游本就想关思考：开启 translateNone2Low 时回传侧剥离思考块
+				n2l = n2lStealth // The downstream wanted thinking off: with translateNone2Low on, thinking blocks are stripped on the return side
 			}
 		}
 	case explicitlyDisabled:
@@ -565,7 +565,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			result["thinking"] = map[string]interface{}{"type": "disabled"}
 		}
 	case budget > 0:
-		// budget 上限压到 max_tokens 的一半（给可见回答留空间），不足 1024 下限则不开。
+		// The budget caps at half of max_tokens (leaving room for the visible answer); if the 1024 floor doesn't fit, thinking isn't opened.
 		if ceiling := maxTokens / 2; budget > ceiling {
 			budget = ceiling
 		}
@@ -576,7 +576,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	if thinkingEnabled && !adaptiveModel {
 		result["thinking"] = map[string]interface{}{"type": "enabled", "budget_tokens": budget}
 	}
-	// thinking 开启时 Anthropic 要求丢 temperature/top_p（互斥），不开才透传。
+	// With thinking on, Anthropic requires dropping temperature/top_p (mutually exclusive); only passed through when off.
 	if !thinkingEnabled {
 		if v, ok := body["temperature"]; ok {
 			result["temperature"] = v
@@ -586,22 +586,22 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		}
 	}
 
-	// tools：经注册表转换（function/custom/namespace/tool_search/web_search 各自映射）。
+	// tools: converted via the registry (function/custom/namespace/tool_search/web_search each mapped).
 	if len(reg.tools) > 0 {
 		result["tools"] = reg.tools
-		// 只在 tools 非空时转 tool_choice（Anthropic 无 tools 带 tool_choice 会 400）。
+		// tool_choice is only converted when tools is non-empty (Anthropic 400s on tool_choice without tools).
 		if tc, ok := body["tool_choice"]; ok && tc != nil {
 			mapped := mapToolChoiceToAnthropic(tc, reg)
-			// Anthropic 拒绝 thinking 开启时的强制 tool_choice：关不掉的模型报错；
-			// 其余保留用户的工具约束、本请求关掉 thinking（恢复 temperature/top_p），
-			// 不悄悄弱化 required/指定选择。对照 cc-switch 398-425。
+			// Anthropic rejects forced tool_choice with thinking on: models that can't disable error out;
+			// the rest keep the user's tool constraint and turn thinking off for this request (restoring temperature/top_p),
+			// without silently weakening a required/specified choice. Mirrors cc-switch 398-425.
 			if t := objStr(mapped, "type"); thinkingEnabled && (t == "any" || t == "tool") {
 				if cannotDisable {
 					return nil, nil, n2lNone, fmt.Errorf("Anthropic model requires adaptive thinking and cannot honor a forced tool_choice")
 				}
 				result["thinking"] = map[string]interface{}{"type": "disabled"}
 				delete(result, "output_config")
-				n2l = n2lNone // 思考已被关掉：上游不会再产思考块，回传侧无需剥离
+				n2l = n2lNone // Thinking has been turned off: the upstream won't produce thinking blocks, so the return side needs no stripping
 				if v, ok := body["temperature"]; ok {
 					result["temperature"] = v
 				}
@@ -623,7 +623,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	return result, reg, n2l, nil
 }
 
-// responsesSystemText 提取 system/developer 消息项的文本（content 为字符串或 parts 数组）。
+// responsesSystemText extracts the text of system/developer message items (content as a string or a parts array).
 func responsesSystemText(item map[string]interface{}) []string {
 	var out []string
 	switch c := item["content"].(type) {
@@ -645,21 +645,21 @@ func responsesSystemText(item map[string]interface{}) []string {
 	return out
 }
 
-// convertInputToMessages 把扁平的 Responses input[] 重新嵌套成 Anthropic messages。
-// 对照 cc-switch convert_input_to_messages：
-//   - input_text/output_text → 对应 role 的 text 块
-//   - input_image → image 块；input_file → document 块；refusal → text 块
-//   - function_call → assistant 的 tool_use 块（并入前一条 assistant 消息；带
-//     namespace 时经注册表反解成拍平名，input 过 Read sanitize）
-//   - custom_tool_call → tool_use（input 包成 {"input": 裸值}）
-//   - tool_search_call → tool_use（代理工具名，arguments 对象作 input）
-//   - function_call_output/custom_tool_call_output/tool_search_output → user 的
-//     tool_result 块（连续的合并进同一条 user 消息）
-//   - reasoning.encrypted_content 带我们信封前缀 → 还原签名 thinking 块；
-//     带搜索信封前缀且三元组与本请求路由预测一致 → 还原完整搜索块（见 searchEnvelopePrefix）
+// convertInputToMessages re-nests the flat Responses input[] into Anthropic messages.
+// Mirrors cc-switch convert_input_to_messages:
+//   - input_text/output_text → text blocks of the corresponding role
+//   - input_image → image blocks; input_file → document blocks; refusal → text blocks
+//   - function_call → assistant tool_use blocks (merged into the preceding assistant message; with a
+//     namespace, resolved back to the flattened name via the registry; input goes through Read sanitize)
+//   - custom_tool_call → tool_use (input wrapped as {"input": raw value})
+//   - tool_search_call → tool_use (proxy tool name, arguments object as input)
+//   - function_call_output/custom_tool_call_output/tool_search_output → user
+//     tool_result blocks (consecutive ones merged into the same user message)
+//   - reasoning.encrypted_content with our envelope prefix → restored signed thinking blocks;
+//     with the search envelope prefix and a triple matching this request's route prediction → full search blocks restored (see searchEnvelopePrefix)
 func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *searchTriple, replay *searchReplayCtx) ([]map[string]interface{}, error) {
 	var msgs []map[string]interface{}
-	var reqMask []byte // 路由预测的 key 派生掩码（nil = 预测不了，信封解不开自然跳过）
+	var reqMask []byte // Key-derived mask from the route prediction (nil = unpredictable; the envelope can't be unmasked and is naturally skipped)
 	if reqTriple != nil {
 		reqMask = reqTriple.mask
 	}
@@ -669,7 +669,7 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 			continue
 		}
 		itemType := objStr(item, "type")
-		// 历史上未完成（incomplete）的工具调用整个丢弃，回放会 400。
+		// Historically unfinished (incomplete) tool calls are dropped wholesale; replaying them 400s.
 		switch itemType {
 		case "function_call", "custom_tool_call", "tool_search_call":
 			if objStr(item, "status") == "incomplete" {
@@ -703,7 +703,7 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 			if callID == "" {
 				callID = objStr(item, "id")
 			}
-			// custom 工具输入是裸值（通常是字符串）：包进 {"input": ...} 对上包装 schema。
+			// A custom tool's input is a raw value (usually a string): wrap it into {"input": ...} to match the wrapper schema.
 			input := item["input"]
 			pushBlock(&msgs, "assistant", map[string]interface{}{
 				"type": "tool_use", "id": callID, "name": objStr(item, "name"),
@@ -732,30 +732,30 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 			}
 			pushToolResultBlock(&msgs, block)
 		case "input_text":
-			// 剥掉历史里的搜索 query 回声行（见 stripSearchQueryEcho），全文无条件应用。
+			// Strip search query echo lines from history (see stripSearchQueryEcho), applied unconditionally to all text.
 			if t := stripSearchQueryEcho(objStr(item, "text")); isMeaningfulText(t) {
 				pushBlock(&msgs, "user", map[string]interface{}{"type": "text", "text": t})
 			}
 		case "input_image", "input_file":
-			// 顶层裸附件部件：认不出标准形态时序列化成文本兜底，不静默丢
-			// （见 pushMediaPart）。
+			// Top-level bare attachment parts: when no standard shape is recognized, serialize to text as a fallback instead of silently dropping
+			// (see pushMediaPart).
 			pushMediaPart(&msgs, "user", item)
 		case "reasoning":
 			enc := objStr(item, "encrypted_content")
 			if b := decodeThinkingEnvelope(enc); b != nil {
 				pushAssistantThinkingBlock(&msgs, b)
 			} else if tri, blocks, ts, ok := decodeSearchEnvelope(enc, reqMask); ok {
-				// 搜索信封：解得开（key 同源）且 url 也同源才还原上行——不同源还原
-				// 也解不开，跳过省 token；跨模型不拦（实测照常解密）。reqMask 为
-				// nil = 本请求预测不了路由 key，解不开混淆自然跳过（v1 的放行
-				// 分支随明文 payload 一起退役）。
+				// Search envelope: restored upstream only when it unmasks (same-origin key) AND the url matches too — a different-origin one can't
+				// unmask anyway; skipping saves tokens; cross-model isn't blocked (field-tested to decrypt fine). reqMask
+				// nil = this request's route key unpredictable; unmasking fails and it's naturally skipped (v1's pass-through
+				// branch retired together with the plaintext payload).
 				if reqTriple == nil || reqTriple.sameOrigin(tri) {
-					// 水位主动剥（不撞 400 不烧重试）：本对话已学到水位时，不比水位
-					// 新的信封默认全剥（注册表按龄淘汰，撞过 400 说明最老的死了，
-					// 同龄与更老的必死）。不设固定年龄上限——实测封入 1.7h 的 id
-					// 仍存活，固定上限会误杀活信封。无 ts 的老信封（v2 初版，全部
-					// 早于 ts 时代）视同最老：有水位剥、无水位乐观还原。
-					// 剥块计数与还原时刻都记进 replay（nil = 只转换不统计）。
+					// Proactive watermark stripping (no 400 hit, no retry budget burned): once this conversation has learned a watermark, envelopes no newer
+					// than it are all stripped by default (the registry expires by age: a 400 hit means the oldest died,
+					// so same-age and older ones are certainly dead). No fixed age ceiling — a 1.7h-old sealed id was
+					// field-tested still alive, and a fixed ceiling would kill live envelopes. Old envelopes without ts (v2's first version, all
+					// predating the ts era) are treated as oldest: stripped when a watermark exists, optimistically restored without one.
+					// Strip counts and restore moments are both recorded into replay (nil = convert only, no stats).
 					var cutoff time.Time
 					if replay != nil && replay.convID != "" {
 						cutoff = searchCutoffFor(replay.convID)
@@ -767,7 +767,7 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 						for _, b := range blocks {
 							pushBlock(&msgs, "assistant", b)
 						}
-						// 还原时刻只收带 ts 的：无 ts 信封参与取最老会毒化水位学习
+						// Only envelopes with ts are collected as restore moments: ts-less envelopes taking part in the oldest-pick would poison watermark learning
 						if replay != nil && !ts.IsZero() {
 							replay.restored = append(replay.restored, ts)
 						}
@@ -775,14 +775,14 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 				}
 			}
 		case "web_search_call", "server_tool_use", "web_search_tool_result":
-			// web_search_call 调用项不回放（代理自造 id 上行必 400，见
-			// searchBlocksFromResponsesItem）；Anthropic 形状的搜索块空壳整条删除、
-			// 有内容的原样上行。搜索内容的唯一回放载体是上面的搜索信封。
+			// web_search_call items aren't replayed (proxy-minted ids going upstream must 400; see
+			// searchBlocksFromResponsesItem); Anthropic-shaped search-block shells are deleted wholesale, content-bearing
+			// ones go upstream as-is. The only replay carrier of search content is the search envelope above.
 			for _, b := range searchBlocksFromResponsesItem(item) {
 				pushBlock(&msgs, "assistant", b)
 			}
 		default:
-			// message 项或带 role 的项：system/developer 已在上面收进 system，这里跳过。
+			// message items or role-bearing items: system/developer were already collected into system above; skipped here.
 			role := objStr(item, "role")
 			if role == "" {
 				role = "user"
@@ -821,11 +821,11 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 	return msgs, nil
 }
 
-// toolResultContentFromResponsesItem 把 *_call_output 项的 output 字段转成
-// Anthropic tool_result 的 content（字符串或块数组）与 is_error。
-// 对照 cc-switch 同名函数：error marker 文本置 is_error；数组部件支持
-// input_text/output_text/input_image/input_file（认不出的先试媒体剥离再序列化）；
-// 任何值都可能藏图片媒体（MCP image 块、JSON 字符串、整串 data URL），剥成 image 块。
+// toolResultContentFromResponsesItem converts a *_call_output item's output field into
+// Anthropic tool_result content (string or block array) plus is_error.
+// Mirrors cc-switch's same-named function: error-marker text sets is_error; array parts support
+// input_text/output_text/input_image/input_file (unrecognized ones try media stripping first, then serialize);
+// any value may hide image media (MCP image blocks, JSON strings, whole data URLs), stripped into image blocks.
 func toolResultContentFromResponsesItem(item map[string]interface{}) (interface{}, bool) {
 	switch out := item["output"].(type) {
 	case string:
@@ -858,7 +858,7 @@ func toolResultContentFromResponsesItem(item map[string]interface{}) (interface{
 					content = append(content, map[string]interface{}{"type": "text", "text": canonicalJSON(pm)})
 				}
 			default:
-				// 其他形状（MCP image 块等）：先试媒体剥离，认不出序列化成文本。
+				// Other shapes (MCP image blocks, etc.): try media stripping first; if unrecognized, serialize to text.
 				if ac, ae, ok := alternateImageToolResultContent(p); ok {
 					isError = isError || ae
 					content = append(content, ac...)
@@ -869,10 +869,10 @@ func toolResultContentFromResponsesItem(item map[string]interface{}) (interface{
 		}
 		return content, isError
 	case nil:
-		// output 缺席：整个项序列化当文本（对照 cc-switch None 分支）。
+		// output absent: serialize the whole item as text (mirrors cc-switch's None branch).
 		return canonicalJSON(item), false
 	default:
-		// 数字/对象等异形 output：先试媒体剥离，否则序列化成 JSON 字符串当文本。
+		// Oddly-shaped output like numbers/objects: try media stripping first, otherwise serialize to a JSON string as text.
 		if content, isError, ok := alternateImageToolResultContent(out); ok {
 			return content, isError
 		}
@@ -880,7 +880,7 @@ func toolResultContentFromResponsesItem(item map[string]interface{}) (interface{
 	}
 }
 
-// imageBlockFromInputImage 把 Responses input_image（data URL 或 http URL）转成 Anthropic image 块。
+// imageBlockFromInputImage converts a Responses input_image (data URL or http URL) into an Anthropic image block.
 func imageBlockFromInputImage(part map[string]interface{}) map[string]interface{} {
 	url := objStr(part, "image_url")
 	if url == "" {
@@ -916,9 +916,9 @@ func imageBlockFromInputImage(part map[string]interface{}) map[string]interface{
 	return nil
 }
 
-// ---- 消息数组规整（对照 cc-switch 同名 helper）----
+// ---- Message-array normalization (mirrors cc-switch's same-named helpers) ----
 
-// pushBlock 追加内容块：末尾消息同 role 则合并，否则新开一条消息。
+// pushBlock appends a content block: merged into the trailing message when same-role, otherwise a new message is started.
 func pushBlock(msgs *[]map[string]interface{}, role string, block map[string]interface{}) {
 	if n := len(*msgs); n > 0 {
 		last := (*msgs)[n-1]
@@ -934,10 +934,10 @@ func pushBlock(msgs *[]map[string]interface{}, role string, block map[string]int
 	})
 }
 
-// pushMediaPart 把 input_image/input_file 部件转成 Anthropic image/document 块追加。
-// 认不出的形态（blob:/file: 本地 URL、file_id 云端引用、残缺 data URL 等）序列化成
-// 文本块兜底：字节流拿不到是客观限制，但整块静默消失不是——与工具结果部件路径的
-// 兜底口径一致（见 toolResultContentFromResponsesItem）。
+// pushMediaPart converts input_image/input_file parts into Anthropic image/document blocks and appends.
+// Unrecognized shapes (blob:/file: local URLs, file_id cloud references, broken data URLs, etc.) serialize into
+// a text block as fallback: the bytes being unreachable is an objective limitation, but a block silently vanishing isn't — same
+// fallback semantics as the tool-result parts path (see toolResultContentFromResponsesItem).
 func pushMediaPart(msgs *[]map[string]interface{}, role string, pm map[string]interface{}) {
 	var b map[string]interface{}
 	switch objStr(pm, "type") {
@@ -952,8 +952,8 @@ func pushMediaPart(msgs *[]map[string]interface{}, role string, pm map[string]in
 	pushBlock(msgs, role, b)
 }
 
-// pushToolResultBlock 追加 tool_result：保持 Anthropic 要求的顺序——tool_result 块
-// 必须排在 user 消息里任何 text/image 块之前。
+// pushToolResultBlock appends a tool_result: preserving Anthropic's required order — tool_result blocks
+// must come before any text/image blocks in the user message.
 func pushToolResultBlock(msgs *[]map[string]interface{}, block map[string]interface{}) {
 	if n := len(*msgs); n > 0 {
 		last := (*msgs)[n-1]
@@ -979,8 +979,8 @@ func pushToolResultBlock(msgs *[]map[string]interface{}, block map[string]interf
 	})
 }
 
-// pushAssistantThinkingBlock 插入 thinking 块：Anthropic 要求它在 assistant 消息
-// 内容数组的最前（已有 thinking/redacted_thinking 块之后、其余块之前）。
+// pushAssistantThinkingBlock inserts a thinking block: Anthropic requires it at the front of the assistant message's
+// content array (after existing thinking/redacted_thinking blocks, before all others).
 func pushAssistantThinkingBlock(msgs *[]map[string]interface{}, block map[string]interface{}) {
 	if n := len(*msgs); n > 0 {
 		last := (*msgs)[n-1]
@@ -1005,8 +1005,8 @@ func pushAssistantThinkingBlock(msgs *[]map[string]interface{}, block map[string
 	pushBlock(msgs, "assistant", block)
 }
 
-// ensureLeadingUserMessage 保证首条是 user：压缩/恢复的会话可能以 assistant 或
-// function_call 开头，Anthropic 要求首条 user 否则 400。
+// ensureLeadingUserMessage guarantees a leading user message: compacted/resumed sessions may start with an assistant or
+// function_call; Anthropic requires user first, else 400.
 func ensureLeadingUserMessage(msgs []map[string]interface{}) []map[string]interface{} {
 	if len(msgs) == 0 || objStr(msgs[0], "role") == "user" {
 		return msgs
@@ -1018,9 +1018,9 @@ func ensureLeadingUserMessage(msgs []map[string]interface{}) []map[string]interf
 	return append([]map[string]interface{}{head}, msgs...)
 }
 
-// dropIncompleteToolTurns 丢弃不再构成完整「assistant tool_use → user tool_result」
-// 相邻配对的工具轮（压缩/恢复的会话常见）。Anthropic 要求每个 tool_use 都在紧随的
-// user 消息里得到全部回答，否则 400。
+// dropIncompleteToolTurns drops tool turns that no longer form complete "assistant tool_use → user tool_result"
+// adjacent pairs (common in compacted/resumed sessions). Anthropic requires every tool_use to be fully answered
+// in the immediately following user message, else 400.
 func dropIncompleteToolTurns(msgs []map[string]interface{}) []map[string]interface{} {
 	var out []map[string]interface{}
 	for i := 0; i < len(msgs); {
@@ -1036,7 +1036,7 @@ func dropIncompleteToolTurns(msgs []map[string]interface{}) []map[string]interfa
 			i++
 			continue
 		}
-		// assistant 带 tool_use：检查紧随的 user 是否完整回答。
+		// Assistant carrying tool_use: check the immediately following user answers it completely.
 		var paired map[string]interface{}
 		if i+1 < len(msgs) && objStr(msgs[i+1], "role") == "user" {
 			paired = msgs[i+1]
@@ -1059,7 +1059,7 @@ func dropIncompleteToolTurns(msgs []map[string]interface{}) []map[string]interfa
 		if complete {
 			out = append(out, m, paired)
 		} else if paired != nil {
-			// 整个 assistant 工具轮丢弃；user 消息去掉 tool_result 后若有剩余内容则保留。
+			// The whole assistant tool turn is dropped; the user message is kept if it has content left after removing the tool_result.
 			if m2 := dropToolResultBlocks(paired); messageHasContent(m2) {
 				out = append(out, m2)
 			}
@@ -1073,7 +1073,7 @@ func dropIncompleteToolTurns(msgs []map[string]interface{}) []map[string]interfa
 	return out
 }
 
-// messageBlockIDs 收集消息里指定类型块的 id 字段值。
+// messageBlockIDs collects the id field values of blocks of the given types in a message.
 func messageBlockIDs(m map[string]interface{}, blockType, idField string) []string {
 	var ids []string
 	for _, b := range asArr(m["content"]) {
@@ -1085,7 +1085,7 @@ func messageBlockIDs(m map[string]interface{}, blockType, idField string) []stri
 	return ids
 }
 
-// dropToolResultBlocks 返回去掉 tool_result 块后的消息副本。
+// dropToolResultBlocks returns a copy of the message with tool_result blocks removed.
 func dropToolResultBlocks(m map[string]interface{}) map[string]interface{} {
 	arr := asArr(m["content"])
 	if arr == nil {
@@ -1110,7 +1110,7 @@ func messageHasContent(m map[string]interface{}) bool {
 	return arr == nil || len(arr) > 0
 }
 
-// dropEmptyMessages 丢掉 content 空数组的消息（Anthropic 对空 content 400）。
+// dropEmptyMessages drops messages with an empty content array (Anthropic 400s on empty content).
 func dropEmptyMessages(msgs []map[string]interface{}) []map[string]interface{} {
 	var out []map[string]interface{}
 	for _, m := range msgs {
@@ -1121,8 +1121,8 @@ func dropEmptyMessages(msgs []map[string]interface{}) []map[string]interface{} {
 	return out
 }
 
-// trimTrailingAssistantText 修剪末尾 assistant 消息最后的 text 块：
-// 纯空白 prefill 直接删块，非空的去掉尾部空白（Anthropic 拒绝以空白结尾的 prefill）。
+// trimTrailingAssistantText trims the last text block of the trailing assistant message:
+// pure-whitespace prefill gets the block deleted; non-empty gets trailing whitespace removed (Anthropic rejects prefill ending in whitespace).
 func trimTrailingAssistantText(msgs []map[string]interface{}) {
 	if len(msgs) == 0 {
 		return
@@ -1148,8 +1148,8 @@ func trimTrailingAssistantText(msgs []map[string]interface{}) {
 	}
 }
 
-// effortToThinkingBudget 把 Codex 的 reasoning.effort 映射成 Anthropic thinking 预算。
-// 不识别的值返回 0（不开 thinking，保持正常采样）。对照 cc-switch 同名函数。
+// effortToThinkingBudget maps Codex's reasoning.effort to an Anthropic thinking budget.
+// Unrecognized values return 0 (thinking not opened, normal sampling kept). Mirrors cc-switch's same-named function.
 func effortToThinkingBudget(effort string) int64 {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
 	case "minimal", "low":
@@ -1164,14 +1164,14 @@ func effortToThinkingBudget(effort string) int64 {
 	return 0
 }
 
-// ---- thinking 模型映射表（照抄 cc-switch thinking_optimizer.rs） ----
+// ---- Thinking model mapping tables (copied from cc-switch thinking_optimizer.rs) ----
 
-// normalizeThinkingModelName 归一化模型名供映射表匹配：小写，'.' 和 '_' 换成 '-'。
+// normalizeThinkingModelName normalizes a model name for mapping-table matching: lowercase, '.' and '_' become '-'.
 func normalizeThinkingModelName(model string) string {
 	return strings.NewReplacer(".", "-", "_", "-").Replace(strings.ToLower(strings.TrimSpace(model)))
 }
 
-// thinkingModelContains 判断归一化后的模型名是否含任一子串。
+// thinkingModelContains reports whether the normalized model name contains any of the substrings.
 func thinkingModelContains(model string, needles ...string) bool {
 	n := normalizeThinkingModelName(model)
 	for _, s := range needles {
@@ -1182,26 +1182,26 @@ func thinkingModelContains(model string, needles ...string) bool {
 	return false
 }
 
-// usesAdaptiveThinking 映射表：走 adaptive thinking（thinking:{type:"adaptive"} +
-// output_config.effort）而非 enabled+budget_tokens 的模型。
+// usesAdaptiveThinking mapping table: models that go adaptive thinking (thinking:{type:"adaptive"} +
+// output_config.effort) rather than enabled+budget_tokens.
 func usesAdaptiveThinking(model string) bool {
 	return thinkingModelContains(model,
 		"fable-5", "mythos-5", "mythos-preview", "sonnet-5",
 		"opus-4-8", "opus-4-7", "opus-4-6", "sonnet-4-6")
 }
 
-// adaptiveThinkingIsDefault 映射表：不显式给 thinking 参数也默认开 adaptive 的模型。
+// adaptiveThinkingIsDefault mapping table: models that default to adaptive on without an explicit thinking parameter.
 func adaptiveThinkingIsDefault(model string) bool {
 	return thinkingModelContains(model, "fable-5", "mythos-5", "mythos-preview", "sonnet-5")
 }
 
-// thinkingCannotBeDisabled 映射表：拒绝 thinking:{type:"disabled"} 的模型。
+// thinkingCannotBeDisabled mapping table: models that reject thinking:{type:"disabled"}.
 func thinkingCannotBeDisabled(model string) bool {
 	return thinkingModelContains(model, "fable-5", "mythos-5")
 }
 
-// codexEffortToAnthropic 把 Codex 的 reasoning.effort 映射成 output_config.effort
-// （adaptive 模型用）。不识别的值返回空串。对照 cc-switch 同名函数。
+// codexEffortToAnthropic maps Codex's reasoning.effort to output_config.effort
+// (for adaptive models). Unrecognized values return empty. Mirrors cc-switch's same-named function.
 func codexEffortToAnthropic(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
 	case "minimal", "low":
@@ -1216,7 +1216,7 @@ func codexEffortToAnthropic(effort string) string {
 	return ""
 }
 
-// reasoningExplicitlyDisabled 判断 reasoning.effort 是否显式关闭思考。对照 cc-switch 同名函数。
+// reasoningExplicitlyDisabled reports whether reasoning.effort explicitly disables thinking. Mirrors cc-switch's same-named function.
 func reasoningExplicitlyDisabled(effort string) bool {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
 	case "none", "off", "disabled":
@@ -1225,11 +1225,11 @@ func reasoningExplicitlyDisabled(effort string) bool {
 	return false
 }
 
-// responsesThinkMode 提取 Responses 请求体的思考配置，供状态页「API」列思考值显示
-// （透传分支用——透传零修改，reasoning.effort 就是实际发上游的）。
-// 值取最短形态（Responses 口径由列绿色承担，不带 "effort·" 前缀）：
-// reasoning.effort 只显档位词（"high"…），显式关闭值（none/off/disabled）归并为 "关"；
-// 无 reasoning/effort 字段返回空（列显 -）。
+// responsesThinkMode extracts a Responses request body's thinking config, for the status page's 「API」 column thinking-value display
+// (passthrough branch — passthrough is zero-modification, so reasoning.effort is what actually goes upstream).
+// Values take the shortest form (the column's green color carries the Responses family; no "effort·" prefix):
+// reasoning.effort shows just the level word ("high"…), explicit-off values (none/off/disabled) merge into "关";
+// no reasoning/effort field returns empty (column shows -).
 func responsesThinkMode(body map[string]interface{}) string {
 	effort := objStr(asObj(body["reasoning"]), "effort")
 	if effort == "" {
@@ -1241,10 +1241,10 @@ func responsesThinkMode(body map[string]interface{}) string {
 	return effort
 }
 
-// trailingTurnSupportsThinking 判断末尾一轮是否支持开 thinking。对照 cc-switch 同名函数：
-// 全新的 user 提问可以开；工具结果续轮只有紧邻的上一条 assistant 带签名
-// thinking/redacted_thinking 块（且 tool_result 的 id 全部与其 tool_use 配对）才可开——
-// 否则 Anthropic 会因缺签名 thinking 回放而 400。
+// trailingTurnSupportsThinking reports whether the trailing turn supports turning thinking on. Mirrors cc-switch's same-named function:
+// a brand-new user question can; a tool-result continuation only if the immediately preceding assistant carries signed
+// thinking/redacted_thinking blocks (and the tool_result ids all pair with its tool_use) —
+// otherwise Anthropic 400s on a missing signed-thinking replay.
 func trailingTurnSupportsThinking(msgs []map[string]interface{}) bool {
 	if len(msgs) == 0 {
 		return false
@@ -1305,9 +1305,9 @@ func trailingTurnSupportsThinking(msgs []map[string]interface{}) bool {
 	return true
 }
 
-// mapToolChoiceToAnthropic 转换 tool_choice：required→any、auto→auto、none→none；
-// {type:function}→{type:tool}（带 namespace 时反解成拍平名）；{type:custom}→同名 tool；
-// {type:tool_search}→代理工具名；其余形状（allowed_tools 等）降级 auto 避免 400。
+// mapToolChoiceToAnthropic converts tool_choice: required→any, auto→auto, none→none;
+// {type:function}→{type:tool} (with a namespace, resolved back to the flattened name); {type:custom}→same-named tool;
+// {type:tool_search}→proxy tool name; other shapes (allowed_tools etc.) degrade to auto to avoid 400.
 func mapToolChoiceToAnthropic(tc interface{}, reg *toolRegistry) map[string]interface{} {
 	switch v := tc.(type) {
 	case string:
@@ -1333,11 +1333,11 @@ func mapToolChoiceToAnthropic(tc interface{}, reg *toolRegistry) map[string]inte
 	return map[string]interface{}{"type": "auto"}
 }
 
-// ---- 思考块信封 ----
+// ---- Thinking-block envelopes ----
 
-// encodeThinkingEnvelope 把 Anthropic 签名 thinking/redacted_thinking 块编码成
-// Responses reasoning.encrypted_content 字符串（带版本前缀的 base64url JSON）。
-// 无签名（signature/data 为空）的块不编码——回放没意义。
+// encodeThinkingEnvelope encodes an Anthropic signed thinking/redacted_thinking block into a
+// Responses reasoning.encrypted_content string (version-prefixed base64url JSON).
+// Blocks without a signature (empty signature/data) aren't encoded — replaying them is pointless.
 func encodeThinkingEnvelope(block map[string]interface{}) string {
 	switch objStr(block, "type") {
 	case "thinking":
@@ -1358,7 +1358,7 @@ func encodeThinkingEnvelope(block map[string]interface{}) string {
 	return thinkingEnvelopePrefix + base64.RawURLEncoding.EncodeToString(b)
 }
 
-// decodeThinkingEnvelope 识别信封前缀并还原 thinking 块；不是我们的信封返回 nil。
+// decodeThinkingEnvelope recognizes the envelope prefix and restores the thinking block; returns nil for foreign envelopes.
 func decodeThinkingEnvelope(s string) map[string]interface{} {
 	if !strings.HasPrefix(s, thinkingEnvelopePrefix) {
 		return nil
@@ -1371,57 +1371,57 @@ func decodeThinkingEnvelope(s string) map[string]interface{} {
 	if err := json.Unmarshal(b, &block); err != nil {
 		return nil
 	}
-	// 复用编码器的校验：解出来的必须是有签名的 thinking 块，防止异形信封混进工具轮。
+	// Reuses the encoder's validation: the decoded result must be a signed thinking block, keeping malformed envelopes out of tool turns.
 	if encodeThinkingEnvelope(block) == "" {
 		return nil
 	}
 	return block
 }
 
-// ---- 搜索块信封 ----
+// ---- Search-block envelopes ----
 
-// searchEnvelopePrefix 是搜索块信封前缀：把一次搜索的 server_tool_use +
-// web_search_tool_result 两块连同归属三元组，经 key 派生掩码异或混淆后 base64url
-// 加此前缀，塞进 Responses reasoning.encrypted_content 返回给客户端（与 thinking
-// 信封同管道）。客户端下一轮原样回传，代理解信封把完整搜索结构还原上行——模型据此
-// 直接读上次搜索内容，不必原关键字重搜。v2 起 payload 混淆存储：信封在客户端历史
-// （Codex 会话记录）里躺着，不躺明文 url/模型/key 哈希（用户要求，混淆非加密）。
+// searchEnvelopePrefix is the search-block envelope prefix: one search's server_tool_use +
+// web_search_tool_result blocks together with the attribution triple, XOR-obfuscated with a key-derived mask, base64url'd
+// with this prefix, tucked into Responses reasoning.encrypted_content returned to the client (same channel as thinking
+// envelopes). The client replays it verbatim next turn; the proxy unseals the envelope and restores the full search structure upstream — the model
+// reads last search's content directly from it, no re-search with the same keywords needed. Since v2 the payload is stored obfuscated: envelopes lie around in client-side history
+// (Codex session logs) without lying around as plaintext url/model/key hashes (user requirement; obfuscation, not encryption).
 const searchEnvelopePrefix = "p429-ant-search-v2:"
 
-// searchReplayCtx 是搜索信封还原的每次请求上下文（翻译期单 goroutine，免锁）：
-// convID 用于查/学对话水位；proactiveCutoff 计数水位主动剥的块（[剥N] 的一部分，
-// 拆分只写日志）；restored 收集实际还原上行的信封封入时刻（无 ts 不收）——
-// 400 兜底剥块时取最老的一个学成对话水位。
+// searchReplayCtx is the per-request context of search-envelope restoration (translation phase is single-goroutine, lock-free):
+// convID is for querying/learning the conversation watermark; proactiveCutoff counts watermark-proactively-stripped blocks (part of
+// [剥N], the split only goes to logs); restored collects the sealing moments of actually-restored envelopes (ts-less ones not collected) —
+// the oldest of them is learned as the conversation watermark during 400-fallback stripping.
 type searchReplayCtx struct {
 	convID          string
-	proactiveCutoff int // 对话水位剥的块数
+	proactiveCutoff int // Number of blocks stripped by the conversation watermark
 	restored        []time.Time
 }
 
-// ctxKeySearchReplay 是内部请求 context 的键：把翻译期的搜索还原上下文
-// 带给主 handler（剥块计数进 flight、400 时学水位）。同 ctxKeyTranslated
-// 的理由：用 context 不用 header，不会漏到上游。
+// ctxKeySearchReplay is the internal request context key: hands the translation-time search-restoration context
+// to the main handler (strip counts into the flight, watermark learning on 400). Same rationale as
+// ctxKeyTranslated: context, not headers, so nothing leaks upstream.
 type ctxKeySearchReplayT struct{}
 
 var ctxKeySearchReplay ctxKeySearchReplayT
 
-// searchCutoff 按对话记录信封水位（封入时刻下界）：不比水位新的信封默认全剥
-// （注册表按龄淘汰：撞过 400 说明最老的死了，同龄与更老的必死）。400 兜底
-// 剥块时学习——对搜索 id 真实存活期不设任何先验，完全按对话实测自适应；
-// 只升不降（水位越新剥得越多，旧信息已被新信息覆盖）。
+// searchCutoff records the envelope watermark per conversation (lower bound of sealing moments): envelopes no newer than the watermark are all stripped by default
+// (the registry expires by age: a 400 hit means the oldest died, so same-age and older ones are certainly dead). Learned during 400-fallback
+// stripping — no a-priori assumption about search ids' real lifetimes, fully self-adaptive per conversation measurement;
+// only rises, never falls (the newer the watermark, the more gets stripped; old info has been superseded by new info).
 var searchCutoff = struct {
 	sync.Mutex
 	m map[string]time.Time
 }{m: make(map[string]time.Time)}
 
-// searchCutoffFor 查对话水位；无记录返回零值（不拦任何信封）。
+// searchCutoffFor queries the conversation watermark; no record returns the zero value (no envelope is blocked).
 func searchCutoffFor(convID string) time.Time {
 	searchCutoff.Lock()
 	defer searchCutoff.Unlock()
 	return searchCutoff.m[convID]
 }
 
-// learnSearchCutoff 把对话水位抬到 ts（只升不降）。
+// learnSearchCutoff raises the conversation watermark to ts (only rises, never falls).
 func learnSearchCutoff(convID string, ts time.Time) {
 	if convID == "" || ts.IsZero() {
 		return
@@ -1433,10 +1433,10 @@ func learnSearchCutoff(convID string, ts time.Time) {
 	}
 }
 
-// searchTriple 是搜索信封的归属信息：url+模型+key 哈希。KeyH 只存 key 的
-// sha256 前 16 hex，不裸存 key。Model 只作排查参考，不参与还原比对——见 sameOrigin。
-// mask 是 key 派生的异或掩码（json:"-" 永不信封序列化）：encode/decode 都要它，
-// 路由定案后由 newSearchTriple 一并派生。
+// searchTriple is a search envelope's attribution info: url+model+key hash. KeyH stores only the key's
+// first 16 hex of sha256, never the bare key. Model is only a troubleshooting reference, not part of the restoration comparison — see sameOrigin.
+// mask is the key-derived XOR mask (json:"-" never envelope-serialized): both encode and decode need it;
+// it's derived by newSearchTriple together once routing is settled.
 type searchTriple struct {
 	URL   string `json:"u"`
 	Model string `json:"m"`
@@ -1444,19 +1444,19 @@ type searchTriple struct {
 	mask  []byte `json:"-"`
 }
 
-// newSearchTriple 建归属三元组：api 是实际生效的鉴权 token（effectiveKey 口径），
-// 只存其哈希，并派生信封混淆掩码。
+// newSearchTriple builds the attribution triple: api is the actually-effective auth token (effectiveKey semantics);
+// only its hash is stored, and the envelope obfuscation mask is derived.
 func newSearchTriple(url, model, api string) *searchTriple {
 	return &searchTriple{URL: url, Model: model, KeyH: hashSearchKey(api), mask: searchEnvMask(api)}
 }
 
-// searchEnvMask 从 api key 派生 32 字节混淆掩码（域分隔，不与 KeyH 同源）。
+// searchEnvMask derives a 32-byte obfuscation mask from the api key (domain-separated, not same-source as KeyH).
 func searchEnvMask(api string) []byte {
 	sum := sha256.Sum256([]byte("p429-search-mask\x00" + api))
 	return sum[:]
 }
 
-// xorSearchMask 循环异或掩码（混淆/解混淆同一函数）。纯异或，无加密开销。
+// xorSearchMask applies the cyclic XOR mask (obfuscate/de-obfuscate are the same function). Pure XOR, no encryption overhead.
 func xorSearchMask(mask, p []byte) []byte {
 	out := make([]byte, len(p))
 	for i := range p {
@@ -1465,22 +1465,22 @@ func xorSearchMask(mask, p []byte) []byte {
 	return out
 }
 
-// sameOrigin 判断两归属是否同一上游来源：只比 url+key 两腿。模型腿不参与——
-// 2026-09-10 实测同 endpoint 同 key 跨模型回放（k3-256k 的搜索块丢给
-// kimi-for-coding 追问）200 零重搜、模型给出正文级摘要，跨模型不拦还原。
+// sameOrigin reports whether two attributions are the same upstream source: only the url+key legs are compared. The model leg doesn't participate —
+// field-tested 2026-09-10: cross-model replay on the same endpoint and key (k3-256k's search blocks handed to
+// kimi-for-coding follow-ups) returned 200 with zero re-search and the model gave body-level summaries; cross-model restoration isn't blocked.
 func (t *searchTriple) sameOrigin(o *searchTriple) bool {
 	return t.URL == o.URL && t.KeyH == o.KeyH
 }
 
-// hashSearchKey 算 api key 的比对哈希（sha256 前 16 hex）。参数是实际生效的
-// 鉴权 token：路由 key 非空用路由 key，空则是透传的客户端 Authorization 头值。
+// hashSearchKey computes the comparison hash of an api key (first 16 hex of sha256). The parameter is the actually-effective
+// auth token: the route key when non-empty, otherwise the client's passed-through Authorization header value.
 func hashSearchKey(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// encodeSearchEnvelope 把一次搜索的两个 Anthropic 块与归属三元组编码成信封字符串。
-// 三元组/块缺失或 server_tool_use 无 query（空搜索）时不编码——空壳没有回放价值。
+// encodeSearchEnvelope encodes one search's two Anthropic blocks plus the attribution triple into an envelope string.
+// Not encoded when the triple/blocks are missing or the server_tool_use has no query (empty search) — a shell has no replay value.
 func encodeSearchEnvelope(t *searchTriple, useBlk, resBlk map[string]interface{}) string {
 	if t == nil || useBlk == nil || resBlk == nil {
 		return ""
@@ -1488,11 +1488,11 @@ func encodeSearchEnvelope(t *searchTriple, useBlk, resBlk map[string]interface{}
 	if objStr(asObj(useBlk["input"]), "query") == "" {
 		return ""
 	}
-	// id 归一：Kimi 流式搜索的 server_tool_use 块 id 是 tool_ 开头，但搜索注册表
-	// 只登记结果块的 srvtoolu_ id——回放时按 stu.id 查注册表，查不到就 400
-	// tool_call_id is not found（2026-09-10 受控实验：流式原样回放 400，把 stu.id
-	// 改写成 result.tool_use_id 后 200；非流式搜索两者天生一致，不受影响）。
-	// 信封是唯一的回放载体，在封入时归一；浅拷贝不改调用方共享的块。
+	// id normalization: Kimi streaming search's server_tool_use block id starts with tool_, but the search registry
+	// only registers the result block's srvtoolu_ id — replaying by stu.id misses the registry and 400s with
+	// tool_call_id is not found (2026-09-10 controlled experiment: verbatim streaming replay 400'd; rewriting stu.id
+	// to result.tool_use_id returned 200; non-streaming search has both naturally identical, unaffected).
+	// The envelope is the only replay carrier; normalization happens at sealing time; the shallow copy doesn't mutate the caller's shared blocks.
 	if tid := objStr(resBlk, "tool_use_id"); tid != "" && objStr(useBlk, "id") != tid {
 		cp := make(map[string]interface{}, len(useBlk)+1)
 		for k, v := range useBlk {
@@ -1504,23 +1504,23 @@ func encodeSearchEnvelope(t *searchTriple, useBlk, resBlk map[string]interface{}
 	payload, err := json.Marshal(map[string]interface{}{
 		"t":  t,
 		"b":  []map[string]interface{}{useBlk, resBlk},
-		"ts": time.Now().Unix(), // 封入时刻：还原侧按对话水位剥块的依据
+		"ts": time.Now().Unix(), // Sealing moment: the basis for the restore side's per-conversation watermark stripping
 	})
 	if err != nil {
 		return ""
 	}
-	// 混淆存储：掩码缺失宁可不出信封，也不发明文 payload。
+	// Obfuscated storage: with the mask missing, rather emit no envelope than a plaintext payload.
 	if len(t.mask) == 0 {
 		return ""
 	}
 	return searchEnvelopePrefix + base64.RawURLEncoding.EncodeToString(xorSearchMask(t.mask, payload))
 }
 
-// decodeSearchEnvelope 识别搜索信封前缀并还原三元组、两个内容块与封入时刻 ts
-// （无 ts 字段的老信封返回零值——还原侧视同最老：有水位剥、无水位乐观还原）。
-// mask 是本请求路由预测的 key 派生掩码（nil/不对 → 异或出来不是 JSON，自然
-// ok=false——key 腿的比对就含在解混淆里）；不是我们的信封、或块形态不对，
-// 返回 ok=false。
+// decodeSearchEnvelope recognizes the search envelope prefix and restores the triple, the two content blocks, and the sealing moment ts
+// (old envelopes without a ts field return the zero value — the restore side treats them as oldest: stripped when a watermark exists, optimistically restored without one).
+// mask is this request's route-prediction key-derived mask (nil/wrong → the XOR result isn't JSON, naturally
+// ok=false — the key leg's comparison is contained in the de-obfuscation itself); foreign envelopes or wrong block shapes
+// return ok=false.
 func decodeSearchEnvelope(s string, mask []byte) (*searchTriple, []map[string]interface{}, time.Time, bool) {
 	if !strings.HasPrefix(s, searchEnvelopePrefix) || len(mask) == 0 {
 		return nil, nil, time.Time{}, false
@@ -1549,11 +1549,11 @@ func decodeSearchEnvelope(s string, mask []byte) (*searchTriple, []map[string]in
 	return payload.T, payload.B, ts, true
 }
 
-// stripSearchBlocksInBody 从 Anthropic 请求体剥掉所有回放的搜索结构
-// （server_tool_use/web_search_tool_result 块）：剥后空壳消息整条删除、相邻同 role
-// 消息合并（删消息可能造成 user user 相邻）。n 是剥掉的搜索块数（两种块各算 1，
-// 删空壳消息不另计），供 [剥N] 显示与日志拆分。没有任何搜索块时 ok=false（无需重试）。
-// 用于搜索信封还原被上游拒（400 tool_call_id）后的 fail-soft 重试。
+// stripSearchBlocksInBody strips all replayed search structures from an Anthropic request body
+// (server_tool_use/web_search_tool_result blocks): post-strip shell messages are deleted wholesale, adjacent same-role
+// messages merged (deleting a message can make user user adjacent). n is the number of search blocks stripped (each of the two block kinds counts 1,
+// deleted shell messages don't count extra), feeding the [剥N] display and log splits. ok=false when there are no search blocks at all (no retry needed).
+// Used for the fail-soft retry after a search-envelope restoration is rejected by the upstream (400 tool_call_id).
 func stripSearchBlocksInBody(body []byte) (nb []byte, n int, ok bool) {
 	var m map[string]interface{}
 	if err := json.Unmarshal(body, &m); err != nil {
@@ -1582,7 +1582,7 @@ func stripSearchBlocksInBody(body []byte) (nb []byte, n int, ok bool) {
 			nc = append(nc, c)
 		}
 		if len(nc) == 0 {
-			stripped = true // 整条消息只剩搜索块 → 删
+			stripped = true // A message reduced to only search blocks → delete
 			continue
 		}
 		msg["content"] = nc
@@ -1599,7 +1599,7 @@ func stripSearchBlocksInBody(body []byte) (nb []byte, n int, ok bool) {
 	return out, n, true
 }
 
-// mergeSameRoleMessages 合并相邻同 role 且 content 都是数组的消息（剥块/删消息后的规整）。
+// mergeSameRoleMessages merges adjacent same-role messages whose content are both arrays (normalization after stripping/deletion).
 func mergeSameRoleMessages(msgs []interface{}) []interface{} {
 	var out []interface{}
 	for _, mi := range msgs {
@@ -1618,10 +1618,10 @@ func mergeSameRoleMessages(msgs []interface{}) []interface{} {
 	return out
 }
 
-// ---- 响应翻译：Anthropic message JSON → Responses 对象（非流式路径） ----
+// ---- Response translation: Anthropic message JSON → Responses object (non-streaming path) ----
 
-// mapStopReasonToStatus 把 Anthropic stop_reason 映射成 Responses (status, incomplete_reason)。
-// 对照 cc-switch map_anthropic_stop_reason_to_status。
+// mapStopReasonToStatus maps an Anthropic stop_reason to Responses (status, incomplete_reason).
+// Mirrors cc-switch map_anthropic_stop_reason_to_status.
 func mapStopReasonToStatus(stop string) (string, string) {
 	switch stop {
 	case "max_tokens", "model_context_window_exceeded":
@@ -1632,9 +1632,9 @@ func mapStopReasonToStatus(stop string) (string, string) {
 	return "completed", ""
 }
 
-// buildResponsesUsage 把 Anthropic usage 转成 Responses usage。
-// Anthropic 的 input_tokens 不含缓存；Responses 报总输入、缓存作为子集：
-// input_tokens = fresh + cache_read + cache_creation。
+// buildResponsesUsage converts Anthropic usage to Responses usage.
+// Anthropic's input_tokens excludes cache; Responses reports total input with cache as a subset:
+// input_tokens = fresh + cache_read + cache_creation.
 func buildResponsesUsage(usage map[string]interface{}) map[string]interface{} {
 	fresh := toInt64(usage["input_tokens"])
 	output := toInt64(usage["output_tokens"])
@@ -1653,20 +1653,20 @@ func buildResponsesUsage(usage map[string]interface{}) map[string]interface{} {
 		"input_tokens_details":  map[string]interface{}{"cached_tokens": cacheRead},
 	}
 	if cacheCreation > 0 {
-		// 官方嵌套字段 + 保留一个顶层兼容别名（对照 cc-switch 同款做法）。
+		// Official nested field + a top-level compatibility alias kept (mirrors cc-switch's same practice).
 		result["input_tokens_details"].(map[string]interface{})["cache_write_tokens"] = cacheCreation
 		result["cache_creation_input_tokens"] = cacheCreation
 	}
 	return result
 }
 
-// anthropicToResponsesObject 把完整的 Anthropic message JSON 转成 Responses 对象。
-// 对照 cc-switch anthropic_response_to_responses_with_context。
-// model 参数是客户端原始 model 名（管线回传时已被改写回原名的场景之外兜底用）。
-// reg 是请求侧建立的工具注册表：tool_use 块据此还原 custom/namespace/tool_search 身份。
-// triple 是搜索信封的归属三元组（nil = 不出搜索信封，如 Anthropic 口直接调用）。
-// stripThinking=true（translateNone2Low 升级流）时丢弃 thinking/redacted_thinking 块
-// （不产 reasoning 项）；usage 不受影响，如实透传。
+// anthropicToResponsesObject converts a complete Anthropic message JSON into a Responses object.
+// Mirrors cc-switch anthropic_response_to_responses_with_context.
+// The model parameter is the client's original model name (fallback for scenarios where the pipeline's return hasn't already written it back).
+// reg is the request-side tool registry: tool_use blocks recover their custom/namespace/tool_search identities from it.
+// triple is the search envelope's attribution triple (nil = no search envelopes, e.g. direct Anthropic-port calls).
+// stripThinking=true (translateNone2Low upgrade streams) drops thinking/redacted_thinking blocks
+// (no reasoning items produced); usage is unaffected, passed through truthfully.
 func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *toolRegistry, triple *searchTriple, stripThinking bool) map[string]interface{} {
 	id := objStr(msg, "id")
 	var responseID string
@@ -1684,7 +1684,7 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 
 	var output []interface{}
 	var textParts []interface{}
-	var lastSearchUse map[string]interface{} // 最近一个 server_tool_use 块（搜索结果块到达时配对封信封）
+	var lastSearchUse map[string]interface{} // The most recent server_tool_use block (paired into an envelope when the result block arrives)
 	flushText := func() {
 		if len(textParts) == 0 {
 			return
@@ -1703,7 +1703,7 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 		blk := asObj(b)
 		switch objStr(blk, "type") {
 		case "text":
-			// 搜索 query 回声行整行删除（见 stripSearchQueryEcho）；剥完为空则丢弃。
+			// Search query echo lines are deleted whole (see stripSearchQueryEcho); the block is dropped if nothing remains.
 			if t := stripSearchQueryEcho(objStr(blk, "text")); strings.TrimSpace(t) != "" {
 				textParts = append(textParts, map[string]interface{}{
 					"type": "output_text", "text": t, "annotations": []interface{}{},
@@ -1720,13 +1720,13 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 			args := canonicalJSON(sanitizeToolUseInput(name, input))
 			itemID := toolCallItemID(reg, callID, name)
 			if itemID == "fc_" || itemID == "ctc_" {
-				// call_id 空时 id 退化成纯前缀：补输出序号兜底保证唯一。
+				// When call_id is empty the id degenerates to a bare prefix: back-fill the output index to keep it unique.
 				itemID = fmt.Sprintf("%s%s_%d", itemID, responseID, len(output))
 			}
 			output = append(output, toolCallItemFromRegistry(reg, itemID, "completed", callID, name, args))
 		case "thinking", "redacted_thinking":
 			if stripThinking {
-				continue // translateNone2Low：剥离思考块，下游看到的是关思考响应
+				continue // translateNone2Low: thinking blocks stripped; the downstream sees a thinking-off response
 			}
 			flushText()
 			if enc := encodeThinkingEnvelope(blk); enc != "" {
@@ -1744,13 +1744,13 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 				output = append(output, item)
 			}
 		case "server_tool_use", "web_search_tool_result":
-			// 搜索相关块：配对成 web_search_call 项（start 时块已完整，见流式路径同款逻辑）。
+			// Search-related blocks: paired into a web_search_call item (the block is complete at start; see the streaming path's same logic).
 			flushText()
 			if item := webSearchCallItem(blk, responseID, len(output)); item != nil {
 				output = append(output, item)
 			}
-			// 搜索块信封：结果块到达时与前面的 server_tool_use 配对封袋，作为额外
-			// reasoning 项随行——客户端保管，下轮回放时还原（见 searchEnvelopePrefix）。
+			// Search-block envelope: when the result block arrives it's bagged with the preceding server_tool_use, riding along as an extra
+			// reasoning item — kept by the client, restored on next-turn replay (see searchEnvelopePrefix).
 			if objStr(blk, "type") == "server_tool_use" {
 				lastSearchUse = blk
 			} else if lastSearchUse != nil {
@@ -1788,7 +1788,7 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 	return result
 }
 
-// functionCallItem 构造一个 Responses function_call 输出项。
+// functionCallItem builds a Responses function_call output item.
 func functionCallItem(itemID, status, callID, name, arguments string) map[string]interface{} {
 	return map[string]interface{}{
 		"id":        itemID,
@@ -1800,17 +1800,17 @@ func functionCallItem(itemID, status, callID, name, arguments string) map[string
 	}
 }
 
-// kimiSearchPreamble 是 Kimi（k3-256k）在请求带 web_search 工具时每轮响应开头白送的
-// 空搜索前言文本（query 为空）。在线探针实证其 anthropic 端点会发「空搜索三连」：
-// 此前言 text 块 + 无 id/input 的 server_tool_use + content 为空的 web_search_tool_result，
-// 哪怕模型根本没搜索。更麻烦的是模型会从历史里模仿这个模式：前言会重复多次并直接粘在
-// 正文开头（实测 "Search results for query: Search results for query: 我确认一下…"）。
-// 处理规则（下游响应与上游请求回放同套，见 stripSearchQueryEcho）：纯前言与
-// 「单条前言+query」的回声行整行删除（query 回声灌进上下文会诱发连续同类搜索）；
-// ≥2 条连续裸前言粘在正文前（模仿签名）剥光留正文；空的 web_search 结构不产出/不回放。
+// kimiSearchPreamble is the empty-search preamble text Kimi (k3-256k) gives away at the start of every response when the request carries the web_search tool
+// (query empty). Online probes prove its anthropic endpoint emits an "empty-search triple":
+// this preamble text block + an id-less/input-less server_tool_use + a content-empty web_search_tool_result,
+// even when the model didn't search at all. Worse, the model imitates this pattern from history: the preamble repeats multiple times, glued
+// right onto the body's start (observed: "Search results for query: Search results for query: 我确认一下…").
+// Handling rules (same set for downstream responses and upstream request replay; see stripSearchQueryEcho): pure preambles and
+// "single preamble+query" echo lines are deleted whole (query echo injected into the context induces repeated same-kind searches);
+// ≥2 consecutive bare preambles glued before the body (the imitation signature) are stripped bare keeping the body; empty web_search structures are neither produced nor replayed.
 const kimiSearchPreamble = "Search results for query: "
 
-// stripKimiSearchPreamble 去掉文本开头重复出现的前言，返回剩余部分。
+// stripKimiSearchPreamble removes repeated preambles at the text's start, returning the remainder.
 func stripKimiSearchPreamble(text string) string {
 	for strings.HasPrefix(text, kimiSearchPreamble) {
 		text = strings.TrimPrefix(text, kimiSearchPreamble)
@@ -1818,7 +1818,7 @@ func stripKimiSearchPreamble(text string) string {
 	return text
 }
 
-// countPreambleRun 返回文本开头连续完整前言的条数。
+// countPreambleRun returns the number of consecutive complete preambles at the text's start.
 func countPreambleRun(text string) int {
 	n := 0
 	for strings.HasPrefix(text, kimiSearchPreamble) {
@@ -1828,9 +1828,9 @@ func countPreambleRun(text string) int {
 	return n
 }
 
-// stripRepeatedPreamble 是 stripKimiSearchPreamble 的克制版：只有开头连续重复 ≥2 条
-// （模型模仿的签名，实测均为 ×2/×3）才整段剥掉；恰好一条前言+文本是真搜索的 query
-// 展示位，原样保留。剥完为空/纯前言的丢弃由调用方负责。
+// stripRepeatedPreamble is stripKimiSearchPreamble's restrained version: only when ≥2 consecutive repeats
+// open the text (the model's imitation signature, field-tested always ×2/×3) is the whole run stripped; exactly one preamble+text is a real search's query
+// display spot, kept as-is. Dropping stripped-empty/pure-preamble text is the caller's job.
 func stripRepeatedPreamble(text string) string {
 	if countPreambleRun(text) < 2 {
 		return text
@@ -1838,18 +1838,18 @@ func stripRepeatedPreamble(text string) string {
 	return stripKimiSearchPreamble(text)
 }
 
-// isPreambleRun 报告流式累积文本是否仍可能是"纯前言"（前言的若干次重复 + 一个前言前缀）。
-// 满足则继续憋着不转发；一旦岔开（接的是正文）即可剥离前言后补发。
+// isPreambleRun reports whether the streaming accumulated text may still be "pure preamble" (a few preamble repeats + a preamble prefix).
+// If so, keep holding and don't forward; once it diverges (body text follows), the preamble can be stripped and the rest back-sent.
 func isPreambleRun(accum string) bool {
 	return strings.HasPrefix(kimiSearchPreamble, stripKimiSearchPreamble(accum))
 }
 
-// stripSearchQueryEcho 删除文本里的搜索 query 回声行：以「Search results for query: 」
-// 开头的整行（前缀+query 一起删，含无尾空格的裸前言形态）；行首粘连的重复裸前言
-// （模型模仿签名，≥2 条）按 stripRepeatedPreamble 规则剥光留同行正文。删除留下的
-// 行首空行一并去掉；不含回声行的文本经 Split/Join 恒等返回，一个字节都不动。
-// 纯函数、幂等：同一文本任何时刻处理结果一致——这是请求体前缀缓存稳定的前提，
-// 上游回放方向对每个请求、每条消息的每段文本无条件应用。
+// stripSearchQueryEcho deletes search query echo lines from text: whole lines starting with "Search results for query: "
+// (prefix+query deleted together, including the bare-preamble form without the trailing space); repeated bare preambles glued
+// at a line's start (the model's imitation signature, ≥2) are stripped bare per stripRepeatedPreamble's rules, keeping the same-line body. Line-leading blank lines
+// left by deletion are removed too; text without echo lines returns identical through Split/Join, not a byte touched.
+// Pure function, idempotent: the same text processed at any moment gives the same result — the precondition for stable request-body prefix caching;
+// the upstream replay direction applies it unconditionally to every text segment of every message of every request.
 func stripSearchQueryEcho(text string) string {
 	lines := strings.Split(text, "\n")
 	kept := lines[:0]
@@ -1857,36 +1857,36 @@ func stripSearchQueryEcho(text string) string {
 	for _, ln := range lines {
 		if strings.HasPrefix(ln, kimiSearchPreamble) {
 			if countPreambleRun(ln) >= 2 {
-				ln = stripRepeatedPreamble(ln) // 模仿签名：剥裸前言留同行正文
+				ln = stripRepeatedPreamble(ln) // Imitation signature: strip bare preambles, keep the same-line body
 			} else {
-				dropped = true // 单条前言开头 = query 回声行：整行删除
+				dropped = true // A single leading preamble = a query echo line: deleted whole
 				continue
 			}
 		} else if strings.TrimRight(ln, " \t\r") == strings.TrimSpace(kimiSearchPreamble) {
-			dropped = true // 无尾空格的裸前言
+			dropped = true // Bare preamble without the trailing space
 			continue
 		}
 		kept = append(kept, ln)
 	}
 	if dropped {
 		for len(kept) > 0 && strings.TrimSpace(kept[0]) == "" {
-			kept = kept[1:] // 删除留下的行首空行
+			kept = kept[1:] // Line-leading blank lines left by deletion
 		}
 	}
 	return strings.Join(kept, "\n")
 }
 
-// holdSearchQueryEchoText 报告流式累积文本是否仍需憋着不转发：仍在前言碎片跑道
-// （isPreambleRun），或按 stripSearchQueryEcho 剥完为空（回声行还没收完/块内还没有
-// 正文）——两种情况都不能发任何事件；岔出非空正文时补发才开始。
+// holdSearchQueryEchoText reports whether the streaming accumulated text still needs holding: still on the preamble-fragment runway
+// (isPreambleRun), or stripped-empty per stripSearchQueryEcho (echo lines not fully received / no body text
+// in the block yet) — in both cases no event may be sent; back-sending starts only when non-empty body diverges.
 func holdSearchQueryEchoText(accum string) bool {
 	return isPreambleRun(accum) || strings.TrimSpace(stripSearchQueryEcho(accum)) == ""
 }
 
-// webSearchCallItem 把 Anthropic server_tool_use / web_search_tool_result 块转成
-// Responses web_search_call 项。server_tool_use（带 query）转成 completed 的搜索调用；
-// web_search_tool_result 块本身不单独成项（结果已在 server_tool_use 的动作里表达不了
-// 全部细节，v1 把结果来源 URL 合并进 action.sources）。
+// webSearchCallItem converts Anthropic server_tool_use / web_search_tool_result blocks into
+// Responses web_search_call items. server_tool_use (with query) becomes a completed search call;
+// the web_search_tool_result block itself doesn't become a separate item (the result can't be fully expressed in server_tool_use's action;
+// v1 merges the result's source URLs into action.sources).
 func webSearchCallItem(blk map[string]interface{}, responseID string, idx int) map[string]interface{} {
 	switch objStr(blk, "type") {
 	case "server_tool_use":
@@ -1895,8 +1895,8 @@ func webSearchCallItem(blk map[string]interface{}, responseID string, idx int) m
 		}
 		q := objStr(asObj(blk["input"]), "query")
 		if q == "" {
-			// 空搜索三连的 server_tool_use 无 id 无 input（见 kimiSearchPreamble）：
-			// 没有信息量，丢弃。真搜索必带 query；其配套结果块的 sources 项照常生成。
+			// The empty-search triple's server_tool_use has no id and no input (see kimiSearchPreamble):
+			// no information content, dropped. A real search always carries a query; its paired result block's sources items are still produced.
 			return nil
 		}
 		return map[string]interface{}{
@@ -1906,7 +1906,7 @@ func webSearchCallItem(blk map[string]interface{}, responseID string, idx int) m
 			"action": map[string]interface{}{"type": "search", "query": q},
 		}
 	case "web_search_tool_result":
-		// 结果块：提取来源 URL 列表，作为一个 completed 调用项的 sources 呈现。
+		// Result block: the source URL list extracted, presented as a completed call item's sources.
 		var sources []interface{}
 		for _, r := range asArr(blk["content"]) {
 			rm := asObj(r)
@@ -1927,21 +1927,21 @@ func webSearchCallItem(blk map[string]interface{}, responseID string, idx int) m
 	return nil
 }
 
-// searchBlocksFromResponsesItem 把回放历史里的搜索结构还原成 Anthropic 内容块。
-// web_search_call 调用项一律不还原：它的 id 是代理自造的（ws_+响应 id），上游搜索
-// 注册表从未登记，转成 server_tool_use 上行必 400——生产实证：搜索块出生 33 秒的
-// 追问（#3）与 54 分钟的追问（#19）第一尝试都被拒，fail-soft 连坐把信封还原的真
-// 搜索对一起剥掉，模型被迫重搜。搜索内容只由搜索信封承载（其块带原生注册 id，
-// 实测回放 200），调用项只是客户端侧的展示件。已是 Anthropic 形状的
-// server_tool_use/web_search_tool_result（防御性覆盖，id 为原生注册 id）有内容
-// 的原样上行，空壳（无 input/无 content）删除。
+// searchBlocksFromResponsesItem restores search structures from replayed history into Anthropic content blocks.
+// web_search_call items are never restored: their ids are proxy-minted (ws_+response id), never registered in the upstream search
+// registry; converting to server_tool_use upstream must 400 — production proof: follow-ups 33 seconds after a search block's
+// birth (#3) and 54 minutes after (#19) were both rejected on first attempt, and the fail-soft collective punishment stripped the envelope-restored real
+// search pair along, forcing the model to re-search. Search content is carried only by search envelopes (whose blocks bear natively registered ids,
+// field-tested replaying 200); call items are client-side display pieces only. Ones already in Anthropic shape
+// server_tool_use/web_search_tool_result (defensive coverage, ids natively registered) with content
+// go upstream as-is; shells (no input/no content) are deleted.
 func searchBlocksFromResponsesItem(item map[string]interface{}) []map[string]interface{} {
 	switch objStr(item, "type") {
 	case "web_search_call":
 		return nil
 	case "server_tool_use":
-		// 非 Responses 协议项（防御性覆盖）：已是 Anthropic 块形状，带 input 内容
-		// 的原样上行；空调用（Kimi 空搜索三连那种无 id 无 input 的壳）删除。
+		// Non-Responses-protocol items (defensive coverage): already in Anthropic block shape; content-bearing
+		// ones go upstream as-is; empty calls (shells like Kimi's empty-search triple with no id and no input) are deleted.
 		inp := asObj(item["input"])
 		if len(inp) == 0 {
 			return nil

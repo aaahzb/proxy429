@@ -1,11 +1,11 @@
 package main
 
-// responses_stream.go — Anthropic Messages SSE → OpenAI Responses SSE 实时翻译。
-// 对照 cc-switch streaming_codex_anthropic.rs 的状态机与 codex_responses_sse.rs 的事件形状。
+// responses_stream.go — real-time Anthropic Messages SSE → OpenAI Responses SSE translation.
+// Mirrors cc-switch streaming_codex_anthropic.rs's state machine and codex_responses_sse.rs's event shapes.
 //
-// 翻译型 ResponseWriter 夹在新监听口 handler 与主 handler 之间：主管线往里写
-// Anthropic SSE（或异常时的 JSON/错误体），这里逐块解析、按 Responses 事件生命周期
-// 实时转写（客户端 stream:true）或收集后组装一次性 JSON（stream:false）。
+// The translating ResponseWriter sits between the new listener-port handler and the main handler: the main pipeline writes
+// Anthropic SSE (or JSON/error bodies on anomalies) into it; here it's parsed block by block and transcribed live per the Responses event lifecycle
+// (client stream:true) or collected and assembled into a one-shot JSON (stream:false).
 
 import (
 	"bytes"
@@ -16,7 +16,7 @@ import (
 	"strings"
 )
 
-// ---- Responses SSE 事件构造（形状对照 cc-switch codex_responses_sse.rs）----
+// ---- Responses SSE event construction (shapes mirror cc-switch codex_responses_sse.rs) ----
 
 func respSSEEvent(event string, data map[string]interface{}) string {
 	b, _ := json.Marshal(data)
@@ -59,9 +59,9 @@ func respReasoningItem(itemID, text, encrypted string) map[string]interface{} {
 	return item
 }
 
-// ---- 状态机 ----
+// ---- State machine ----
 
-// blockKind 内容块类别。
+// blockKind content-block category.
 type blockKind int
 
 const (
@@ -69,9 +69,9 @@ const (
 	bkThinking
 	bkRedactedThinking
 	bkToolUse
-	bkSearchUse   // server_tool_use：query 可能走 input_json_delta（实测 Kimi 常只给 id/name），stop 补全后才发项
-	bkInstantDone // web_search_tool_result 及未知块：start 时块已完整，add+done 已发
-	bkDropped     // translateNone2Low 剥离的思考块：占位对齐 index，不发事件、不进 items
+	bkSearchUse   // server_tool_use: the query may arrive via input_json_delta (Kimi often sends only id/name in the field), so the item ships only after stop completes it
+	bkInstantDone // web_search_tool_result and unknown blocks: complete at start; add+done already sent
+	bkDropped     // translateNone2Low stripped thinking block: a placeholder keeps index alignment; no events, no items
 )
 
 type blockState struct {
@@ -80,16 +80,16 @@ type blockState struct {
 	itemID      string
 	callID      string
 	name        string
-	accum       string                 // text/thinking/input_json 累积
-	signature   string                 // signature_delta 累积
-	startInput  string                 // content_block_start 自带的 tool_use input（无 delta 时兜底）
-	searchBlk   map[string]interface{} // server_tool_use 块原文（stop 补全 input 后发项+配对信封）
-	heldText    bool                   // text 块待判定是否 Kimi 空搜索前言：分流前 delta 憋着不发
+	accum       string                 // text/thinking/input_json accumulation
+	signature   string                 // signature_delta accumulation
+	startInput  string                 // content_block_start's own tool_use input (fallback when no delta arrives)
+	searchBlk   map[string]interface{} // server_tool_use block original text (item shipped + envelope paired after stop completes input)
+	heldText    bool                   // text block pending a Kimi empty-search-preamble decision: deltas held back until the verdict
 }
 
-// anthToRespStream 把 Anthropic SSE 事件流翻译成 Responses SSE 事件流。
-// emit 为 nil 时（客户端 stream:false）只维护内部状态，收完用 buildFinalResponse 组装 JSON。
-// reg 是请求侧的工具注册表：tool_use 块据此还原 custom/namespace/tool_search 身份。
+// anthToRespStream translates an Anthropic SSE event stream into a Responses SSE event stream.
+// When emit is nil (client stream:false) it only maintains internal state and assembles the JSON with buildFinalResponse at the end.
+// reg is the request-side tool registry: tool_use blocks recover their custom/namespace/tool_search identities from it.
 type anthToRespStream struct {
 	emit            func(string)
 	model           string
@@ -99,12 +99,12 @@ type anthToRespStream struct {
 	completed       bool
 	nextOutputIndex int
 	blocks          map[int]*blockState
-	items           []map[string]interface{} // 已完成的 output 项（按完成顺序）
+	items           []map[string]interface{} // Completed output items (in completion order)
 	usage           map[string]interface{}
 	stopReason      string
-	triple          *searchTriple          // 搜索信封归属三元组（路由定案后由 translatingWriter 注入；nil = 不出信封）
-	lastSearchUse   map[string]interface{} // 最近一个 server_tool_use 块（结果块到达时配对封信封）
-	stripThinking   bool                   // translateNone2Low：剥离 thinking/redacted_thinking 块（下游看到关思考响应）
+	triple          *searchTriple          // Search-envelope attribution triple (injected by translatingWriter after routing is settled; nil = no envelopes)
+	lastSearchUse   map[string]interface{} // The most recent server_tool_use block (paired into an envelope when the result block arrives)
+	stripThinking   bool                   // translateNone2Low: strip thinking/redacted_thinking blocks (the downstream sees a thinking-off response)
 }
 
 func newAnthToRespStream(emit func(string), model string, reg *toolRegistry) *anthToRespStream {
@@ -124,7 +124,7 @@ func (s *anthToRespStream) send(ev string) {
 	}
 }
 
-// responseSkeleton 构造 response.created/in_progress 携带的 response 骨架。
+// responseSkeleton builds the response skeleton carried by response.created/in_progress.
 func (s *anthToRespStream) responseSkeleton(status string) map[string]interface{} {
 	return map[string]interface{}{
 		"id": s.responseID, "object": "response", "created_at": 0,
@@ -132,7 +132,7 @@ func (s *anthToRespStream) responseSkeleton(status string) map[string]interface{
 	}
 }
 
-// handleEvent 处理一个 Anthropic SSE 事件块（event 名 + data JSON）。
+// handleEvent handles one Anthropic SSE event block (event name + data JSON).
 func (s *anthToRespStream) handleEvent(event string, data map[string]interface{}) {
 	typ := objStr(data, "type")
 	if typ == "" {
@@ -161,7 +161,7 @@ func (s *anthToRespStream) handleEvent(event string, data map[string]interface{}
 	case "error":
 		s.handleError(data)
 	case "ping":
-		// 保活帧，忽略。
+		// Keepalive frame, ignored.
 	}
 }
 
@@ -199,9 +199,9 @@ func (s *anthToRespStream) allocOutputIndex() int {
 	return i
 }
 
-// emitTextStart 发 text 块的 output_item.added + content_part.added。
-// 这两个事件从 content_block_start 推迟到首个岔开前言的 delta（或块收尾时补发），
-// 以便 Kimi 空搜索前言整块静默丢弃（见 kimiSearchPreamble）。
+// emitTextStart emits a text block's output_item.added + content_part.added.
+// These two events are deferred from content_block_start to the first preamble-diverging delta (or back-filled at block end),
+// so a Kimi empty-search preamble can be silently dropped wholesale (see kimiSearchPreamble).
 func (s *anthToRespStream) emitTextStart(bs *blockState) {
 	s.send(respOutputItemAdded(bs.outputIndex, respMessageItem(bs.itemID, "in_progress", "")))
 	s.send(respSSEEvent("response.content_part.added", map[string]interface{}{
@@ -211,7 +211,7 @@ func (s *anthToRespStream) emitTextStart(bs *blockState) {
 	}))
 }
 
-// emitTextDelta 发一个 output_text.delta。
+// emitTextDelta emits one output_text.delta.
 func (s *anthToRespStream) emitTextDelta(bs *blockState, t string) {
 	s.send(respSSEEvent("response.output_text.delta", map[string]interface{}{
 		"type": "response.output_text.delta", "item_id": bs.itemID,
@@ -231,13 +231,13 @@ func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}
 		bs.heldText = true
 		bs.itemID = fmt.Sprintf("%s_msg_%d", s.responseID, itemNum)
 		bs.accum = objStr(cb, "text")
-		// item.added / content_part.added 推迟到 emitTextStart：Kimi 前言/query 回声
-		// （kimiSearchPreamble、stripSearchQueryEcho）要整块判定（回声行整行删/
-		// 重复裸前言剥光/纯前言丢弃），得等文本岔开前缀（或块收尾）再定。
+		// item.added / content_part.added are deferred to emitTextStart: the Kimi preamble/query echo
+		// (kimiSearchPreamble, stripSearchQueryEcho) needs whole-block judgment (echo lines deleted whole /
+		// repeated bare preambles stripped bare / pure preamble dropped), so it must wait for the text to diverge from the prefix (or the block to end).
 	case "thinking", "redacted_thinking":
 		if s.stripThinking {
-			// translateNone2Low：整块剥离——不发事件、不进 items，回收入口预分配的
-			// outputIndex 保持后续块序号连续；delta/stop 见到 bkDropped 直接跳过。
+			// translateNone2Low: wholesale strip — no events, no items, and the pre-allocated
+			// outputIndex is reclaimed to keep later block indices contiguous; delta/stop skip on bkDropped.
 			bs.kind = bkDropped
 			s.nextOutputIndex--
 			break
@@ -267,7 +267,7 @@ func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}
 		bs.name = objStr(cb, "name")
 		bs.itemID = toolCallItemID(s.reg, bs.callID, bs.name)
 		if bs.callID == "" {
-			// call_id 空时 id 退化成纯前缀：补输出序号兜底保证唯一。
+			// When call_id is empty the id degenerates to a bare prefix: back-fill the output index to keep it unique.
 			bs.itemID = fmt.Sprintf("%s%s_%d", bs.itemID, s.responseID, itemNum)
 		}
 		if inp := cb["input"]; inp != nil {
@@ -278,8 +278,8 @@ func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}
 		s.send(respOutputItemAdded(bs.outputIndex,
 			toolCallItemFromRegistry(s.reg, bs.itemID, "in_progress", bs.callID, bs.name, "")))
 	case "server_tool_use":
-		// query 可能不在 start 给（实测 Kimi 常只给 id/name，query 经后续
-		// input_json_delta 到达）：憋到 stop 补全 input 后再发项+记配对。
+		// The query may not be given at start (Kimi often sends only id/name in the field, the query arriving
+		// via later input_json_delta): hold until stop completes input, then ship the item + record the pairing.
 		bs.kind = bkSearchUse
 		bs.searchBlk = cb
 		if inp := cb["input"]; inp != nil {
@@ -288,15 +288,15 @@ func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}
 			}
 		}
 	case "web_search_tool_result":
-		// start 时块已完整：直接 added+done，stop 时不再处理。
+		// Complete at start: added+done sent immediately; nothing more at stop.
 		bs.kind = bkInstantDone
 		if item := webSearchCallItem(cb, s.responseID, itemNum); item != nil {
 			s.send(respOutputItemAdded(bs.outputIndex, item))
 			s.send(respOutputItemDone(bs.outputIndex, item))
 			s.items = append(s.items, item)
 		}
-		// 搜索块信封：结果块到达时与前面的 server_tool_use 配对封袋，作为额外
-		// reasoning 项随行（客户端保管，下轮回放时还原，见 searchEnvelopePrefix）。
+		// Search-block envelope: when the result block arrives it's bagged with the preceding server_tool_use, riding along as an extra
+		// reasoning item (kept by the client, restored on next-turn replay; see searchEnvelopePrefix).
 		if s.lastSearchUse != nil {
 			if enc := encodeSearchEnvelope(s.triple, s.lastSearchUse, cb); enc != "" {
 				envItem := map[string]interface{}{
@@ -313,7 +313,7 @@ func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}
 			s.lastSearchUse = nil
 		}
 	default:
-		// 不认识的块类型：丢弃但占位，保持 index 对齐。
+		// Unknown block type: dropped but placeholder-kept, preserving index alignment.
 		bs.kind = bkInstantDone
 	}
 	s.blocks[index] = bs
@@ -325,16 +325,16 @@ func (s *anthToRespStream) handleBlockDelta(index int, delta map[string]interfac
 		return
 	}
 	if bs.kind == bkDropped {
-		return // 已剥离的思考块：delta 直接丢弃
+		return // Stripped thinking block: deltas dropped directly
 	}
 	switch objStr(delta, "type") {
 	case "text_delta":
 		t := objStr(delta, "text")
 		bs.accum += t
 		if bs.heldText {
-			// 前言碎片未集齐、或按 stripSearchQueryEcho 剥完为空（回声行未收完/
-			// 块内还没有正文）→ 继续憋着；否则补发开始事件，剩余文本作为一个
-			// delta 补发（hold 条件保证岔开时剥完非空）。
+			// Preamble fragments not all in yet, or stripped-empty per stripSearchQueryEcho (echo lines not fully received /
+			// no body text yet in the block) → keep holding; otherwise back-fill the start events and send the remaining text as one
+			// delta (the hold condition guarantees the stripped result is non-empty when it diverges).
 			if holdSearchQueryEchoText(bs.accum) {
 				return
 			}
@@ -361,11 +361,11 @@ func (s *anthToRespStream) handleBlockDelta(index int, delta map[string]interfac
 	case "input_json_delta":
 		t := objStr(delta, "partial_json")
 		bs.accum += t
-		// custom 工具与 Read 不在中途转发参数 delta：custom 要在收拢时解包成裸
-		// 字符串发 custom_tool_call_input.done，Read 要在收拢时做 pages:"" sanitize
-		// （中途发会把待清理的片段漏给客户端）。对照 cc-switch 同款抑制。
-		// bkSearchUse 的参数碎片只累积（web_search_call 没有参数流概念，stop 时
-		// 拼进 action.query），不能走 function_call_arguments.delta。
+		// custom tools and Read don't forward argument deltas midway: custom must unwrap into a bare
+		// string at closing time for custom_tool_call_input.done, and Read must do the pages:"" sanitize
+		// at closing time (midway sends would leak unsanitized fragments to the client). Mirrors cc-switch's same suppression.
+		// bkSearchUse argument fragments only accumulate (web_search_call has no argument-stream concept; they're
+		// assembled into action.query at stop), they can't go through function_call_arguments.delta.
 		if t != "" && bs.kind == bkToolUse && bs.name != "Read" && !s.reg.isCustomTool(bs.name) {
 			s.send(respSSEEvent("response.function_call_arguments.delta", map[string]interface{}{
 				"type": "response.function_call_arguments.delta", "item_id": bs.itemID,
@@ -382,13 +382,13 @@ func (s *anthToRespStream) handleBlockStop(index int) {
 	}
 	delete(s.blocks, index)
 	if bs.kind == bkDropped {
-		return // 已剥离的思考块：不发 done 事件、不进 items
+		return // Stripped thinking block: no done event, no items
 	}
 	switch bs.kind {
 	case bkText:
 		if bs.heldText {
-			// 憋到块收尾：剥完回声/前言为空 → 整块丢弃（没发过事件、不进 items）；
-			// 否则（整块内容在 start 自带、被截断的前言前缀等）按同款规则补发全流程事件。
+			// Held until block end: stripped echo/preamble empty → the whole block is dropped (no events ever sent, no items);
+			// otherwise (whole content arrived at start, a truncated preamble prefix, etc.) the full event flow is back-filled per the same rules.
 			rest := stripSearchQueryEcho(bs.accum)
 			if strings.TrimSpace(rest) == "" {
 				return
@@ -422,7 +422,7 @@ func (s *anthToRespStream) handleBlockStop(index int) {
 				"part": map[string]interface{}{"type": "summary_text", "text": bs.accum},
 			}))
 		}
-		// 签名打进信封：下轮客户端回放 reasoning.encrypted_content 时还原 thinking 块。
+		// Signature sealed into an envelope: restored to a thinking block when the client replays reasoning.encrypted_content next turn.
 		var blk map[string]interface{}
 		if bs.kind == bkThinking {
 			blk = map[string]interface{}{"type": "thinking", "thinking": bs.accum, "signature": bs.signature}
@@ -433,7 +433,7 @@ func (s *anthToRespStream) handleBlockStop(index int) {
 		s.send(respOutputItemDone(bs.outputIndex, item))
 		s.items = append(s.items, item)
 	case bkSearchUse:
-		// 补全 input：优先 input_json_delta 累积，回退 start 自带（与 bkToolUse 同优先级）。
+		// Completing input: input_json_delta accumulation first, falling back to start's own (same priority as bkToolUse).
 		raw := bs.accum
 		if raw == "" {
 			raw = bs.startInput
@@ -444,8 +444,8 @@ func (s *anthToRespStream) handleBlockStop(index int) {
 				bs.searchBlk["input"] = inp
 			}
 		}
-		// input 终局后块才完整：此刻发 web_search_call 项（有 query 才出调用项），
-		// 并记为最近一个搜索调用，供紧随的结果块配对封信封。
+		// The block is complete only once input finalizes: the web_search_call item ships now (only with a query),
+		// and it's recorded as the most recent search call for the immediately following result block's envelope pairing.
 		if item := webSearchCallItem(bs.searchBlk, s.responseID, bs.outputIndex); item != nil {
 			s.send(respOutputItemAdded(bs.outputIndex, item))
 			s.send(respOutputItemDone(bs.outputIndex, item))
@@ -453,8 +453,8 @@ func (s *anthToRespStream) handleBlockStop(index int) {
 		}
 		s.lastSearchUse = bs.searchBlk
 	case bkToolUse:
-		// 优先用流式 input_json_delta 的累积；网关没发 delta 时回退到
-		// content_block_start 自带的 input（对照 cc-switch close_block 的优先级）。
+		// Prefer the streaming input_json_delta accumulation; when the gateway sent no deltas, fall back to
+		// content_block_start's own input (mirrors cc-switch close_block's priority).
 		args := bs.accum
 		if args == "" {
 			args = bs.startInput
@@ -468,7 +468,7 @@ func (s *anthToRespStream) handleBlockStop(index int) {
 		}
 		item := toolCallItemFromRegistry(s.reg, bs.itemID, "completed", bs.callID, bs.name, args)
 		if s.reg.isCustomTool(bs.name) {
-			// custom 工具：收拢时解包成裸字符串，发 custom_tool_call_input.done。
+			// custom tool: unwrapped into a bare string at closing time, sent as custom_tool_call_input.done.
 			s.send(respSSEEvent("response.custom_tool_call_input.done", map[string]interface{}{
 				"type": "response.custom_tool_call_input.done", "item_id": bs.itemID,
 				"output_index": bs.outputIndex, "input": objStr(item, "input"),
@@ -512,8 +512,8 @@ func (s *anthToRespStream) handleError(data map[string]interface{}) {
 	}))
 }
 
-// buildFinalResponse 用状态机累积的结果组装最终 Responses 对象
-// （response.completed 载荷、stream:false 客户端的一次性 JSON 都用它）。
+// buildFinalResponse assembles the final Responses object from the state machine's accumulation
+// (used for both the response.completed payload and the one-shot JSON for stream:false clients).
 func (s *anthToRespStream) buildFinalResponse() map[string]interface{} {
 	status, incompleteReason := mapStopReasonToStatus(s.stopReason)
 	output := make([]interface{}, 0, len(s.items))
@@ -536,30 +536,30 @@ func (s *anthToRespStream) buildFinalResponse() map[string]interface{} {
 	return result
 }
 
-// ---- 翻译型 ResponseWriter ----
+// ---- Translating ResponseWriter ----
 
-// translatingWriter 实现 http.ResponseWriter，夹在主管线与 Responses 客户端之间。
-// 主管线写什么这里都能接：200+SSE → 状态机实时翻译；200+JSON（上游对流式请求回了
-// 非流式）→ 缓冲后整转；非 200 → 缓冲错误体转 Responses 错误 JSON。
+// translatingWriter implements http.ResponseWriter, sitting between the main pipeline and the Responses client.
+// Whatever the main pipeline writes is accepted: 200+SSE → state-machine live translation; 200+JSON (upstream answered a
+// streaming request with non-streaming) → buffered wholesale conversion; non-200 → buffered error body converted to Responses error JSON.
 type translatingWriter struct {
 	dst           http.ResponseWriter
 	clientStream  bool
 	model         string
 	reg           *toolRegistry
-	triple        *searchTriple // 搜索信封归属三元组（主 handler 路由定案后经 setSearchTriple 注入）
-	stripThinking bool          // translateNone2Low 升级流：非流式整转（finishBuffered）剥离思考块；流式由 conv.stripThinking 承担
+	triple        *searchTriple // Search-envelope attribution triple (injected by the main handler via setSearchTriple after routing is settled)
+	stripThinking bool          // translateNone2Low upgrade stream: non-streaming wholesale conversion (finishBuffered) strips thinking blocks; streaming is handled by conv.stripThinking
 
 	header http.Header
 	status int
 
-	mode    int // 0=未定 1=SSE 2=缓冲
+	mode    int // 0=undecided 1=SSE 2=buffered
 	buf     []byte
 	conv    *anthToRespStream
 	flusher http.Flusher
 
-	headWritten bool // 流式客户端的响应头是否已发
+	headWritten bool // Whether the streaming client's response headers have been sent
 
-	downFlight *flight // 双链路记录的 flight 引用（主 handler 经 setDownTap 注入），供归档后补刷下游侧存档
+	downFlight *flight // flight reference for dual-link recording (injected by the main handler via setDownTap), for back-flushing the downstream-side archive after archiving
 }
 
 const (
@@ -596,8 +596,8 @@ func newTranslatingWriter(dst http.ResponseWriter, clientStream bool, model stri
 
 func (tw *translatingWriter) Header() http.Header { return tw.header }
 
-// tapResponseWriter 包装下游 ResponseWriter：Write 前先把字节 tee 进 flight 的
-// contentDown（代理→下游侧记录），Flush 等其余行为透传原 writer。
+// tapResponseWriter wraps the downstream ResponseWriter: before Write it tees the bytes into the flight's
+// contentDown (the proxy→downstream side record); Flush and other behaviors pass through to the original writer.
 type tapResponseWriter struct {
 	http.ResponseWriter
 	tap func([]byte)
@@ -608,25 +608,25 @@ func (t tapResponseWriter) Write(p []byte) (int, error) {
 	return t.ResponseWriter.Write(p)
 }
 
-// Flush 透传底层 http.Flusher（emit 里的 tw.flusher 仍持原始 dst，不受影响）。
+// Flush passes through the underlying http.Flusher (tw.flusher in emit still holds the original dst, unaffected).
 func (t tapResponseWriter) Flush() {
 	if f, ok := t.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-// setDownTap 由主 handler 在 flight 建立后注入下游侧记录点：dst 换成 tap 包装后，
-// emit/finish/finishBuffered/错误写出等所有 dst.Write 路径自然全部被 tee
-// （与 setSearchTriple 同款类型断言注入，Anthropic 口的 writer 没有此方法自然跳过）。
+// setDownTap is injected by the main handler after flight creation as the downstream-side record point: with dst swapped for the tap wrapper,
+// all dst.Write paths — emit/finish/finishBuffered/error writes — are naturally teed
+// (same type-assertion injection as setSearchTriple; the Anthropic port's writer lacks this method and is naturally skipped).
 func (tw *translatingWriter) setDownTap(f *flight) {
 	tw.dst = tapResponseWriter{ResponseWriter: tw.dst, tap: f.appendContentDown}
-	tw.downFlight = f // 供 handler 归档后补尾（finish 产出的下游侧字节刷新进存档）
+	tw.downFlight = f // For the handler's post-archive tail back-fill (flushing finish's downstream-side bytes into the archive)
 }
 
-// setSearchTriple 由主 handler 在路由定案后注入搜索信封的归属三元组（Responses 翻译口
-// 专用；Anthropic 口的 ResponseWriter 没有此方法，handler 的类型断言自然跳过）。
-// api 参数是实际生效的鉴权 token（与 effectiveKey 同口径），方法内只存其哈希与
-// 派生掩码，不存原文。
+// setSearchTriple is injected by the main handler after routing is settled with the search envelope's attribution triple (Responses
+// translation port only; the Anthropic port's ResponseWriter lacks this method, so the handler's type assertion naturally skips).
+// The api parameter is the actually-effective auth token (same semantics as effectiveKey); only its hash and
+// derived mask are stored, never the plaintext.
 func (tw *translatingWriter) setSearchTriple(url, api, model string) {
 	tw.triple = newSearchTriple(url, model, api)
 	tw.conv.triple = tw.triple
@@ -634,7 +634,7 @@ func (tw *translatingWriter) setSearchTriple(url, api, model string) {
 
 func (tw *translatingWriter) WriteHeader(status int) { tw.status = status }
 
-// writeDstHeader 向真实客户端发响应头（只发一次）。
+// writeDstHeader sends response headers to the real client (only once).
 func (tw *translatingWriter) writeDstHeader(status int, contentType string) {
 	h := tw.dst.Header()
 	h.Set("Content-Type", contentType)
@@ -650,7 +650,7 @@ func (tw *translatingWriter) Write(p []byte) (int, error) {
 		tw.status = http.StatusOK
 	}
 	if tw.mode == modeUndecided {
-		// 首写定模式：非 200 或 Content-Type 非 SSE → 缓冲路径。
+		// First write decides the mode: non-200 or non-SSE Content-Type → buffered path.
 		if tw.status != http.StatusOK ||
 			!strings.Contains(tw.header.Get("Content-Type"), "text/event-stream") {
 			tw.mode = modeBuffered
@@ -662,7 +662,7 @@ func (tw *translatingWriter) Write(p []byte) (int, error) {
 		tw.buf = append(tw.buf, p...)
 		return len(p), nil
 	}
-	// SSE 模式：累积后按空行切完整事件块，残块留到下次。
+	// SSE mode: accumulate and cut complete event blocks at blank lines, keeping the remainder for next time.
 	tw.buf = append(tw.buf, p...)
 	for {
 		idx := bytes.Index(tw.buf, []byte("\n\n"))
@@ -676,7 +676,7 @@ func (tw *translatingWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// handleSSEBlock 解析一个完整 SSE 块（可能多行 data/comment），喂给状态机。
+// handleSSEBlock parses one complete SSE block (possibly multi-line data/comment) and feeds the state machine.
 func (tw *translatingWriter) handleSSEBlock(block []byte) {
 	var event string
 	var dataLines []string
@@ -684,7 +684,7 @@ func (tw *translatingWriter) handleSSEBlock(block []byte) {
 		line = strings.TrimSuffix(line, "\r")
 		switch {
 		case strings.HasPrefix(line, ":"):
-			// 注释（保活），跳过。
+			// Comment (keepalive), skipped.
 		case strings.HasPrefix(line, "event:"):
 			event = strings.TrimSpace(line[len("event:"):])
 		case strings.HasPrefix(line, "data:"):
@@ -702,17 +702,17 @@ func (tw *translatingWriter) handleSSEBlock(block []byte) {
 	tw.conv.handleEvent(event, data)
 }
 
-// finish 在主管线返回后调用：冲刷残块、按模式收尾。
+// finish is called after the main pipeline returns: flush the remainder, wrap up per mode.
 func (tw *translatingWriter) finish() {
 	switch tw.mode {
 	case modeSSE:
-		// 容忍末尾缺空行的截断块。
+		// Tolerate a truncated trailing block missing its blank line.
 		if len(bytes.TrimSpace(tw.buf)) > 0 {
 			tw.handleSSEBlock(tw.buf)
 			tw.buf = nil
 		}
 		if !tw.conv.completed && tw.conv.responseStarted {
-			// 流中途断了（重试用尽等）：补一个 failed，让客户端拿到明确终态。
+			// Stream broke midway (retries exhausted, etc.): append a failed so the client gets a definite terminal state.
 			tw.conv.handleError(map[string]interface{}{
 				"error": map[string]interface{}{"type": "api_error", "message": "upstream stream interrupted"},
 			})
@@ -729,15 +729,15 @@ func (tw *translatingWriter) finish() {
 	case modeBuffered:
 		tw.finishBuffered()
 	default:
-		// 主管线什么都没写（理论上到不了）：回 502。
+		// The main pipeline wrote nothing (unreachable in theory): answer 502.
 		writeResponsesError(tw.dst, http.StatusBadGateway, "api_error", "no upstream response")
 	}
 }
 
-// finishBuffered 处理缓冲路径：错误体转 Responses 错误；200 JSON 整转 Responses 对象。
+// finishBuffered handles the buffered path: error bodies convert to Responses errors; 200 JSON converts wholesale to a Responses object.
 func (tw *translatingWriter) finishBuffered() {
 	if tw.status != http.StatusOK {
-		// Anthropic 错误 JSON {error:{type,message}} → Responses 错误，状态码原样。
+		// Anthropic error JSON {error:{type,message}} → Responses error, status code as-is.
 		var body map[string]interface{}
 		typ, msg := "api_error", strings.TrimSpace(string(tw.buf))
 		if json.Unmarshal(tw.buf, &body) == nil {
@@ -756,7 +756,7 @@ func (tw *translatingWriter) finishBuffered() {
 		writeResponsesError(tw.dst, tw.status, typ, msg)
 		return
 	}
-	// 200 + 非 SSE：上游对 stream:true 请求回了非流式 JSON（少见），整转。
+	// 200 + non-SSE: the upstream answered a stream:true request with non-streaming JSON (rare); convert wholesale.
 	var msg map[string]interface{}
 	if err := json.Unmarshal(tw.buf, &msg); err != nil {
 		writeResponsesError(tw.dst, http.StatusBadGateway, "api_error", "invalid upstream JSON: "+err.Error())
@@ -769,7 +769,7 @@ func (tw *translatingWriter) finishBuffered() {
 		_, _ = tw.dst.Write(b)
 		return
 	}
-	// 客户端要流式但只拿到一次性 JSON：补发规范事件序列（created → item add/done → completed）。
+	// The client wanted streaming but got a one-shot JSON: back-fill the canonical event sequence (created → item add/done → completed).
 	emit := tw.conv.emit
 	emit(respSSEEvent("response.created", map[string]interface{}{
 		"type": "response.created", "response": map[string]interface{}{

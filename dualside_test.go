@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// ensureFlightsMap 初始化全局在途流表（真实启动路径由 main 建表；单测同进程按文件序
-// 连跑，本文件字母序早于其他建表用例，须自建幂等）。
+// ensureFlightsMap initializes the global in-flight table (the real startup path builds it in main; unit tests run
+// back-to-back in file order within one process, and this file sorts before the other table-building cases, so it must self-build idempotently).
 func ensureFlightsMap() {
 	flights.mu.Lock()
 	if flights.m == nil {
@@ -20,8 +20,8 @@ func ensureFlightsMap() {
 	flights.mu.Unlock()
 }
 
-// serveFlightSide 以本机 RemoteAddr 请求 /__flight?id=N[&full=1][&side=S]，
-// 返回 HTTP 状态码、X-Proxy429-Side 响应头（服务端实际返回的链路侧）与响应体字节。
+// serveFlightSide requests /__flight?id=N[&full=1][&side=S] with a localhost RemoteAddr,
+// returning the HTTP status code, the X-Proxy429-Side response header (the side the server actually returned), and the response body bytes.
 func serveFlightSide(t *testing.T, id uint64, side string, full bool) (int, string, []byte) {
 	t.Helper()
 	url := "/__flight?id=" + strconv.FormatUint(id, 10)
@@ -32,7 +32,7 @@ func serveFlightSide(t *testing.T, id uint64, side string, full bool) (int, stri
 		url += "&side=" + side
 	}
 	r := httptest.NewRequest(http.MethodGet, url, nil)
-	r.RemoteAddr = "127.0.0.1:43210" // httptest 默认 192.0.2.1，isLocalRequest 会拒
+	r.RemoteAddr = "127.0.0.1:43210" // httptest defaults to 192.0.2.1, which isLocalRequest rejects
 	rec := httptest.NewRecorder()
 	flightHandler(rec, r)
 	res := rec.Result()
@@ -44,7 +44,7 @@ func serveFlightSide(t *testing.T, id uint64, side string, full bool) (int, stri
 	return res.StatusCode, res.Header.Get("X-Proxy429-Side"), body
 }
 
-// serveFlightReqSide 同上，打 /__flightreq（请求体查看端点）。
+// serveFlightReqSide does the same against /__flightreq (the request-body viewer endpoint).
 func serveFlightReqSide(t *testing.T, id uint64, side string) (int, string, []byte) {
 	t.Helper()
 	url := "/__flightreq?id=" + strconv.FormatUint(id, 10)
@@ -64,15 +64,15 @@ func serveFlightReqSide(t *testing.T, id uint64, side string) (int, string, []by
 	return res.StatusCode, res.Header.Get("X-Proxy429-Side"), body
 }
 
-// TestFlightSideEndpoints 验证双链路查看端点：side=up/down 各回各侧且头部如实告知实际侧；
-// 下游侧无记录的流 side=down 自动回退上游侧（X-Proxy429-Side: up）；在途与完成归档两查一致。
+// TestFlightSideEndpoints verifies the dual-link viewer endpoints: side=up/down each return their own side and the header truthfully reports the actual side;
+// streams without a downstream-side record auto-fall back to the upstream side for side=down (X-Proxy429-Side: up); in-flight and finished-archive queries behave identically.
 func TestFlightSideEndpoints(t *testing.T) {
 	ensureFlightsMap()
 	oldFinished := finished
 	defer func() { finished = oldFinished }()
 	finished = nil
 
-	// 双侧都有记录的流（模拟翻译流形态）。
+	// A stream with both sides recorded (simulating a translation-stream shape).
 	dual := &flight{id: flights.nextID.Add(1), start: time.Now()}
 	dual.setReqBody([]byte(`{"up":1}`))
 	dual.setReqDown([]byte(`{"down":1}`))
@@ -81,7 +81,7 @@ func TestFlightSideEndpoints(t *testing.T) {
 	flights.register(dual)
 	defer flights.unregister(dual.id)
 
-	// 只有上游侧的流（模拟未被改写的原生流形态）。
+	// A stream with only the upstream side (simulating an unrewritten native-stream shape).
 	upOnly := &flight{id: flights.nextID.Add(1), start: time.Now()}
 	upOnly.setReqBody([]byte(`{"up":2}`))
 	upOnly.appendContent([]byte("UP-ONLY"))
@@ -116,7 +116,7 @@ func TestFlightSideEndpoints(t *testing.T) {
 		})
 	}
 
-	// 请求体端点同规则：双侧各回各侧，单侧 down 回退 up。
+	// The request-body endpoint follows the same rules: each side returns its own; a down-only miss falls back to up.
 	code, served, body := serveFlightReqSide(t, dual.id, "down")
 	if code != 200 || served != "down" || string(body) != `{"down":1}` {
 		t.Errorf("请求体 down 侧: code=%d side=%q body=%q, want 200/down/{\"down\":1}", code, served, body)
@@ -126,7 +126,7 @@ func TestFlightSideEndpoints(t *testing.T) {
 		t.Errorf("请求体 down 回退: code=%d side=%q body=%q, want 200/up/{\"up\":2}", code, served, body)
 	}
 
-	// 完成归档后（从在途表移除）两侧与回退依旧可查。
+	// After archiving to finished (removed from the in-flight table), both sides and the fallback remain queryable.
 	addFinished(dual)
 	addFinished(upOnly)
 	flights.unregister(dual.id)
@@ -141,8 +141,8 @@ func TestFlightSideEndpoints(t *testing.T) {
 	}
 }
 
-// TestFlightSideFullDownload 验证 full=1 完整输出下载按侧取副本：下游侧副本在
-// 「储存完整结构体」开启且有差异内容时可下；无下游侧副本时回退上游侧并如实告知。
+// TestFlightSideFullDownload verifies the full=1 full-output download picks the copy by side: the downstream-side copy is downloadable
+// when the 储存完整结构体 toggle is on and differing content exists; without a downstream-side copy it falls back to the upstream side and says so truthfully.
 func TestFlightSideFullDownload(t *testing.T) {
 	ensureFlightsMap()
 	defer fullStore.Store(false)
@@ -163,7 +163,7 @@ func TestFlightSideFullDownload(t *testing.T) {
 		t.Errorf("full up: code=%d side=%q body=%q, want 200/up/FULL-UP", code, served, body)
 	}
 
-	// 无下游侧完整副本：side=down 回退到上游侧。
+	// No downstream-side full copy: side=down falls back to the upstream side.
 	g := &flight{id: flights.nextID.Add(1), start: time.Now()}
 	g.appendContent([]byte("ONLY-UP"))
 	flights.register(g)
@@ -174,12 +174,12 @@ func TestFlightSideFullDownload(t *testing.T) {
 	}
 }
 
-// TestTranslatingWriterDownTap 验证下游侧 tap 覆盖 translatingWriter 的写出路径：
-// 流式（emit 逐事件）与非流式（finish 一次性 JSON）写进客户端的字节都被等量 tee 进
-// contentDown。tap 包装的是 dst 本身，emit/finish/finishBuffered/错误写出都经 dst.Write，
-// 两种模式下的逐字节相等即证明全路径覆盖。
+// TestTranslatingWriterDownTap verifies the downstream-side tap covers translatingWriter's write paths:
+// the bytes written to the client in both streaming (emit per event) and non-streaming (finish one-shot JSON) modes are teed in equal measure into
+// contentDown. The tap wraps dst itself, and emit/finish/finishBuffered/error writes all go through dst.Write,
+// so byte-for-byte equality in both modes proves full path coverage.
 func TestTranslatingWriterDownTap(t *testing.T) {
-	// 流式客户端：SSE 事件逐条过 tap。
+	// Streaming client: SSE events pass through the tap one by one.
 	rec := httptest.NewRecorder()
 	tw := newTranslatingWriter(rec, true, "gpt-5-codex", nil)
 	var f flight
@@ -197,7 +197,7 @@ func TestTranslatingWriterDownTap(t *testing.T) {
 		t.Errorf("流式 contentDown 应含 response.completed 事件")
 	}
 
-	// 非流式客户端：finish 输出的一次性 Responses JSON 同样过 tap。
+	// Non-streaming client: the one-shot Responses JSON produced by finish also passes through the tap.
 	rec2 := httptest.NewRecorder()
 	tw2 := newTranslatingWriter(rec2, false, "gpt-5-codex", nil)
 	var f2 flight
@@ -216,8 +216,8 @@ func TestTranslatingWriterDownTap(t *testing.T) {
 	}
 }
 
-// TestDualSideTranslatedFlow 端到端验证翻译流双链路记录：下游侧存客户端 Responses 原文
-// 与实收的 Responses 形态回传；上游侧存翻译后的 Anthropic 请求体与上游 SSE 原始流。
+// TestDualSideTranslatedFlow end-to-end verifies dual-link recording of a translation stream: the downstream side stores the client's Responses original
+// and the Responses-shaped response actually received; the upstream side stores the translated Anthropic request body and the upstream's raw SSE stream.
 func TestDualSideTranslatedFlow(t *testing.T) {
 	resetStats()
 	oldFinished := finished
@@ -257,14 +257,14 @@ func TestDualSideTranslatedFlow(t *testing.T) {
 		t.Fatalf("归档流数=%d, want 1", len(finished))
 	}
 	ff := finished[0]
-	// 下游侧请求体 = 客户端 Responses 原文（逐字）；上游侧 = 翻译后的 Anthropic 体。
+	// Downstream-side request body = the client's Responses original (verbatim); upstream side = the translated Anthropic body.
 	if string(ff.reqDown) != raw {
 		t.Errorf("reqDown=%q, want 客户端原文 %q", ff.reqDown, raw)
 	}
 	if !strings.Contains(string(ff.reqBody), `"messages"`) || !strings.Contains(string(ff.reqBody), `"deepseek-v4-flash"`) {
 		t.Errorf("reqBody 应为翻译并路由改写后的 Anthropic 体: %s", ff.reqBody)
 	}
-	// 下游侧回传 = 客户端实收的 Responses JSON；上游侧 = 上游 Anthropic SSE 原始流。
+	// Downstream-side response = the Responses JSON the client actually received; upstream side = the upstream Anthropic SSE raw stream.
 	if !strings.Contains(string(ff.contentDown), `"object":"response"`) {
 		t.Errorf("contentDown 应为 Responses JSON: %.200s", ff.contentDown)
 	}
@@ -273,9 +273,9 @@ func TestDualSideTranslatedFlow(t *testing.T) {
 	}
 }
 
-// TestDualSideDirectFlow 端到端验证原生 Anthropic 口的下游侧记录规则：
-// 体未被改写时两侧同文不双存（reqDown/contentDown 为空，端点按回退处理）；
-// 体被改写（路由改模型）时才单独存 reqDown。
+// TestDualSideDirectFlow end-to-end verifies the downstream-side recording rules of the native Anthropic port:
+// when the body isn't rewritten, both sides are identical and not stored twice (reqDown/contentDown stay empty; endpoints treat them as fallback);
+// only when the body is rewritten (routed model change) is reqDown stored separately.
 func TestDualSideDirectFlow(t *testing.T) {
 	resetStats()
 	oldFinished := finished
@@ -308,7 +308,7 @@ func TestDualSideDirectFlow(t *testing.T) {
 			t.Fatalf("model=%s 状态=%d, want 200", model, resp.StatusCode)
 		}
 	}
-	// 按请求体内容找归档流（addFinished 最新在前，不按位置猜；finished 是值切片，返回指针须取下标）。
+	// Find the archived stream by request-body content (addFinished is newest-first; don't guess by position; finished is a value slice, so a returned pointer must come from indexing).
 	findFF := func(sub string) *finishedFlight {
 		for i := range finished {
 			if strings.Contains(string(finished[i].reqBody), sub) {
@@ -318,7 +318,7 @@ func TestDualSideDirectFlow(t *testing.T) {
 		return nil
 	}
 
-	// 无路由改写：体原样透传，两侧同文不双存。
+	// No route rewrite: the body passes through verbatim; identical on both sides, not stored twice.
 	post("claude-x1")
 	ff := findFF("claude-x1")
 	if ff == nil {
@@ -331,7 +331,7 @@ func TestDualSideDirectFlow(t *testing.T) {
 		t.Errorf("同文流不应双存 contentDown（%d 字节）", len(ff.contentDown))
 	}
 
-	// 路由改写模型：体被改动，下游侧存客户端原文，上游侧是改写后体。
+	// Route-rewritten model: the body changed; the downstream side stores the client's original, the upstream side the rewritten body.
 	cfg.Store(&Config{
 		Upstream:       mock.URL,
 		MaxRetries:     0,

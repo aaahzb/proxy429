@@ -18,32 +18,32 @@ import (
 	"time"
 )
 
-// 网页控制台挂载路径（与代理同端口，仅本机访问）。
-// 选 /__ 前缀：Anthropic API 走 /v1/...，不冲突；Go DefaultServeMux 精确匹配优先于 / 通配。
+// Web console mount path (same port as the proxy, localhost only).
+// The /__ prefix is chosen because the Anthropic API uses /v1/... — no conflict; Go's DefaultServeMux prefers exact matches over the / wildcard.
 const (
 	logViewerPath     = "/__logs"
 	logDataPath       = "/__logs/data"
-	configPath        = "/__config"         // GET 取配置内容、POST 保存并重载
-	reloadPath        = "/__reload"         // POST 仅重载（不改动文件）
-	configsPath       = "/__configs"        // GET 列出当前配置目录下所有 .json（供切换）
-	switchPath        = "/__switch"         // POST 切换到指定配置文件并即时生效
-	newConfigPath     = "/__newconfig"      // POST 新建配置文件（空白模板）并切换
-	codexSetupPS1Path = "/__codexsetup.ps1" // GET 烤制后的 codex-setup.ps1（Windows，irm|iex 拉取）
-	codexSetupSHPath  = "/__codexsetup.sh"  // GET 烤制后的 codex-setup.sh（macOS/Linux，curl|bash 拉取）
-	renameConfigPath  = "/__renameconfig"   // POST 重命名配置文件
-	delConfigPath     = "/__delconfig"      // POST 删除配置文件（不允许删当前在用的）
-	resetStatsPath    = "/__resetstats"     // POST 清空累计统计（切换配置不再自动清）
-	clearLogsPath     = "/__clearlogs"      // POST 清空内存日志缓冲
-	flightPath        = "/__flight"         // GET 在途流透传内容（?id=N，已完成流也查此）
-	flightReqPath     = "/__flightreq"      // GET 流的下游请求体原文（?id=N，在途/已完成都查）
-	recentFlightsPath = "/__recentflights"  // GET 最近完成的流列表（摘要）
-	finishedCapPath   = "/__finishedcap"    // POST 设置保留完成流个数 N
-	fullStorePath     = "/__fullstore"      // POST 开关「储存完整结构体」（记录完整请求体/输出供下载）
-	uiLangPath        = "/__uilang"         // GET 当前界面语言 / POST 切换语言（写 program-settings.txt 并热生效）
+	configPath        = "/__config"         // GET returns the config content, POST saves and reloads
+	reloadPath        = "/__reload"         // POST only reloads (the file is not modified)
+	configsPath       = "/__configs"        // GET lists all .json files in the current config directory (for switching)
+	switchPath        = "/__switch"         // POST switches to the given config file with immediate effect
+	newConfigPath     = "/__newconfig"      // POST creates a new config file (blank template) and switches to it
+	codexSetupPS1Path = "/__codexsetup.ps1" // GET the baked codex-setup.ps1 (Windows, pulled via irm|iex)
+	codexSetupSHPath  = "/__codexsetup.sh"  // GET the baked codex-setup.sh (macOS/Linux, pulled via curl|bash)
+	renameConfigPath  = "/__renameconfig"   // POST renames a config file
+	delConfigPath     = "/__delconfig"      // POST deletes a config file (the one currently in use can't be deleted)
+	resetStatsPath    = "/__resetstats"     // POST clears cumulative stats (switching configs no longer clears them automatically)
+	clearLogsPath     = "/__clearlogs"      // POST clears the in-memory log buffer
+	flightPath        = "/__flight"         // GET an in-flight stream's pass-through content (?id=N; finished streams query this too)
+	flightReqPath     = "/__flightreq"      // GET a stream's downstream request body verbatim (?id=N; in-flight and finished both queryable)
+	recentFlightsPath = "/__recentflights"  // GET the recently finished streams list (summary)
+	finishedCapPath   = "/__finishedcap"    // POST sets how many finished streams to keep, N
+	fullStorePath     = "/__fullstore"      // POST toggles 储存完整结构体 (record full request bodies/output for download)
+	uiLangPath        = "/__uilang"         // GET the current UI language / POST switches the language (writes program-settings.txt, effective hot)
 )
 
-// isLocalRequest 限制只有本机浏览器能访问控制台。
-// 即使代理 listen 在 0.0.0.0 暴露到内网，远程请求 /__* 也返回 403，避免日志/配置泄露。
+// isLocalRequest restricts console access to local browsers.
+// Even with the proxy listening on 0.0.0.0 exposed to the LAN, remote requests to /__* get 403, keeping logs/configs from leaking.
 func isLocalRequest(r *http.Request) bool {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -52,9 +52,9 @@ func isLocalRequest(r *http.Request) bool {
 	return host == "127.0.0.1" || host == "::1" || host == "localhost" || strings.HasPrefix(host, "127.")
 }
 
-// ---- 实时速率（字节/秒）----
-// 控制台每 500ms 轮询一次 /__logs/data，用两次轮询间的 bytesForward 增量算速率。
-// 状态保存在包级变量，跨请求延续。
+// ---- Live rate (bytes/sec) ----
+// The console polls /__logs/data every 500ms and computes the rate from the bytesForward delta between polls.
+// State lives in package-level variables, persisting across requests.
 
 var (
 	rateMu        sync.Mutex
@@ -63,7 +63,7 @@ var (
 	lastRate      int64
 )
 
-// computeRate 根据累计字节 b 与上次采样计算 bytes/s，并更新基线。
+// computeRate computes bytes/s from cumulative bytes b and the last sample, updating the baseline.
 func computeRate(b int64) int64 {
 	rateMu.Lock()
 	defer rateMu.Unlock()
@@ -76,7 +76,7 @@ func computeRate(b int64) int64 {
 	if dt > 0.05 {
 		delta := b - prevRateBytes
 		if delta < 0 {
-			delta = 0 // 「清空统计」后累计字节回零，负增量按 0 计（否则速率卡显示负值）
+			delta = 0 // After 「清空统计」 the cumulative bytes reset to zero; a negative delta counts as 0 (otherwise the rate card shows a negative value)
 		}
 		lastRate = int64(float64(delta) / dt)
 		prevRateBytes, prevRateT = b, now
@@ -84,7 +84,7 @@ func computeRate(b int64) int64 {
 	return lastRate
 }
 
-// logViewerHandler 返回控制台 HTML 页（状态/日志/配置三标签）。
+// logViewerHandler returns the console HTML page (status/logs/config tabs).
 func logViewerHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -101,11 +101,11 @@ func logViewerHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(page))
 }
 
-// uiLangHandler 查询/切换网页控制台界面语言。
-// GET 返回 {"lang": 当前生效语言, "source": "program"|"system"}；
-// POST {"lang":"zh"|"en"|""} 把选择写入程序设置 program-settings.txt（"" = 跟随系统，
-// 删掉该键），随即热生效——下次刷新页面即是新语言。语言是程序级偏好，与路由配置
-// 分离：不写 config*.json，也不触发配置重载（程序设置与上游设置分开维护）。
+// uiLangHandler queries/switches the web console UI language.
+// GET returns {"lang": current effective language, "source": "program"|"system"};
+// POST {"lang":"zh"|"en"|""} writes the choice into the program-settings.txt program settings ("" = follow the system,
+// the key is deleted), effective hot — the next page refresh shows the new language. Language is a program-level preference, separate
+// from routing config: it doesn't write config*.json, nor trigger a config reload (program settings and upstream settings are maintained separately).
 func uiLangHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -139,38 +139,38 @@ func uiLangHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to write program settings: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	applyUILang(b.Lang) // 热生效；不 reloadConfig——语言与路由配置互不牵连
+	applyUILang(b.Lang) // Effective hot; no reloadConfig — language and routing config don't entangle
 	log.Printf("[lang] UI language switched to %s (%s)", currentUILang(), programSettingsFile)
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "lang": currentUILang()})
 }
 
-// flightInfo 是单个在途流的展示信息（网页「状态」标签的表格用）。
+// flightInfo is one in-flight stream's display info (for the web 「状态」 tab's table).
 type flightInfo struct {
 	ID           uint64 `json:"id"`
 	Model        string `json:"model"`
-	Phase        int    `json:"phase"`                 // 0=等待响应, 1=已收到响应（开始转发）
-	Bytes        int64  `json:"bytes"`                 // 已转发字节
-	Status       int    `json:"status"`                // HTTP 状态码（stage=stageForward 时显示）
-	Stage        int32  `json:"stage"`                 // 当前阶段：0=请求 1=路由 2=尝试N 3=转发(显示状态码)
-	Attempt      int32  `json:"attempt"`               // 当前尝试序号（1 起），stage=2 时显示「尝试N」
-	AttemptMs    int64  `json:"attemptMs"`             // 当前尝试已等首字节的毫秒数（黄灯旁 [尝试N:Xs]）；-1=重试退避中（显示 [退避中]）
-	RouteReason  int32  `json:"routeReason"`           // 路由原因：0=透传 1=pattern 2=分类器 3=fast 4=多模态 5=搜索
-	Translated   string `json:"translated"`            // 翻译口来源（"responses"=翻译 / "responses-raw"=原生透传[已实现未实测，文档未提及]），API 列显示 [translate]/[Response]
-	CountTokens  bool   `json:"countTokens,omitempty"` // count_tokens 探针流，model 列显示 [count_tokens] 前缀
+	Phase        int    `json:"phase"`                 // 0=awaiting response, 1=response received (forwarding started)
+	Bytes        int64  `json:"bytes"`                 // Forwarded bytes
+	Status       int    `json:"status"`                // HTTP status code (shown when stage=stageForward)
+	Stage        int32  `json:"stage"`                 // Current stage: 0=request 1=routing 2=attemptN 3=forwarding (shows status code)
+	Attempt      int32  `json:"attempt"`               // Current attempt number (from 1); 「尝试N」 is shown when stage=2
+	AttemptMs    int64  `json:"attemptMs"`             // Milliseconds the current attempt has awaited the first byte ([尝试N:Xs] next to the yellow light); -1=in retry backoff (shows [退避中])
+	RouteReason  int32  `json:"routeReason"`           // Route reason: 0=passthrough 1=pattern 2=classifier 3=fast 4=multimodal 5=search
+	Translated   string `json:"translated"`            // Translation-port origin ("responses"=translated / "responses-raw"=native passthrough [implemented, not field-tested, undocumented]); the API column shows [translate]/[Response]
+	CountTokens  bool   `json:"countTokens,omitempty"` // count_tokens probe stream; the model column shows a [count_tokens] prefix
 	SearchPrompt string `json:"searchPrompt,omitempty"`
-	ReqTrunc     bool   `json:"reqTrunc,omitempty"`     // 请求体被截断只剩前 256KB（下载按钮置灰）
-	HasFull      bool   `json:"hasFull,omitempty"`      // 仍持有完整输出副本（下载输出/交互式JSON 可用）
-	StageMs      int64  `json:"stageMs"`                // 当前灯色已持续的毫秒数（状态灯旁显示，灯色变化才清零）
-	Tools        string `json:"tools,omitempty"`        // 工具调用标签（"[Read*1][Edit*3]"，无工具省略；随转发实时累积）
-	Stripped     int    `json:"stripped,omitempty"`     // 剥掉的回放搜索块总数（对话水位+400 兜底；0 省略），model 列红标 [剥N]
-	Think        string `json:"think,omitempty"`        // 实际发给上游的思考配置最短形态（"关"/"开 N"/"adaptive"/档位词；口径由列颜色承担），空=未带思考字段（列显 -）
-	ReqDown      bool   `json:"reqDown,omitempty"`      // 已记录下游侧（下游→代理）请求体（与上行侧有差异才记录；查看器可切链路侧）
-	RespDown     bool   `json:"respDown,omitempty"`     // 已记录下游侧（代理→下游）回传内容（翻译流恒有、重建 JSON 流有）
-	ReqDownTrunc bool   `json:"reqDownTrunc,omitempty"` // 下游侧请求体被截断只剩前 256KB（切到下游侧后下载置灰）
-	HasFullDown  bool   `json:"hasFullDown,omitempty"`  // 仍持有下游侧完整输出副本（下游侧的下载输出/交互式JSON 可用）
+	ReqTrunc     bool   `json:"reqTrunc,omitempty"`     // Request body truncated to just the head 256KB (download button greyed out)
+	HasFull      bool   `json:"hasFull,omitempty"`      // Full output copy still held (download output / interactive JSON available)
+	StageMs      int64  `json:"stageMs"`                // Milliseconds the current light color has lasted (shown next to the status light; only resets on color change)
+	Tools        string `json:"tools,omitempty"`        // Tool-call tag ("[Read*1][Edit*3]", omitted when no tools; accumulates live during forwarding)
+	Stripped     int    `json:"stripped,omitempty"`     // Total replayed search blocks stripped (conversation watermark + 400 fallback; 0 is omitted); the model column shows a red [剥N]
+	Think        string `json:"think,omitempty"`        // Shortest form of the thinking config actually sent upstream ("off"/"on N"/"adaptive"/effort word; which API family is carried by the column color); empty = no thinking field (column shows -)
+	ReqDown      bool   `json:"reqDown,omitempty"`      // Downstream-side (downstream→proxy) request body recorded (recorded only when it differs from the upstream side; the viewer can switch link sides)
+	RespDown     bool   `json:"respDown,omitempty"`     // Downstream-side (proxy→downstream) response content recorded (always present for translation streams and rebuilt-JSON streams)
+	ReqDownTrunc bool   `json:"reqDownTrunc,omitempty"` // Downstream-side request body truncated to just the head 256KB (download greyed out after switching to the downstream side)
+	HasFullDown  bool   `json:"hasFullDown,omitempty"`  // Downstream-side full output copy still held (the downstream side's download output / interactive JSON available)
 }
 
-// logData 是 /__logs/data 返回的 JSON：最近日志 + 全量状态计数 + 在途流列表。
+// logData is the JSON returned by /__logs/data: recent logs + full status counters + the in-flight stream list.
 type logData struct {
 	Lines         []string          `json:"lines"`
 	Active        int               `json:"active"`
@@ -181,7 +181,7 @@ type logData struct {
 	InputTokens   int64             `json:"inputTokens"`
 	OutputTokens  int64             `json:"outputTokens"`
 	ModelStats    []modelUsageEntry `json:"modelStats"`
-	CacheObs      []cacheObsRow     `json:"cacheObs"` // 实测缓存时间（按上游 URL+模型），缓存命中弹窗第二表
+	CacheObs      []cacheObsRow     `json:"cacheObs"` // Observed cache lifetimes (by upstream URL+model); the cache-hit popup's second table
 	BytesForward  int64             `json:"bytesForward"`
 	Rate          int64             `json:"rate"` // bytes/s
 	Retries       int64             `json:"retries"`
@@ -189,16 +189,16 @@ type logData struct {
 	AvgFirstByte  float64           `json:"avgFirstByte"` // ms
 	Tps           float64           `json:"tps"`          // tok/s
 	Flights       []flightInfo      `json:"flights"`
-	CurrentCfg    string            `json:"currentCfg"`  // 当前生效的配置文件名
-	FinishedCap   int32             `json:"finishedCap"` // 保留完成流个数 N（状态页可改）
-	FullStore     bool              `json:"fullStore"`   // 「储存完整结构体」开关（状态页可切，默认关）
+	CurrentCfg    string            `json:"currentCfg"`  // Currently active config file name
+	FinishedCap   int32             `json:"finishedCap"` // How many finished streams to keep, N (adjustable on the status page)
+	FullStore     bool              `json:"fullStore"`   // The 储存完整结构体 toggle (switchable on the status page, default off)
 
-	// ClassifierNoThink 是关思考改写次数：只在实际改 body 关 thinking 时 +1。
-	// （Classifiers 是命中分类器特征的请求数：无论是否分流/关思考都计。）
+	// ClassifierNoThink is the thinking-off rewrite count: +1 only when a body is actually rewritten to disable thinking.
+	// (Classifiers is the count of requests matching the classifier signature: tallied whether or not rerouted/de-thought.)
 	ClassifierNoThink int64 `json:"classifierNoThink"`
 }
 
-// logDataHandler 返回最近 maxLogBuf 行日志和全量状态（JSON），供页面每 500ms 轮询。
+// logDataHandler returns the most recent maxLogBuf log lines and the full status (JSON), polled by the page every 500ms.
 func logDataHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -222,7 +222,7 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 	d.ClassifierNoThink = stats.classifierRewrites.Load()
 	d.AvgFirstByte, d.Tps = stats.recentLatency()
 
-	// 在途流列表：按 ID 排序（snapshot 已排序），展示 model 与转发进度。
+	// In-flight stream list: sorted by ID (snapshot is already sorted), showing model and forwarding progress.
 	for _, f := range flights.snapshot() {
 		model := f.origModel
 		if f.targetModel != "" && f.targetModel != f.origModel {
@@ -241,8 +241,8 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 			Translated:   f.translated,
 			CountTokens:  f.countTokens,
 			SearchPrompt: f.searchPrompt,
-			Tools:        f.toolCallsTag(),             // 工具调用实时累积，在途流 model 列随 500ms 轮询逐步出现
-			Stripped:     int(f.searchStripped.Load()), // 水位剥块在流建立时即入账，400 兜底随转发增补
+			Tools:        f.toolCallsTag(),             // Tool calls accumulate live; the in-flight model column fills in progressively with the 500ms polls
+			Stripped:     int(f.searchStripped.Load()), // Watermark strips are booked at stream creation; 400-fallback strips accrue during forwarding
 			ReqTrunc:     f.reqTrunc(),
 			HasFull:      f.hasFullContent(),
 			ReqDown:      f.hasReqDown(),
@@ -262,7 +262,7 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(d)
 }
 
-// configGetHandler 返回配置文件路径与原始内容（JSON），供「配置」标签载入编辑器。
+// configGetHandler returns the config file path and raw content (JSON), for the 「配置」 tab to load into the editor.
 func configGetHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -282,9 +282,9 @@ func configGetHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// configPostHandler 保存编辑后的配置并重载。
-// 先用 json.Unmarshal 校验是合法 JSON 且符合 Config 结构，校验通过才写盘——
-// 避免把损坏的配置写到磁盘导致下次启动失败。写盘后调 reloadConfig 生效。
+// configPostHandler saves the edited config and reloads it.
+// It first validates with json.Unmarshal that the content is legal JSON matching the Config struct, writing to disk only on success —
+// avoiding a broken config on disk that would fail the next startup. reloadConfig applies it after the write.
 func configPostHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -295,31 +295,31 @@ func configPostHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to read request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// 先校验：合法 JSON 且能解析进 Config（未知字段忽略，类型错误会失败）。
+	// Validate first: legal JSON that parses into Config (unknown fields ignored, type errors fail).
 	var probe Config
 	if err := json.Unmarshal(body, &probe); err != nil {
 		http.Error(w, "failed to parse JSON; not saved: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	_, statErr := os.Stat(currentConfigPath()) // 保存前不存在 → 本次保存会新建文件，清单变化
+	_, statErr := os.Stat(currentConfigPath()) // Didn't exist before the save → this save creates the file; the file list changes
 	if err := os.WriteFile(currentConfigPath(), body, 0644); err != nil {
 		http.Error(w, "failed to write file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := reloadConfig(); err != nil {
-		// 文件已保存但重载失败（极少见，因上面已校验过）：旧配置仍在跑，告知用户。
+		// File saved but reload failed (very rare, since it was validated above): the old config is still running; tell the user.
 		http.Error(w, "saved but reload failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if os.IsNotExist(statErr) {
-		// 当前配置文件此前不存在（如被外部删除），本次保存新建了它：通知托盘重建子菜单
+		// The current config file didn't exist before (e.g. deleted externally) and this save created it: notify the tray to rebuild the submenu
 		notifyTrayCfgChanged()
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
-// reloadHandler 仅重载配置（不改动文件），供「仅重载」按钮使用。
+// reloadHandler only reloads the config (without modifying the file), for the 「仅重载」 button.
 func reloadHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -333,8 +333,8 @@ func reloadHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
-// configsHandler 列出当前配置目录下所有 .json 文件，供网页「配置」标签下拉切换。
-// 返回当前文件名、目录、可用文件列表。限本机访问。
+// configsHandler lists all .json files in the current config directory, for the web 「配置」 tab's dropdown switching.
+// Returns the current file name, the directory, and the available file list. Localhost only.
 func configsHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -350,8 +350,8 @@ func configsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// switchHandler 切换到指定配置文件并即时生效。body: {"name":"work.json"}。
-// name 必须是纯文件名（不含路径分隔符/..），防路径穿越越权切到目录外文件。限本机访问。
+// switchHandler switches to the given config file with immediate effect. body: {"name":"work.json"}.
+// name must be a bare file name (no path separators/..), preventing path traversal from switching to files outside the directory. Localhost only.
 func switchHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -369,7 +369,7 @@ func switchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := body.Name
-	// 防路径穿越：只允许纯文件名，不含分隔符或 ..
+	// Path-traversal guard: only bare file names allowed, no separators or ..
 	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
 		http.Error(w, "invalid config file name", http.StatusBadRequest)
 		return
@@ -383,8 +383,8 @@ func switchHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "current": name})
 }
 
-// validConfigName 校验并规范化配置文件名：只允许纯文件名（无路径分隔符/..），
-// 自动补 .json 后缀。返回规范化名与是否合法。
+// validConfigName validates and normalizes a config file name: only bare file names (no path separators/..),
+// auto-appending the .json suffix. Returns the normalized name and whether it's legal.
 func validConfigName(name string) (string, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
@@ -396,41 +396,41 @@ func validConfigName(name string) (string, bool) {
 	return name, true
 }
 
-// readConfigTemplate 返回新建配置用的空白模板。
-// 直接用编译期内嵌的 config.example.json（configExampleBytes），保证始终与 exe 同版本最新，
-// 不读磁盘副本--磁盘上的 config.example.json 可能是旧版未随 exe 更新，会导致新建出旧模板。
-// 想看/改参考模板，看 release 目录里的 config.example.json 即可。
+// readConfigTemplate returns the blank template for new configs.
+// It uses the compile-time embedded config.example.json (configExampleBytes) directly, guaranteeing it's always the latest version shipped with the exe,
+// and never reads the disk copy — a disk config.example.json may be an old version not updated with the exe, producing stale new configs.
+// To view/edit the reference template, see config.example.json in the release directory.
 func readConfigTemplate() []byte {
 	return configExampleBytes
 }
 
-// 烤制锚点：与模板文件里的写法逐字符一致（codex_setup_test.go 锁定它们在模板中各出现一次）。
-// 值只经白名单校验后替换进单引号空串 ” 的位置，不可能引号逃逸。
+// Bake anchors: character-for-character identical to how they're written in the template files (codex_setup_test.go locks each to appear exactly once).
+// Values are only substituted into the single-quoted empty-string positions after whitelist validation, so quote escape is impossible.
 var codexPS1Anchors = [5]string{"$BAKED_BASE_URL = ''", "$BAKED_MODEL    = ''", "$BAKED_CATALOG  = ''", "$BAKED_CONTEXT_WINDOW  = ''", "$BAKED_COMPACT_PERCENT = ''"}
 var codexSHAnchors = [5]string{"BAKED_BASE_URL=''", "BAKED_MODEL=''", "BAKED_CATALOG=''", "BAKED_CONTEXT_WINDOW=''", "BAKED_COMPACT_PERCENT=''"}
 
-// slug 白名单：模型名/目录条目允许字符（路由 pattern 里的 * 也允许）；不含引号、空白、URL 分隔符
+// slug whitelist: allowed characters for model names/catalog entries (* in route patterns is also allowed); no quotes, whitespace, or URL separators
 var codexSlugRE = regexp.MustCompile(`^[A-Za-z0-9._*/:+-]{1,100}$`)
 
-// base 白名单：http(s) 地址（主机可 IPv4/域名/IPv6 括号，路径可选）
+// base whitelist: http(s) addresses (host may be IPv4/domain/bracketed IPv6, path optional)
 var codexBaseURLRE = regexp.MustCompile(`^https?://[A-Za-z0-9.:\[\]-]+(/[A-Za-z0-9._~/-]*)?$`)
 
-// ctx/compact 白名单：纯数字串（烤进脚本后作为 JSON 数字写入模型目录，不能带引号）
+// ctx/compact whitelist: pure digit strings (baked into the script as JSON numbers in the model catalog; no quotes allowed)
 var codexDigitsRE = regexp.MustCompile(`^[0-9]{1,7}$`)
 
-// codexScriptHandler 把 query 参数烤进脚本模板的 BAKED 锚点后下发——配置页给用户的
-// 一行命令（irm '<url>' | iex / bash <(curl -fsSL '<url>')）拉取的就是烤制版，粘贴即跑：
+// codexScriptHandler bakes query parameters into the script template's BAKED anchors before serving — the one-line command
+// the config page gives the user (irm '<url>' | iex / bash <(curl -fsSL '<url>')) pulls exactly this baked version, paste and run:
 //
-//	?model=<slug>     默认模型（__restore__ = 直接还原；空 = 脚本内交互菜单）
-//	?base=<url>       Responses 监听口地址（空 = 脚本内询问或用默认值）
-//	?catalog=a,b,c    写进 Codex /model 菜单的模型清单（空 = 脚本内置演示模型）
-//	?ctx=262144       目录声明的上下文窗口（空 = 262144；范围 4096..2000000）
-//	?compact=95       自动压缩触发百分比（空 = 95；范围 1..99）
+//	?model=<slug>     default model (__restore__ = restore defaults directly; empty = interactive menu inside the script)
+//	?base=<url>       Responses listener address (empty = the script asks or uses its default)
+//	?catalog=a,b,c    model list written into Codex's /model menu (empty = the script's built-in demo models)
+//	?ctx=262144       context window declared by the catalog (empty = 262144; range 4096..2000000)
+//	?compact=95       auto-compact trigger percentage (empty = 95; range 1..99)
 //
-// isSH=true 时额外把 CRLF 归一成 LF（防御 Windows 检出 autocrlf；bash 不认 CR），
-// 否则（ps1）剥掉模板文件的 BOM：irm|iex 按 HTTP charset 解码不需要 BOM，
-// 且实测 iex 遇到串首 U+FEFF 会把它粘进第一条命令名报错（BOM 只对双击/文件执行有用）。
-// 限本机访问（与其余 /__* 管理端点同规则）。
+// With isSH=true, CRLF is additionally normalized to LF (guarding Windows checkouts with autocrlf; bash rejects CR);
+// otherwise (ps1) the template file's BOM is stripped: irm|iex decodes by HTTP charset and doesn't need a BOM,
+// and iex measurably glues a leading U+FEFF into the first command name and errors (a BOM only helps double-click/file execution).
+// Localhost only (same rule as the other /__* management endpoints).
 func codexScriptHandler(tpl []byte, anchors [5]string, isSH bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !isLocalRequest(r) {
@@ -464,7 +464,7 @@ func codexScriptHandler(tpl []byte, anchors [5]string, isSH bool) http.HandlerFu
 				}
 			}
 		}
-		// ctx/compact 烤进脚本后直接当 JSON 数字用，这里把范围卡死（窗口 4k..2M，压缩 1..99%）
+		// ctx/compact are used as JSON numbers once baked into the script, so clamp the range hard here (window 4k..2M, compact 1..99%)
 		if ctxWin != "" {
 			if n, err := strconv.Atoi(ctxWin); !codexDigitsRE.MatchString(ctxWin) || err != nil || n < 4096 || n > 2000000 {
 				http.Error(w, "ctx parameter must be an integer in 4096..2000000", http.StatusBadRequest)
@@ -488,7 +488,7 @@ func codexScriptHandler(tpl []byte, anchors [5]string, isSH bool) http.HandlerFu
 				continue
 			}
 			a := anchors[i]
-			// 锚点以空串 '' 结尾，换成带值的单引号串（值已过白名单，无单引号）
+			// Anchors end with an empty string ''; replace with a single-quoted string carrying the value (the value passed the whitelist, no single quotes)
 			out = bytes.Replace(out, []byte(a), []byte(strings.TrimSuffix(a, "''")+"'"+v+"'"), 1)
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -497,8 +497,8 @@ func codexScriptHandler(tpl []byte, anchors [5]string, isSH bool) http.HandlerFu
 	}
 }
 
-// newConfigHandler 新建配置文件：用 config.example.json 作为空白模板写入指定文件名，
-// 创建成功后立即切换到新配置。文件已存在则拒绝。限本机访问。
+// newConfigHandler creates a new config file: writes config.example.json as the blank template under the given name,
+// switching to the new config immediately after creation. Refuses if the file already exists. Localhost only.
 func newConfigHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -538,8 +538,8 @@ func newConfigHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "current": name})
 }
 
-// renameConfigHandler 重命名配置文件。若重命名的是当前在用的配置，同步更新 configFilePath，
-// 使后续保存/重载指向新文件。目标名已存在则拒绝。限本机访问。
+// renameConfigHandler renames a config file. If the renamed file is the config currently in use, configFilePath is updated in sync,
+// so subsequent saves/reloads point at the new file. Refuses if the target name already exists. Localhost only.
 func renameConfigHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -582,7 +582,7 @@ func renameConfigHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rename failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// 若重命名的是当前配置，更新 configFilePath，使后续读写指向新文件
+	// If the renamed file is the current config, update configFilePath so subsequent reads/writes point at the new file
 	configMu.Lock()
 	renamed := configFilePath == oldFull
 	if renamed {
@@ -593,14 +593,14 @@ func renameConfigHandler(w http.ResponseWriter, r *http.Request) {
 		writeActiveConfigState(newFull)
 	}
 	log.Printf("[config] renamed %s -> %s", oldName, newName)
-	// 文件名清单变了（若改的是当前配置，托盘勾选也跟着新名字走）：通知托盘重建子菜单
+	// The file list changed (if the renamed one is the current config, the tray checkmark follows the new name): notify the tray to rebuild the submenu
 	notifyTrayCfgChanged()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "current": filepath.Base(currentConfigPath())})
 }
 
-// delConfigHandler 删除配置文件。不允许删除当前在用的配置（需先切换到别的）。
-// 限本机访问。前端做两次确认防误操作。
+// delConfigHandler deletes a config file. Deleting the config currently in use is refused (switch away first).
+// Localhost only. The frontend double-confirms against accidents.
 func delConfigHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -636,14 +636,14 @@ func delConfigHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[config] deleted %s", full)
-	// 通知托盘重建「切换配置」子菜单去掉被删项（与 switchConfig 成功路径同一个通知）
+	// Notify the tray to rebuild the 「切换配置」 submenu without the deleted entry (same notification as switchConfig's success path)
 	notifyTrayCfgChanged()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
-// resetStatsHandler 清空累计统计（bytes/tokens/retries/classifierRewrites/延迟样本）
-// 与「最近完成的流」列表。切换配置不再自动清统计，需手动点「清空统计」按钮。限本机访问。
+// resetStatsHandler clears cumulative stats (bytes/tokens/retries/classifierRewrites/latency samples)
+// and the 「最近完成的流」 list. Switching configs no longer clears stats automatically; the 「清空统计」 button does it manually. Localhost only.
 func resetStatsHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -659,7 +659,7 @@ func resetStatsHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
-// clearLogsHandler 清空内存日志缓冲（仅网页查看用，不影响 log_file 落盘文件）。限本机访问。
+// clearLogsHandler clears the in-memory log buffer (web viewing only; doesn't affect the log_file on-disk file). Localhost only.
 func clearLogsHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -674,11 +674,11 @@ func clearLogsHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
-// flightHandler 返回指定在途流最近透传的内容（SSE 原文），供网页点击在途流查看。
-// 流不存在（已结束）返回 404。限本机访问。
-// pickFlightSide 按查看器请求的链路侧（side=up|down）挑记录：双链路记录里下游侧
-// 仅在与上游侧有差异时才存（翻译流恒存），缺侧回退另一侧；返回值二是实际侧，
-// 经 X-Proxy429-Side 头告知调用方（查看器据此显示回退提示）。
+// flightHandler returns the given in-flight stream's recent pass-through content (raw SSE), for the web's click-to-view.
+// 404 when the stream doesn't exist (already ended). Localhost only.
+// pickFlightSide picks the record per the viewer's requested link side (side=up|down): in dual-link recording the downstream side
+// is stored only when it differs from the upstream side (translation streams always store), a missing side falls back to the other;
+// the second return value is the actual side, reported to the caller via the X-Proxy429-Side header (the viewer shows a fallback hint from it).
 func pickFlightSide(side string, up, down []byte) ([]byte, string) {
 	if side == "down" {
 		if len(down) > 0 {
@@ -702,9 +702,9 @@ func flightHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	side := r.URL.Query().Get("side") // up=代理↔上游（默认）/ down=下游↔代理
+	side := r.URL.Query().Get("side") // up=proxy↔upstream (default) / down=downstream↔proxy
 	if r.URL.Query().Get("full") == "1" {
-		// 下载输出原文：完整内容只在「储存完整结构体」开启时记录。
+		// Download the raw output: full content is recorded only with the 储存完整结构体 toggle on.
 		if !fullStore.Load() {
 			http.Error(w, "store-full-payloads is off", http.StatusForbidden)
 			return
@@ -746,7 +746,7 @@ func flightHandler(w http.ResponseWriter, r *http.Request) {
 		up = f.snapshotContent()
 		down = f.snapshotContentDown()
 	} else {
-		// 不在途：查最近完成流存档（content 是静态快照）。
+		// Not in-flight: check the finished-streams archive (content is a static snapshot).
 		finishedMu.Lock()
 		for _, ff := range finished {
 			if ff.id == id {
@@ -768,8 +768,8 @@ func flightHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(content)
 }
 
-// flightReqHandler 返回指定流的下游请求体原文，供网页查看"什么请求导致这个流"。
-// 在途/已完成都查；流不存在或未记录（搜索子流、body 读取失败）返回 404。限本机访问。
+// flightReqHandler returns the given stream's downstream request body verbatim, so the web can show "which request caused this stream".
+// Both in-flight and finished are queried; 404 when the stream doesn't exist or wasn't recorded (search sub-streams, body-read failure). Localhost only.
 func flightReqHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -788,7 +788,7 @@ func flightReqHandler(w http.ResponseWriter, r *http.Request) {
 		up = f.snapshotReqBody()
 		down = f.snapshotReqDown()
 	} else {
-		// 不在途：查最近完成流存档（reqBody 是静态快照）。
+		// Not in-flight: check the finished-streams archive (reqBody is a static snapshot).
 		finishedMu.Lock()
 		for _, ff := range finished {
 			if ff.id == id {
@@ -799,7 +799,7 @@ func flightReqHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		finishedMu.Unlock()
 	}
-	// side=up（默认，代理→上游实发体）/ side=down（下游→代理原文，仅被改写/翻译流存），缺侧回退。
+	// side=up (default, the body actually sent proxy→upstream) / side=down (downstream→proxy original, stored only for rewritten/translated streams), missing side falls back.
 	body, served := pickFlightSide(r.URL.Query().Get("side"), up, down)
 	if body == nil {
 		http.Error(w, "stream does not exist or no request body recorded", http.StatusNotFound)
@@ -811,7 +811,7 @@ func flightReqHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-// fmtCacheAge 把缓存年龄（缓存创建至今的时长）格式化为 m:ss（≥1h 时 h:mm:ss）。
+// fmtCacheAge formats a cache age (time since the cache was created) as m:ss (h:mm:ss when ≥1h).
 func fmtCacheAge(d time.Duration) string {
 	s := int(d.Seconds())
 	if h := s / 3600; h > 0 {
@@ -820,7 +820,7 @@ func fmtCacheAge(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", s/60, s%60)
 }
 
-// fmtObsDur 把实测间隔格式化为 mm:ss（"00:30" / "23:30"，分钟零垫两位；≥1h 与缓存年龄同式 h:mm:ss，如 "4:44:13"）。
+// fmtObsDur formats an observed interval as mm:ss ("00:30" / "23:30", minutes zero-padded to two digits; ≥1h uses the same h:mm:ss form as cache age, e.g. "4:44:13").
 func fmtObsDur(d time.Duration) string {
 	s := int(d.Seconds())
 	if s >= 3600 {
@@ -829,18 +829,18 @@ func fmtObsDur(d time.Duration) string {
 	return fmt.Sprintf("%02d:%02d", s/60, s%60)
 }
 
-// recentFlightsHandler 返回最近完成流列表（摘要，不含 content），最新在前。限本机访问。
-// cacheAge 列语义：每锚定键（会话+路由）的最新一行显示缓存年龄（缓存创建至今的时长，递增）；
-// 被同键更新行刷新的旧行与无会话标识的行（count_tokens/裸 API）显示 "-"；
-// 同键有在途流吐字时冻结显示 [m:ss]（在途流开始那一刻旧锚的年龄，数字不变）。
+// recentFlightsHandler returns the recently finished streams list (summary, no content), newest first. Localhost only.
+// The cacheAge column's semantics: each anchor key's (session+route) newest row shows the cache age (time since the cache was created, counting up);
+// older rows superseded by a newer same-key row and rows without a session identifier (count_tokens/bare API) show "-";
+// while a same-key in-flight stream is streaming, the display freezes as [m:ss] (the old anchor's age at the in-flight stream's start; the number doesn't change).
 func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
-	// 同键有在途流正在吐字（stage=3 转发中）时，该键缓存实际刚被上游刷新——上一完成行
-	// 冻结显示刷新发生那一刻（在途流开始时刻）旧锚的年龄，形如 [4:32]；新锚等该在途流
-	// 完成归档后正式生效。同键并发多条吐字流取最早开始的（首次刷新时刻）。
+	// While a same-key in-flight stream is streaming (stage=3 forwarding), that key's cache was actually just refreshed by the upstream — the previous finished row
+	// freezes showing the old anchor's age at the moment the refresh happened (the in-flight stream's start), like [4:32]; the new anchor officially takes effect
+	// once that in-flight stream finishes archiving. With multiple concurrent same-key streaming streams, the earliest-started one wins (the first refresh moment).
 	streaming := make(map[string]time.Time)
 	for _, f := range flights.snapshot() {
 		if f.stage.Load() == 3 {
@@ -853,8 +853,8 @@ func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	finishedMu.Lock()
 	now := time.Now()
-	// 每键最新行下标（finished 升序，后者覆盖前者）。被裁后旧行可能"升级"为可见最新，
-	// 显示它自己的年龄——存活期是动态的，年龄大只说明该会话很久没写缓存。
+	// Index of each key's newest row (finished is ascending; later entries overwrite earlier ones). After eviction an old row may get "promoted" to visible-newest,
+	// showing its own age — lifetimes are dynamic, and a large age only means the session hasn't written cache in a long time.
 	latest := make(map[string]int)
 	for i := range finished {
 		if finished[i].convKey != "" {
@@ -910,7 +910,7 @@ func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"list": out})
 }
 
-// finishedCapHandler 设置保留完成流个数 N（0..200），并立即裁剪 finished。限本机访问。
+// finishedCapHandler sets how many finished streams to keep, N (0..200), trimming finished immediately. Localhost only.
 func finishedCapHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -942,9 +942,9 @@ func finishedCapHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "n": b.N})
 }
 
-// fullStoreHandler 开关「储存完整结构体」：开启后新开始的请求记录完整请求体与输出
-// （不设 256KB 上限，供下载）；关闭立即清空在途/存档里的完整副本（reqBody 截回 cap），
-// 网页下载按钮随之消失。限本机访问。
+// fullStoreHandler toggles 「储存完整结构体」: when on, newly started requests record full request bodies and output
+// (no 256KB cap, for download); switching off immediately drops the full copies of in-flight/archived streams (reqBody cut back to cap),
+// and the web download button disappears accordingly. Localhost only.
 func fullStoreHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -963,7 +963,7 @@ func fullStoreHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	fullStore.Store(b.Enabled)
 	if !b.Enabled {
-		// 关闭即释放完整副本：在途流逐个清理，存档同理。
+		// Switching off releases the full copies: in-flight streams are purged one by one, archives likewise.
 		for _, f := range flights.snapshot() {
 			f.purgeFull()
 		}
@@ -2554,9 +2554,9 @@ window.prompt = function(s, d){ return __prompt(t(String(s)), d); };
 </body>
 </html>`
 
-// logViewerDocZH 是使用文档弹窗的中文整版（母版默认语言）：中文页渲染时把
-// __DOC_BODY__ 占位整段替换为它。内容即 097003d 版本 logViewerHTML 内联的正文。
-// 新增文档段落时中文写这里、英文写 logViewerDocEN，两边都要补。
+// logViewerDocZH is the Chinese full text of the usage-doc popup (the master page's default language): the Chinese page render
+// replaces the __DOC_BODY__ placeholder with it wholesale. Content identical to the body inlined in logViewerHTML at version 097003d.
+// When adding doc sections, write Chinese here and English in logViewerDocEN — both sides must be updated.
 const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <p>顶层配置 <code>convertAlltoStream</code>（默认 false）开启后，所有非流式请求（<code>stream:false</code> 或省略）都被代理悄悄改为流式发给上游：在途流页面实时可见吐字、统计首字与 tok/s。请求方无感知——代理把上游流完整收完后，<b>原样重建</b>非流式 JSON（所有内容块按流里原样拼回，含搜索结果 encrypted_content）一次性返回，调用方拿到的仍是它预期的非流式响应。流中途断开（未见 message_stop）时未向客户端写任何内容，代理整体重试。</p>
       <p>仅作用于 Anthropic Messages 请求（/v1/messages）；已是流式的请求、搜索摘要模式不受影响。重试等待期间不发 SSE 保活 ping（会污染非流式响应），静默等待。</p>
@@ -2671,9 +2671,9 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <p>转发通道与管理端点（/__*）都永远仅本机可连（127.0.0.1/::1）：误把 listen / responses_listen 设成 0.0.0.0 也不会把转发通道暴露给内网。</p>
 `
 
-// logViewerDocEN 是使用文档弹窗的英文整版：英文页渲染时把 __DOC_BODY__ 占位
-// 整段替换为它（整段替换比逐句替换稳，长段落不会漏）。新增文档段落时中文写进
-// logViewerDocZH、英文写进这里，两边都要补。
+// logViewerDocEN is the English full text of the usage-doc popup: the English page render replaces the __DOC_BODY__ placeholder
+// with it wholesale (wholesale replacement is sturdier than sentence-by-sentence — long paragraphs can't be missed). When adding doc sections,
+// write Chinese into logViewerDocZH and English here — both sides must be updated.
 const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h3>
       <p>With the top-level <code>convertAlltoStream</code> (default false) on, every non-streaming request (<code>stream:false</code> or omitted) is silently sent upstream as streaming: the in-flight view shows token output live, with TTFT and tok/s stats. The caller notices nothing — after collecting the full upstream stream, the proxy <b>rebuilds</b> the non-streaming JSON exactly (all content blocks reassembled as they arrived, including search-result encrypted_content) and returns it in one piece. If the stream breaks midway (no message_stop), nothing has been written to the client and the proxy retries the whole request.</p>
       <p>Only applies to Anthropic Messages requests (/v1/messages); already-streaming requests and search summary mode are unaffected. No SSE keep-alive pings during retry waits (they would pollute a non-streaming response) — waits are silent.</p>
@@ -2777,13 +2777,13 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <p>Both the forwarding channel and the admin endpoints (/__*) are only ever reachable from this machine (127.0.0.1/::1): even mistakenly setting listen / responses_listen to 0.0.0.0 won't expose the forwarding channel to the LAN.</p>
 `
 
-// ---- 控制台英文版 ----
-// logViewerHTML 是中文母版；renderLogViewerEN 按对照表把 HTML 静态文案与
-// JS 构建的界面字符串换成英文，alert/confirm/prompt 由页面尾部 i18n 脚本翻译。
-// 新增页面文案时中英两份都要补；TestRenderLogViewerENNoChinese 兜底防漏。
+// ---- Console English version ----
+// logViewerHTML is the Chinese master page; renderLogViewerEN swaps the HTML static copy and
+// JS-built UI strings to English per the mapping table; alert/confirm/prompt are translated by the page-footer i18n script.
+// When adding page copy, both the Chinese and English sides must be updated; TestRenderLogViewerENNoChinese is the leak-proof backstop.
 
-// enHTMLRepl 静态文案对照（中文 → 英文）。替换按键长降序进行，
-// 故短词（如「缓存命中」）不会抢先截断长句（如「缓存命中明细（按真实上游模型）」）。
+// enHTMLRepl static copy mapping (Chinese → English). Replacement runs by descending key length,
+// so short words (e.g. 「缓存命中」) can't pre-emptively truncate long sentences (e.g. 「缓存命中明细（按真实上游模型）」).
 var enHTMLRepl = [][2]string{
 	{`<html lang="zh">`, `<html lang="en">`},
 	{`<title>Proxy429 控制台</title>`, `<title>Proxy429 Console</title>`},
@@ -3022,15 +3022,15 @@ var enHTMLRepl = [][2]string{
 	{`（gpt-5*）`, ` (gpt-5*)`},
 }
 
-// enThinkRepl 服务端下发的思考值（extractThinkMode）中英对照：
-// "关"→off、"开 N"→on N。值经 esc() 进 innerHTML，替换安全。
+// enThinkRepl maps server-pushed thinking values (extractThinkMode) Chinese → English:
+// "关"→off, "开 N"→on N. Values reach innerHTML via esc(), so replacement is safe.
 var enThinkRepl = map[string]string{
 	"[关]": "[off]",
 	"[开":  "[on ",
 }
 
-// renderLogViewerEN 把中文母版页面渲染成英文版：按键长降序替换，
-// 未覆盖到的中文保持原样（浏览器侧 i18n 脚本兜底 alert/confirm/prompt）。
+// renderLogViewerEN renders the Chinese master page into English: replacing by descending key length;
+// unmapped Chinese stays as-is (the browser-side i18n script backstops alert/confirm/prompt).
 func renderLogViewerEN(page string) string {
 	page = strings.Replace(page, "__DOC_BODY__", logViewerDocEN, 1)
 	sort.Slice(enHTMLRepl, func(i, j int) bool { return len(enHTMLRepl[i][0]) > len(enHTMLRepl[j][0]) })

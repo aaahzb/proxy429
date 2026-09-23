@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-// resetStats 清空全局 stats，保证各测试互不影响。
+// resetStats clears the global stats so tests don't affect each other.
 func resetStats() {
 	stats.mu.Lock()
 	stats.active = 0
@@ -30,10 +30,10 @@ func resetStats() {
 	stats.bytesForward.Store(0)
 	stats.statusRetries.Store(0)
 	stats.classifierRewrites.Store(0)
-	stats.resetSampleCap(0) // 清空"最近X次"延迟/吞吐样本
+	stats.resetSampleCap(0) // Clear the "recent N" latency/throughput samples
 	stats.mu.Unlock()
 
-	// flight 注册表与日志缓冲区也重置（handler 总会 register flight，map 不能为 nil）。
+	// The flight registry and log buffer are reset too (handlers always register flights; the map must not be nil).
 	flights.mu.Lock()
 	flights.m = make(map[uint64]*flight)
 	flights.nextID.Store(0)
@@ -75,7 +75,7 @@ func TestParseSSEStatsOutputDelta(t *testing.T) {
 	resetStats()
 	var last, lastIn, lastCR, lastCC int64
 	var saw bool
-	// 单流：output_tokens 是累积值 1→10→20→50，全局应只记最终 50（增量之和）。
+	// Single stream: output_tokens is cumulative 1→10→20→50; the global should record only the final 50 (sum of deltas).
 	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
 	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":10}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
 	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":20}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
@@ -89,7 +89,7 @@ func TestParseSSEStatsMultiStream(t *testing.T) {
 	resetStats()
 	var lastA, lastB, inA, inB, crA, crB, ccA, ccB int64
 	var sawA, sawB bool
-	// 两个并发流各自独立 lastOutput，全局累加两者当前值：100+30=130。
+	// Two concurrent streams each keep their own lastOutput; the global accumulates both currents: 100+30=130.
 	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":100}}`), &lastA, &inA, &crA, &ccA, &sawA)
 	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":30}}`), &lastB, &inB, &crB, &ccB, &sawB)
 	if stats.outputTokens != 130 {
@@ -110,8 +110,8 @@ func TestParseSSEStatsIgnoresNonData(t *testing.T) {
 	}
 }
 
-// 回归：message_start 与 message_delta 都带 input_tokens / cache_read 时，
-// 取最后出现的值（后值覆盖前值），不累加。Kimi 实测：start=45814, delta=1270。
+// Regression: when both message_start and message_delta carry input_tokens / cache_read,
+// take the last-occurring value (later overwrites earlier), don't accumulate. Kimi field measurement: start=45814, delta=1270.
 func TestParseSSEStatsUsageNoDoubleCount(t *testing.T) {
 	resetStats()
 	var last, lastIn, lastCR, lastCC int64
@@ -127,19 +127,19 @@ func TestParseSSEStatsUsageNoDoubleCount(t *testing.T) {
 	if stats.outputTokens != 50 {
 		t.Errorf("output=%d want 50", stats.outputTokens)
 	}
-	// last 也应是最后值
+	// last should also be the final value
 	if lastIn != 1270 || lastCR != 200 || last != 50 {
 		t.Errorf("last=%d/%d/%d want 1270/200/50", lastIn, lastCR, last)
 	}
 }
 
-// 字段缺失时保持原值：message_delta 不含 input_tokens 时不应覆盖为 0。
+// Missing fields keep the old value: message_delta without input_tokens must not overwrite it with 0.
 func TestParseSSEStatsUsageMissingField(t *testing.T) {
 	resetStats()
 	var last, lastIn, lastCR, lastCC int64
 	var saw bool
 	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":50,"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	// message_delta 只带 output_tokens，input/cache_read 缺失，应保持 100/50
+	// message_delta carries only output_tokens; input/cache_read are missing and should stay 100/50
 	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":80}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
 	if stats.inputTokens != 100 {
 		t.Errorf("input=%d want 100 (缺失字段不应覆盖)", stats.inputTokens)
@@ -155,8 +155,8 @@ func TestParseSSEStatsUsageMissingField(t *testing.T) {
 	}
 }
 
-// sawDeltaUsage 标记：带 usage 的 message_delta 才置位（真实用量拆分到达），
-// message_start / 其他事件不置位。聚合只统计完整响应靠这个标记区分。
+// sawDeltaUsage flag: set only by a message_delta carrying usage (real usage split arriving);
+// message_start / other events don't set it. Aggregate stats rely on this flag to count only complete responses.
 func TestParseSSEStatsDeltaUsageMarker(t *testing.T) {
 	resetStats()
 	var last, lastIn, lastCR, lastCC int64
@@ -171,8 +171,8 @@ func TestParseSSEStatsDeltaUsageMarker(t *testing.T) {
 	}
 }
 
-// 中断流回滚：只收到 message_start 就断流时（Kimi 实测 start.input 含 cache_read、start.cr=0），
-// 已计入全局的预估值必须能精确回滚，否则整个上下文被算成未命中输入、聚合命中率被拉低。
+// Interrupted-stream rollback: when the stream breaks after only message_start (Kimi field measurement: start.input includes cache_read, start.cr=0),
+// the estimate already added to the global must roll back exactly, otherwise the whole context gets counted as uncached input and the aggregate hit rate drops.
 func TestRollbackUsageStats(t *testing.T) {
 	resetStats()
 	var last, lastIn, lastCR, lastCC int64
@@ -188,22 +188,22 @@ func TestRollbackUsageStats(t *testing.T) {
 }
 
 func TestParseNonStreamUsage(t *testing.T) {
-	// Anthropic 非流式（分类器响应）
+	// Anthropic non-streaming (classifier response)
 	in, cr, cc, out, ok := parseNonStreamUsage([]byte(`{"type":"message","content":[{"type":"text","text":"x"}],"usage":{"input_tokens":143,"cache_read_input_tokens":61568,"cache_creation_input_tokens":7,"output_tokens":5}}`))
 	if !ok || in != 143 || cr != 61568 || cc != 7 || out != 5 {
 		t.Errorf("anthropic: ok=%v in=%d cr=%d cc=%d out=%d want 143/61568/7/5", ok, in, cr, cc, out)
 	}
-	// OpenAI 风格（prompt_tokens/completion_tokens，无 cache_*）
+	// OpenAI style (prompt_tokens/completion_tokens, no cache_*)
 	in, cr, cc, out, ok = parseNonStreamUsage([]byte(`{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}`))
 	if !ok || in != 100 || cr != 0 || cc != 0 || out != 50 {
 		t.Errorf("openai: ok=%v in=%d cr=%d cc=%d out=%d want 100/0/0/50", ok, in, cr, cc, out)
 	}
-	// 无 usage 字段
+	// No usage field
 	_, _, _, _, ok = parseNonStreamUsage([]byte(`{"foo":"bar"}`))
 	if ok {
 		t.Errorf("no usage: should return ok=false")
 	}
-	// 非 JSON
+	// Non-JSON
 	_, _, _, _, ok = parseNonStreamUsage([]byte(`not json`))
 	if ok {
 		t.Errorf("non-json: should return ok=false")
@@ -217,14 +217,14 @@ func TestAddModelUsage(t *testing.T) {
 	stats.addModelUsage("deepseek-v4", 100, 200, 20, 50)
 	stats.addModelUsage("kimi", 10, 500, 0, 5)
 	stats.addModelUsage("deepseek-v4", 50, 100, 10, 30)
-	// 空模型名 / 全零应被忽略
+	// Empty model name / all-zero should be ignored
 	stats.addModelUsage("", 1, 2, 3, 4)
 	stats.addModelUsage("zero", 0, 0, 0, 0)
 	got := stats.snapshotModelStats()
 	if len(got) != 2 {
 		t.Fatalf("want 2 models, got %d: %+v", len(got), got)
 	}
-	// 按 total 降序：deepseek-v4=150+300+30+80=560, kimi=10+500+0+5=515
+	// Descending by total: deepseek-v4=150+300+30+80=560, kimi=10+500+0+5=515
 	if got[0].Model != "deepseek-v4" {
 		t.Errorf("first should be deepseek-v4 (total 560), got %s", got[0].Model)
 	}
@@ -232,14 +232,14 @@ func TestAddModelUsage(t *testing.T) {
 	if ds.Input != 150 || ds.CacheRead != 300 || ds.CacheCreation != 30 || ds.Output != 80 {
 		t.Errorf("deepseek-v4累加错: in=%d cr=%d cc=%d out=%d want 150/300/30/80", ds.Input, ds.CacheRead, ds.CacheCreation, ds.Output)
 	}
-	// 清理
+	// Cleanup
 	stats.mu.Lock()
 	stats.modelStats = nil
 	stats.mu.Unlock()
 }
 
-// cacheHitRate 与 Claude Code 的 cache hit 算法一致：
-// cache_read / (input + cache_read + cache_creation)。
+// cacheHitRate matches Claude Code's cache-hit algorithm:
+// cache_read / (input + cache_read + cache_creation).
 func TestCacheHitRate(t *testing.T) {
 	cases := []struct {
 		cr, in, cc int64
@@ -247,9 +247,9 @@ func TestCacheHitRate(t *testing.T) {
 	}{
 		{50, 40, 10, "50.0%"},  // 50/(40+50+10)=50%
 		{5, 10, 3, "27.8%"},    // 5/18≈27.78%
-		{0, 0, 0, "-"},         // 无 usage 数据
-		{0, 0, 7, "0.0%"},      // 只有写入没有命中
-		{9000, 45814, 0, "16.4%"}, // Kimi 实测值量级：9000/54814
+		{0, 0, 0, "-"},         // No usage data
+		{0, 0, 7, "0.0%"},      // Writes without any hits
+		{9000, 45814, 0, "16.4%"}, // Kimi field-measured magnitude: 9000/54814
 	}
 	for _, c := range cases {
 		if got := cacheHitRate(c.cr, c.in, c.cc); got != c.want {
@@ -286,11 +286,11 @@ func TestHumanBytes(t *testing.T) {
 	}
 }
 
-// TestRecentLatency 验证加权吞吐与平均首字延迟计算。
+// TestRecentLatency verifies weighted throughput and average first-byte latency calculations.
 func TestRecentLatency(t *testing.T) {
 	resetStats()
 	stats.resetSampleCap(3)
-	// 3 条样本：首字 100/200/300ms，流式 1000/2000/3000ms，output 10/20/30 tokens
+	// 3 samples: first-byte 100/200/300ms, streaming 1000/2000/3000ms, output 10/20/30 tokens
 	stats.pushFirstByte(100)
 	stats.pushThroughput(1000, 10)
 	stats.pushFirstByte(200)
@@ -298,17 +298,17 @@ func TestRecentLatency(t *testing.T) {
 	stats.pushFirstByte(300)
 	stats.pushThroughput(3000, 30)
 	avgFB, tps := stats.recentLatency()
-	// 平均首字 = (100+200+300)/3 = 200ms
+	// Average first-byte = (100+200+300)/3 = 200ms
 	if avgFB != 200 {
 		t.Errorf("avgFB=%v want 200", avgFB)
 	}
-	// 加权吞吐 = (10+20+30) / ((1000+2000+3000)/1000) = 60/6 = 10 tok/s
+	// Weighted throughput = (10+20+30) / ((1000+2000+3000)/1000) = 60/6 = 10 tok/s
 	if tps != 10 {
 		t.Errorf("tps=%v want 10", tps)
 	}
 }
 
-// TestRecentLatencyRingOverwrite 验证环形缓冲超过容量时覆盖最旧样本。
+// TestRecentLatencyRingOverwrite verifies the ring buffer overwrites the oldest sample past capacity.
 func TestRecentLatencyRingOverwrite(t *testing.T) {
 	resetStats()
 	stats.resetSampleCap(2)
@@ -317,19 +317,19 @@ func TestRecentLatencyRingOverwrite(t *testing.T) {
 	stats.pushFirstByte(200)
 	stats.pushThroughput(1000, 20)
 	stats.pushFirstByte(300)
-	stats.pushThroughput(1000, 30) // 容量2，覆盖第1条(100,10)
+	stats.pushThroughput(1000, 30) // Capacity 2; overwrites the 1st sample (100,10)
 	avgFB, tps := stats.recentLatency()
-	// 窗口剩 200/300：平均首字 = 250ms
+	// Window holds 200/300: average first-byte = 250ms
 	if avgFB != 250 {
 		t.Errorf("avgFB=%v want 250（环形覆盖后）", avgFB)
 	}
-	// 吞吐 = (20+30)/(2000/1000) = 25 tok/s
+	// Throughput = (20+30)/(2000/1000) = 25 tok/s
 	if tps != 25 {
 		t.Errorf("tps=%v want 25", tps)
 	}
 }
 
-// TestRecentLatencyEmpty 验证无样本时返回 0。
+// TestRecentLatencyEmpty verifies 0 is returned with no samples.
 func TestRecentLatencyEmpty(t *testing.T) {
 	resetStats()
 	stats.resetSampleCap(5)
@@ -339,20 +339,20 @@ func TestRecentLatencyEmpty(t *testing.T) {
 	}
 }
 
-// TestHandlerLatencySampling 端到端验证：正常流（情况C）透传结束后，
-// 首字延迟与 token/s 被采样进滑动窗口，recentLatency 返回非零。
+// TestHandlerLatencySampling end-to-end: after a normal stream (case C) finishes pass-through,
+// first-byte latency and token/s are sampled into the sliding window and recentLatency returns non-zero.
 func TestHandlerLatencySampling(t *testing.T) {
 	resetStats()
-	// mock 上游：返回带 usage 的 SSE 流（message_start -> message_delta -> [DONE]）。
-	// 加 sleep 模拟真实首字延迟与流式吐字耗时，避免本地太快被 Milliseconds() 截断为 0。
+	// Mock upstream: returns an SSE stream with usage (message_start -> message_delta -> [DONE]).
+	// The sleeps simulate real first-byte latency and streaming duration, avoiding a too-fast local run being truncated to 0 by Milliseconds().
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		time.Sleep(15 * time.Millisecond) // 模拟"等首字"
+		time.Sleep(15 * time.Millisecond) // Simulate "awaiting first byte"
 		w.WriteHeader(200)
 		f := w.(http.Flusher)
 		fmt.Fprint(w, "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"output_tokens\":1}}}\n\n")
 		f.Flush()
-		time.Sleep(25 * time.Millisecond) // 模拟流式吐字
+		time.Sleep(25 * time.Millisecond) // Simulate streaming output
 		fmt.Fprint(w, "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":50}}\n\n")
 		f.Flush()
 		fmt.Fprint(w, "data: [DONE]\n\n")
@@ -389,12 +389,12 @@ func TestHandlerLatencySampling(t *testing.T) {
 	t.Logf("采样结果: 首字 %.2fms, %.1f tok/s", avgFB, tps)
 }
 
-// TestCountTokensFlightTag 验证 /v1/messages/count_tokens 探针流：原样透传上游响应，
-// 完成流归档带 countTokens 标记（网页 model 列据此显示 [count_tokens] 前缀），
-// 且响应体（顶层 input_tokens，无 usage 键、无 data: 行）不污染聚合统计。
+// TestCountTokensFlightTag verifies the /v1/messages/count_tokens probe stream: the upstream response passes through verbatim,
+// the finished archive carries the countTokens flag (the web model column shows the [count_tokens] prefix from it),
+// and the response body (top-level input_tokens, no usage key, no data: lines) doesn't pollute aggregate stats.
 func TestCountTokensFlightTag(t *testing.T) {
 	resetStats()
-	// mock 上游：count_tokens 的真实响应形态，只有一个顶层 input_tokens 字段。
+	// Mock upstream: the real count_tokens response shape — a single top-level input_tokens field.
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"input_tokens":42}`)
@@ -420,7 +420,7 @@ func TestCountTokensFlightTag(t *testing.T) {
 		t.Errorf("响应体 = %q（应原样透传上游）", body)
 	}
 
-	// handler defer 在响应 EOF 前完成归档，此处完成流列表必含本流。
+	// The handler defer archives before response EOF; the finished list here must contain this stream.
 	finishedMu.Lock()
 	if len(finished) == 0 {
 		finishedMu.Unlock()
@@ -435,8 +435,8 @@ func TestCountTokensFlightTag(t *testing.T) {
 		t.Errorf("完成流内容 = %q（应含 tee 下来的上游原文）", ff.content)
 	}
 
-	// 统计免疫：input/output 均应保持 0（parseSSEStats 要 data: 前缀，
-	// parseNonStreamUsage 要顶层 usage 键，count_tokens 响应两者皆无）。
+	// Stats immunity: input/output must both stay 0 (parseSSEStats needs data: prefixes,
+	// parseNonStreamUsage needs a top-level usage key; the count_tokens response has neither).
 	stats.mu.Lock()
 	in, out := stats.inputTokens, stats.outputTokens
 	stats.mu.Unlock()
@@ -445,8 +445,8 @@ func TestCountTokensFlightTag(t *testing.T) {
 	}
 }
 
-// TestAddFinishedTotalMs 验证完成流归档的总耗时列：totalMs 从 flight 建立
-// （代理收到下游请求）算到归档（handler 返回、响应已全部发回下游），且与 ended 同源。
+// TestAddFinishedTotalMs verifies the finished-archive totalMs column: totalMs counts from flight creation
+// (proxy received the downstream request) to archiving (handler returns, response fully sent downstream), and shares ended's clock.
 func TestAddFinishedTotalMs(t *testing.T) {
 	f := &flight{id: flights.nextID.Add(1), start: time.Now().Add(-123 * time.Millisecond)}
 	addFinished(f)
@@ -464,8 +464,8 @@ func TestAddFinishedTotalMs(t *testing.T) {
 	}
 }
 
-// TestAddFinishedAttempts 验证完成流归档保留尝试次数（状态码列 [重试N次] 的数据源）：
-// flight.attempt 原样入档，一把过为 1，重试 2 次为 3。
+// TestAddFinishedAttempts verifies the finished archive keeps the attempt count (the data source of the status column's [重试N次]):
+// flight.attempt is archived as-is — first-try success = 1, 2 retries = 3.
 func TestAddFinishedAttempts(t *testing.T) {
 	f := &flight{id: flights.nextID.Add(1), start: time.Now()}
 	f.attempt.Store(3)
@@ -478,7 +478,7 @@ func TestAddFinishedAttempts(t *testing.T) {
 	}
 }
 
-// TestFlightAttemptMs 验证当前尝试计时：attemptStart=0（重试退避中）返回 -1；已发出则返回已等待毫秒数。
+// TestFlightAttemptMs verifies current-attempt timing: attemptStart=0 (in retry backoff) returns -1; once sent it returns the awaited milliseconds.
 func TestFlightAttemptMs(t *testing.T) {
 	f := &flight{}
 	if got := f.attemptMs(); got != -1 {
@@ -490,7 +490,7 @@ func TestFlightAttemptMs(t *testing.T) {
 	}
 }
 
-// TestHasCatchAllRoute 验证 pattern:"*" 兜底判定（有兜底时顶层 upstream 允许留空）。
+// TestHasCatchAllRoute verifies the pattern:"*" catch-all determination (with a catch-all, the top-level upstream may be empty).
 func TestHasCatchAllRoute(t *testing.T) {
 	if hasCatchAllRoute(nil) {
 		t.Errorf("空 routes 不应判定有兜底")
@@ -503,7 +503,7 @@ func TestHasCatchAllRoute(t *testing.T) {
 	}
 }
 
-// TestClearStatsFinished 验证「清空统计」一并清空最近完成的流列表（在途流与流编号不动）。
+// TestClearStatsFinished verifies 「清空统计」 also clears the finished-streams list (in-flight streams and stream numbering untouched).
 func TestClearStatsFinished(t *testing.T) {
 	finishedMu.Lock()
 	finished = append(finished, finishedFlight{id: 999999})
@@ -517,7 +517,7 @@ func TestClearStatsFinished(t *testing.T) {
 	}
 }
 
-// TestComputeRateCounterReset 验证清空统计后累计字节回零，速率不算出负值。
+// TestComputeRateCounterReset verifies that after clearing stats the cumulative bytes reset to zero and the rate doesn't go negative.
 func TestComputeRateCounterReset(t *testing.T) {
 	rateMu.Lock()
 	prevRateBytes, prevRateT, lastRate = 1000, time.Now().Add(-time.Second), 500
@@ -530,8 +530,8 @@ func TestComputeRateCounterReset(t *testing.T) {
 	rateMu.Unlock()
 }
 
-// TestMarkClientGone499 验证归档状态码按上游口径校正：499 只问"上游有没有发完"
-// （delivered），与上游提供商后台口径一致；本地错误与非 200 状态不受影响。
+// TestMarkClientGone499 verifies archived status codes follow upstream bookkeeping: 499 only asks "did the upstream finish sending"
+// (delivered), consistent with the upstream provider's backend view; local errors and non-200 statuses are unaffected.
 func TestMarkClientGone499(t *testing.T) {
 	mark := func(status int, delivered, cancelCtx bool) int {
 		f := &flight{id: flights.nextID.Add(1), start: time.Now(), status: status}
@@ -541,7 +541,7 @@ func TestMarkClientGone499(t *testing.T) {
 		ctx := context.Background()
 		if cancelCtx {
 			c, cancel := context.WithCancel(context.Background())
-			cancel() // 模拟下游断开（handler 收尾 defer 时 ctx 已取消）
+			cancel() // Simulate a downstream disconnect (ctx already cancelled at handler wrap-up defer time)
 			ctx = c
 		}
 		markClientGone(f, ctx)
@@ -575,8 +575,8 @@ func TestMarkClientGone499(t *testing.T) {
 	}
 }
 
-// TestForwardDeliveredOnMessageStop 验证透传的完整送达标记：读到 message_stop 即标记
-// delivered（客户端收完即断连时上游 EOF 往往读不到，不能等 EOF）；上游流中途出错不标记。
+// TestForwardDeliveredOnMessageStop verifies pass-through's complete-delivery marker: reading message_stop marks
+// delivered (when the client disconnects right after receiving everything, upstream EOF often never arrives, so we can't wait for EOF); a mid-stream upstream error doesn't mark it.
 func TestForwardDeliveredOnMessageStop(t *testing.T) {
 	resetStats()
 	sseFull := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"output_tokens\":1}}}\n\n" +
@@ -594,13 +594,13 @@ func TestForwardDeliveredOnMessageStop(t *testing.T) {
 	if f := run(strings.NewReader(sseFull)); !f.delivered.Load() {
 		t.Error("含 message_stop 的完整流应标记 delivered")
 	}
-	// 流中途断开（读到非 EOF 错误）：不标记（收尾 defer 会把这类流改记 499）。
+	// Stream breaks midway (non-EOF error read): not marked (the wrap-up defer re-marks such streams as 499).
 	if f := run(&errAfterReader{b: []byte("event: message_start\ndata: {\"type\":\"message_start\"}\n\n"), err: io.ErrUnexpectedEOF}); f.delivered.Load() {
 		t.Error("上游流中途出错不应标记 delivered")
 	}
 }
 
-// errAfterReader 把 b 读完后返回指定错误，模拟上游流中途断开（非干净 EOF）。
+// errAfterReader returns the given error after b is fully read, simulating a mid-stream upstream break (not a clean EOF).
 type errAfterReader struct {
 	b   []byte
 	err error
@@ -615,9 +615,9 @@ func (r *errAfterReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// TestParseToolCallName 锁定 SSE 行工具名提取：tool_use/server_tool_use 的 content_block_start
-// 返回名字；text 块、web_search_tool_result（含 tool_use_id 子串但块类型不是调用）、
-// 非 data 行、[DONE]、坏 JSON 都返回空。
+// TestParseToolCallName locks SSE-line tool-name extraction: content_block_start of tool_use/server_tool_use
+// returns the name; text blocks, web_search_tool_result (contains a tool_use_id substring but the block type isn't a call),
+// non-data lines, [DONE], and bad JSON all return empty.
 func TestParseToolCallName(t *testing.T) {
 	cases := []struct{ line, want string }{
 		{`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t1","name":"Read","input":{}}}`, "Read"},
@@ -637,17 +637,17 @@ func TestParseToolCallName(t *testing.T) {
 	}
 }
 
-// TestParseToolEmptySignals 锁定 *0 空参判定的各解析器：start 带 index/input、
-// input_json_delta 碎片、content_block_stop 的 index、Responses output_item.done
-// 三类项的终态空参（function_call 看 arguments、custom_tool_call 看 input、
-// web_search_call 看 action 的 query+sources）。
+// TestParseToolEmptySignals locks the *0 empty-args detection across parsers: start carrying index/input,
+// input_json_delta fragments, content_block_stop's index, and the terminal empty-args state of Responses output_item.done's
+// three item kinds (function_call looks at arguments, custom_tool_call at input,
+// web_search_call at action's query+sources).
 func TestParseToolEmptySignals(t *testing.T) {
-	// start：index 与 start 自带 input 都要拿到（server_tool_use 完整块直接定论非空）
+	// start: index and start's own input must both be captured (a complete server_tool_use block directly concludes non-empty)
 	ts, ok := parseToolCallStart([]byte(`data: {"type":"content_block_start","index":3,"content_block":{"type":"server_tool_use","id":"s1","name":"web_search","input":{"query":"q"}}}`))
 	if !ok || ts.index != 3 || ts.name != "web_search" || isEmptyArgsJSON(string(ts.input)) {
 		t.Errorf("parseToolCallStart 非空 input=%+v ok=%v", ts, ok)
 	}
-	// delta：只有 input_json_delta 才认，text_delta 不认
+	// delta: only input_json_delta counts, text_delta doesn't
 	idx, partial, ok := parseToolArgsDelta([]byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}}`))
 	if !ok || idx != 2 || partial != `{"a":` {
 		t.Errorf("parseToolArgsDelta=(%d,%q,%v)", idx, partial, ok)
@@ -655,11 +655,11 @@ func TestParseToolEmptySignals(t *testing.T) {
 	if _, _, ok := parseToolArgsDelta([]byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"x"}}`)); ok {
 		t.Error("text_delta 不应认作参数 delta")
 	}
-	// stop：只要 index
+	// stop: only the index is needed
 	if idx, ok := parseToolBlockStop([]byte(`data: {"type":"content_block_stop","index":2}`)); !ok || idx != 2 {
 		t.Errorf("parseToolBlockStop=(%d,%v)", idx, ok)
 	}
-	// Responses done：三类项的终态空参
+	// Responses done: terminal empty-args state of the three item kinds
 	doneCases := []struct {
 		line  string
 		id    string
@@ -681,7 +681,7 @@ func TestParseToolEmptySignals(t *testing.T) {
 			t.Errorf("parseResponsesToolDone(%q)=(%q,%v,%v), want (%q,%v,%v)", c.line, id, empty, ok, c.id, c.empty, c.ok)
 		}
 	}
-	// isEmptyArgsJSON 边界
+	// isEmptyArgsJSON boundaries
 	for _, s := range []string{"", "{}", " { } ", "null", "\n\t"} {
 		if !isEmptyArgsJSON(s) {
 			t.Errorf("isEmptyArgsJSON(%q) 应为 true", s)
@@ -694,9 +694,9 @@ func TestParseToolEmptySignals(t *testing.T) {
 	}
 }
 
-// TestForwardToolCallCount 端到端透传路径：tool_use/server_tool_use 的 content_block_start
-// 各计一次，同名重复合并计数；toolCallsTag 按首次出现顺序输出，单次调用显 *1（参数
-// 经 input_json_delta 到达）、参数结构体为空的单次调用显 *0、多次调用显原始 *N。
+// TestForwardToolCallCount end-to-end pass-through path: each content_block_start of tool_use/server_tool_use
+// counts once, same-name repeats merge; toolCallsTag outputs in first-appearance order — a single call shows *1 (arguments
+// arriving via input_json_delta), a single call with an empty args object shows *0, multiple calls show the raw *N.
 func TestForwardToolCallCount(t *testing.T) {
 	resetStats()
 	sse := "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"output_tokens\":1}}}\n\n" +
@@ -713,21 +713,21 @@ func TestForwardToolCallCount(t *testing.T) {
 	resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(sse))}
 	rec := httptest.NewRecorder()
 	forward(rec, resp, nil, bufio.NewReader(resp.Body), f, false)
-	// Read 单次带参→*1；Edit 两次空参仍显原始次数 *2；web_search 单次空参→*0
-	// （index 3 无 content_block_stop：流收尾时对未关闭调用按已收内容定论空参）。
+	// Read single with args→*1; Edit twice with empty args still shows the raw count *2; web_search single empty-args→*0
+	// (index 3 has no content_block_stop: at stream wrap-up, unclosed calls are judged empty from received content).
 	if got, want := f.toolCallsTag(), "[Read*1][Edit*2][web_search*0]"; got != want {
 		t.Errorf("toolCallsTag=%q, want %q", got, want)
 	}
 }
 
-// TestToolCallsTag 锁格式化边界：无调用空串、空名忽略、同名计数合并且保首次出现顺序；
-// 单次调用显 *1、单次空参显 *0、多次调用显原始 *N（空参标记不影响）。
+// TestToolCallsTag locks formatting boundaries: no calls → empty string, empty names ignored, same-name counts merge keeping first-appearance order;
+// a single call shows *1, a single empty-args call shows *0, multiple calls show the raw *N (empty-args marks don't affect it).
 func TestToolCallsTag(t *testing.T) {
 	f := &flight{}
 	if got := f.toolCallsTag(); got != "" {
 		t.Errorf("无工具调用 want 空串, got %q", got)
 	}
-	f.noteToolCall("") // 空名忽略
+	f.noteToolCall("") // Empty names ignored
 	f.noteToolCall("Bash")
 	f.noteToolCall("Read")
 	f.noteToolCall("Bash")
@@ -735,15 +735,15 @@ func TestToolCallsTag(t *testing.T) {
 	if got, want := f.toolCallsTag(), "[Bash*3][Read*1]"; got != want {
 		t.Errorf("toolCallsTag=%q, want %q", got, want)
 	}
-	f.noteToolCallEmpty("Read")   // 单次调用空参 → *0
-	f.noteToolCallEmpty("Bash")   // 多次调用显原始 *N，空参标记不影响
-	f.noteToolCallEmpty("Nobody") // 未计数的工具：忽略
+	f.noteToolCallEmpty("Read")   // Single call with empty args → *0
+	f.noteToolCallEmpty("Bash")   // Multiple calls show the raw *N; empty-args marks don't affect it
+	f.noteToolCallEmpty("Nobody") // Uncounted tools: ignored
 	if got, want := f.toolCallsTag(), "[Bash*3][Read*0]"; got != want {
 		t.Errorf("toolCallsTag=%q, want %q", got, want)
 	}
 }
 
-// setCfg 设置测试用配置（maybeRewriteClassifier 读全局 cfg）。
+// setCfg sets the test config (maybeRewriteClassifier reads the global cfg).
 func setCfg(thinkingDisabled bool, maxTokens int) {
 	cfg.Store(&Config{
 		ClassifierThinkingDisabled: thinkingDisabled,
@@ -751,7 +751,7 @@ func setCfg(thinkingDisabled bool, maxTokens int) {
 	})
 }
 
-// parseBody 解析 JSON body 为 map。
+// parseBody parses a JSON body into a map.
 func parseBody(t *testing.T, b []byte) map[string]interface{} {
 	t.Helper()
 	var p map[string]interface{}
@@ -761,7 +761,7 @@ func parseBody(t *testing.T, b []byte) map[string]interface{} {
 	return p
 }
 
-// TestMaybeRewriteClassifierString 验证字符串 system 命中分类器时关 thinking。
+// TestMaybeRewriteClassifierString verifies a string system matching the classifier disables thinking.
 func TestMaybeRewriteClassifierString(t *testing.T) {
 	resetStats()
 	setCfg(true, 0)
@@ -776,13 +776,13 @@ func TestMaybeRewriteClassifierString(t *testing.T) {
 	if _, ok := p["reasoning"]; ok {
 		t.Errorf("reasoning 应被删除，got %v", p["reasoning"])
 	}
-	// ClassifierMaxTokens=0 不压，保持原值。
+	// ClassifierMaxTokens=0 means no clamping; the original value is kept.
 	if mt, _ := p["max_tokens"].(float64); mt != 2048 {
 		t.Errorf("max_tokens=%v want 2048（0 不压）", p["max_tokens"])
 	}
 }
 
-// TestMaybeRewriteClassifierArray 验证数组 system 命中分类器时关 thinking。
+// TestMaybeRewriteClassifierArray verifies an array system matching the classifier disables thinking.
 func TestMaybeRewriteClassifierArray(t *testing.T) {
 	resetStats()
 	setCfg(true, 0)
@@ -792,18 +792,18 @@ func TestMaybeRewriteClassifierArray(t *testing.T) {
 	if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "disabled" {
 		t.Errorf("thinking=%v want type=disabled", p["thinking"])
 	}
-	// 原 body 没有 reasoning_effort，改写后应追加。
+	// The original body has no reasoning_effort; the rewrite should append it.
 	if p["reasoning_effort"] != "none" {
 		t.Errorf("reasoning_effort=%v want none（应追加到 body）", p["reasoning_effort"])
 	}
-	// key 顺序保留：原字段在前，reasoning_effort 追加到末尾。
+	// Key order preserved: original fields first, reasoning_effort appended at the end.
 	want := []string{"system", "thinking", "max_tokens", "reasoning_effort"}
 	if keys := topLevelKeys(t, out); !reflect.DeepEqual(keys, want) {
 		t.Errorf("key 顺序:\n got %v\nwant %v", keys, want)
 	}
 }
 
-// TestMaybeRewriteClassifierNonClassifier 验证普通请求（system 不匹配）不改写。
+// TestMaybeRewriteClassifierNonClassifier verifies ordinary requests (system doesn't match) aren't rewritten.
 func TestMaybeRewriteClassifierNonClassifier(t *testing.T) {
 	resetStats()
 	setCfg(true, 0)
@@ -813,7 +813,7 @@ func TestMaybeRewriteClassifierNonClassifier(t *testing.T) {
 	}
 }
 
-// TestMaybeRewriteClassifierDisabled 验证开关关闭时不改写。
+// TestMaybeRewriteClassifierDisabled verifies no rewriting when the toggle is off.
 func TestMaybeRewriteClassifierDisabled(t *testing.T) {
 	resetStats()
 	setCfg(false, 0)
@@ -823,7 +823,7 @@ func TestMaybeRewriteClassifierDisabled(t *testing.T) {
 	}
 }
 
-// TestMaybeRewriteClassifierMaxTokens 验证 max_tokens>0 时被压到配置值。
+// TestMaybeRewriteClassifierMaxTokens verifies max_tokens>0 is clamped to the configured value.
 func TestMaybeRewriteClassifierMaxTokens(t *testing.T) {
 	resetStats()
 	setCfg(true, 512)
@@ -834,23 +834,23 @@ func TestMaybeRewriteClassifierMaxTokens(t *testing.T) {
 	}
 }
 
-// TestMaybeRewriteClassifierPreservesOrder 验证改写保留原始 key 顺序（不重排）。
-// 这是修 bug 的核心：旧实现 json.Unmarshal 到 map 再 Marshal 会按字典序重排 key。
+// TestMaybeRewriteClassifierPreservesOrder verifies the rewrite preserves original key order (no reordering).
+// This is the core of the bug fix: the old implementation's json.Unmarshal into a map + Marshal reordered keys alphabetically.
 func TestMaybeRewriteClassifierPreservesOrder(t *testing.T) {
 	resetStats()
 	setCfg(true, 0)
-	// 故意用非字母序的 key 顺序（model 在前，messages 在后）。
+	// Deliberately uses a non-alphabetical key order (model first, messages after).
 	body := []byte(`{"model":"x","system":"You are a security monitor.","thinking":{"type":"enabled"},"reasoning_effort":"high","reasoning":{"effort":"high"},"max_tokens":2048,"messages":[]}`)
 	out := maybeRewriteClassifier(body)
-	// reasoning 被删，其余保留原顺序。
+	// reasoning is deleted; the rest keep their original order.
 	want := []string{"model", "system", "thinking", "reasoning_effort", "max_tokens", "messages"}
 	if keys := topLevelKeys(t, out); !reflect.DeepEqual(keys, want) {
 		t.Errorf("key 顺序:\n got %v\nwant %v", keys, want)
 	}
 }
 
-// TestClassifierHitCounting 端到端验证分类器双计数口径：classifierHits 命中即计
-// （无论是否分流/关思考），classifierRewrites 只在实际改写 body 关 thinking 时 +1。
+// TestClassifierHitCounting end-to-end verifies the classifier dual-count semantics: classifierHits counts on match
+// (whether or not rerouted/de-thought); classifierRewrites only +1 when the body is actually rewritten to disable thinking.
 func TestClassifierHitCounting(t *testing.T) {
 	resetStats()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -869,7 +869,7 @@ func TestClassifierHitCounting(t *testing.T) {
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}
-	// 带 thinking 的分类器请求：关思考开关打开时必然产生真实改写（字节变化才计改写数）。
+	// A classifier request with thinking: with the thinking-off toggle on, a real rewrite is guaranteed (only byte changes count as rewrites).
 	cls := `{"model":"x","system":"You are a security monitor.","thinking":{"type":"enabled"},"max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
 
 	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10, ClassifierThinkingDisabled: false})
@@ -885,13 +885,13 @@ func TestClassifierHitCounting(t *testing.T) {
 		t.Errorf("关思考开启后：hits=%d want 3, rewrites=%d want 1", h, rw)
 	}
 
-	post(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`) // 非分类器请求：两计数都不涨
+	post(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`) // Non-classifier request: neither counter rises
 	if h, rw := stats.classifierHits.Load(), stats.classifierRewrites.Load(); h != 3 || rw != 1 {
 		t.Errorf("普通请求后：hits=%d want 3, rewrites=%d want 1", h, rw)
 	}
 }
 
-// topLevelKeys 提取 JSON 顶层 object 的 key 顺序。
+// topLevelKeys extracts the key order of a JSON top-level object.
 func topLevelKeys(t *testing.T, b []byte) []string {
 	t.Helper()
 	dec := json.NewDecoder(bytes.NewReader(b))
@@ -912,7 +912,7 @@ func topLevelKeys(t *testing.T, b []byte) []string {
 	return keys
 }
 
-// TestExtractModel 验证从请求体轻量提取 model 字段值（[请求] 日志展示用）。
+// TestExtractModel verifies lightweight model-field extraction from the request body (for the [请求] log display).
 func TestExtractModel(t *testing.T) {
 	cases := []struct {
 		name string
@@ -935,9 +935,9 @@ func TestExtractModel(t *testing.T) {
 	}
 }
 
-// TestExtractThinkMode 锁定状态页「API」列思考值的 Anthropic 口径：thinking.type=disabled 显 "关"、
-// enabled 显 "开 <budget>"（无预算只显 "开"）、adaptive 无档显 "adaptive"（带档只显档位词——
-// 词汇口径由列颜色承担）、只有 effort 没有 thinking 同样只显档位词、无字段返空。
+// TestExtractThinkMode locks the Anthropic-side vocabulary of the status page's 「API」 column thinking values: thinking.type=disabled shows "off",
+// enabled shows "on <budget>" (just "on" without a budget), adaptive without effort shows "adaptive" (with effort only the effort word —
+// which API family the vocabulary belongs to is carried by the column color), effort without thinking likewise shows only the effort word, no field returns empty.
 func TestExtractThinkMode(t *testing.T) {
 	cases := []struct {
 		name string
@@ -964,8 +964,8 @@ func TestExtractThinkMode(t *testing.T) {
 	}
 }
 
-// TestLoadConfigThinkingValidation 锁定路由 thinking 参数的取值校验：""/auto/adaptive/budget
-// 合法，其余值加载即报错——配错不会被静默降级成 auto 而继续按客户端 model 名误判思考形态。
+// TestLoadConfigThinkingValidation locks validation of the route thinking parameter: ""/auto/adaptive/budget
+// are legal, anything else fails at load — a misconfiguration isn't silently degraded to auto while the thinking shape keeps being misjudged from the client model name.
 func TestLoadConfigThinkingValidation(t *testing.T) {
 	writeCfg := func(t *testing.T, thinking string) string {
 		body := `{"upstream":"http://x","routes":[{"pattern":"m*","url":"http://y","thinking":"` + thinking + `"}]}`
@@ -985,7 +985,7 @@ func TestLoadConfigThinkingValidation(t *testing.T) {
 	}
 }
 
-// TestMatchModel 验证模型名 * 通配匹配（前后中 *、多 *、精确）。
+// TestMatchModel verifies model-name * wildcard matching (leading/trailing/middle *, multiple *, exact).
 func TestMatchModel(t *testing.T) {
 	cases := []struct {
 		pattern, name string
@@ -1000,7 +1000,7 @@ func TestMatchModel(t *testing.T) {
 		{"claude-*", "glm-5.2", false},
 		{"a*b*c", "axxxbyyyc", true},
 		{"a*b*c", "abc", true},
-		{"a*b*c", "ac", false}, // 中间段 b 必须出现
+		{"a*b*c", "ac", false}, // The middle segment b must appear
 		{"*", "anything", true},
 		{"exact", "exact", true},
 		{"exact", "exact2", false},
@@ -1012,7 +1012,7 @@ func TestMatchModel(t *testing.T) {
 	}
 }
 
-// TestReplaceModelValue 验证替换 model 字段值，长度变化且 JSON 仍合法；无 model 字段原样返回。
+// TestReplaceModelValue verifies replacing the model field value, with length change and still-legal JSON; no model field returns as-is.
 func TestReplaceModelValue(t *testing.T) {
 	out := replaceModelValue([]byte(`{"model":"a","x":1}`), "bb")
 	if got := extractModel(out); got != "bb" {
@@ -1028,7 +1028,7 @@ func TestReplaceModelValue(t *testing.T) {
 	}
 }
 
-// TestRouteHandler 端到端：命中路由规则的请求改走目标上游，model 与 Authorization 被替换，默认上游不被命中。
+// TestRouteHandler end-to-end: requests matching a route rule go to the target upstream with model and Authorization replaced; the default upstream is not hit.
 func TestRouteHandler(t *testing.T) {
 	resetStats()
 	var rg struct {
@@ -1096,8 +1096,8 @@ func TestRouteHandler(t *testing.T) {
 	}
 }
 
-// TestReservedRoutePattern 验证保留名规则：pattern 全字撞保留名（"Fallback"=Codex 菜单 * 兜底、
-// "fast_route"=fast 通道）的路由不生效——撞名请求由后面的合法路由接；Fall* 之类通配不受影响。
+// TestReservedRoutePattern verifies reserved-name rules: routes whose pattern exactly equals a reserved name ("Fallback"=Codex menu * catch-all,
+// "fast_route"=fast lane) don't take effect — colliding requests are caught by later legal routes; wildcards like Fall* are unaffected.
 func TestReservedRoutePattern(t *testing.T) {
 	resetStats()
 	var mu sync.Mutex
@@ -1111,10 +1111,10 @@ func TestReservedRoutePattern(t *testing.T) {
 			fmt.Fprint(w, "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"output_tokens\":1}}}\n\ndata: [DONE]\n\n")
 		}))
 	}
-	srvFB := mk("fb")     // pattern 全字 Fallback（保留名，不生效）
-	srvFR := mk("fr")     // pattern 全字 fast_route（保留名，不生效）
-	srvWild := mk("wild") // Fall* 合法通配
-	srvAll := mk("all")   // * 兜底
+	srvFB := mk("fb")     // pattern exactly Fallback (reserved name, ineffective)
+	srvFR := mk("fr")     // pattern exactly fast_route (reserved name, ineffective)
+	srvWild := mk("wild") // Fall* legal wildcard
+	srvAll := mk("all")   // * catch-all
 	defer srvFB.Close()
 	defer srvFR.Close()
 	defer srvWild.Close()
@@ -1161,20 +1161,20 @@ func TestReservedRoutePattern(t *testing.T) {
 		}
 	}
 
-	// 跳过保留名路由，由 Fall* 通配接
+	// The reserved-name route is skipped; the Fall* wildcard catches it
 	post("Fallback")
 	check("Fallback", map[string]bool{"wild": true})
 
-	// 保留名路由不生效（请求无 speed 字段，fast 分支不触发），由 * 兜底接
+	// The reserved-name route is ineffective (the request has no speed field, so the fast branch doesn't trigger); the * catch-all catches it
 	post("fast_route")
 	check("fast_route", map[string]bool{"all": true})
 
-	// 保留名 pattern 不当通配用，* 兜底接
+	// Reserved-name patterns don't act as wildcards; the * catch-all catches it
 	post("claude-x")
 	check("claude-x", map[string]bool{"all": true})
 }
 
-// TestNoRouteFallback 端到端：未配置 routes 时走默认上游，model 不改、客户端 token 透传。
+// TestNoRouteFallback end-to-end: without routes configured, requests go to the default upstream with model unchanged and client token passed through.
 func TestNoRouteFallback(t *testing.T) {
 	resetStats()
 	var g struct {
@@ -1201,7 +1201,7 @@ func TestNoRouteFallback(t *testing.T) {
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		// 不设 Routes：走默认上游、透传客户端 token
+		// No Routes set: default upstream, client token passed through
 	})
 	stats.resetSampleCap(5)
 
@@ -1231,8 +1231,8 @@ func TestNoRouteFallback(t *testing.T) {
 	}
 }
 
-// TestClassifierRouteHit 端到端：命中分类器请求且配了 classifier_route 时，
-// 无视原 model 统一路由到分类器目标，且优先于 model 路由（model 路由目标不应被命中）。
+// TestClassifierRouteHit end-to-end: when a request matches the classifier and classifier_route is configured,
+// it routes to the classifier target regardless of the original model, taking priority over model routing (the model-route target must not be hit).
 func TestClassifierRouteHit(t *testing.T) {
 	resetStats()
 	var cg struct {
@@ -1241,7 +1241,7 @@ func TestClassifierRouteHit(t *testing.T) {
 		auth   string
 		called bool
 	}
-	// 分类器路由目标
+	// Classifier route target
 	clfMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		cg.mu.Lock()
@@ -1255,7 +1255,7 @@ func TestClassifierRouteHit(t *testing.T) {
 	}))
 	defer clfMock.Close()
 
-	// model 路由目标（不应命中：分类器路由优先）
+	// Model route target (must not be hit: classifier route takes priority)
 	modelRouteCalled := false
 	modelRouteMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		modelRouteCalled = true
@@ -1291,7 +1291,7 @@ func TestClassifierRouteHit(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
 
-	// 分类器请求：system 前缀匹配，原 model 是 claude-opus-4-8（本应命中 model 路由，但分类器路由优先）
+	// Classifier request: system prefix matches; the original model is claude-opus-4-8 (would have hit the model route, but classifier route takes priority)
 	resp, err := http.Post(proxy.URL+"/v1/messages", "application/json",
 		strings.NewReader(`{"model":"claude-opus-4-8","system":"You are a security monitor. Check this.","messages":[]}`))
 	if err != nil {
@@ -1319,8 +1319,8 @@ func TestClassifierRouteHit(t *testing.T) {
 	}
 }
 
-// TestClassifierRouteFallback 端到端：命中分类器但未配 classifier_route 时，
-// 仍按原 model 走 routes（兼容旧行为，不因新功能而改变）。
+// TestClassifierRouteFallback end-to-end: when the classifier matches but no classifier_route is configured,
+// it still follows the original model's routes (backwards compatible, unchanged by the new feature).
 func TestClassifierRouteFallback(t *testing.T) {
 	resetStats()
 	var mg struct {
@@ -1353,7 +1353,7 @@ func TestClassifierRouteFallback(t *testing.T) {
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		// ClassifierRoute 故意不设：分类器请求应回退到 model 路由
+		// ClassifierRoute deliberately unset: classifier requests should fall back to model routing
 		Routes: []RouteRule{
 			{Pattern: "claude-opus*", URL: modelMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
@@ -1384,8 +1384,8 @@ func TestClassifierRouteFallback(t *testing.T) {
 	}
 }
 
-// TestClassifierRouteNotClassifier 端到端：非分类器请求即使配了 classifier_route 也不走分类器路由，
-// 仍按 model 路由走。
+// TestClassifierRouteNotClassifier end-to-end: a non-classifier request doesn't take the classifier route even with classifier_route configured,
+// still following model routing.
 func TestClassifierRouteNotClassifier(t *testing.T) {
 	resetStats()
 	clfCalled := false
@@ -1440,7 +1440,7 @@ func TestClassifierRouteNotClassifier(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
 
-	// 普通请求：system 不含分类器前缀，应按 model 路由走，不触发分类器路由
+	// Ordinary request: system lacks the classifier prefix; should follow model routing, not trigger the classifier route
 	resp, err := http.Post(proxy.URL+"/v1/messages", "application/json",
 		strings.NewReader(`{"model":"claude-opus-4-8","system":"You are a helpful assistant.","messages":[]}`))
 	if err != nil {
@@ -1465,8 +1465,8 @@ func TestClassifierRouteNotClassifier(t *testing.T) {
 	}
 }
 
-// TestFastRouteHit 端到端：fast 请求（含 "speed":"fast" 的非分类器请求）命中 fast_route，
-// speed 字段移除、Anthropic-Beta 头删除、model 路由不应命中、响应含 fast 限流 headers。
+// TestFastRouteHit end-to-end: a fast request (non-classifier request containing "speed":"fast") hits fast_route,
+// the speed field is removed, the Anthropic-Beta header deleted, the model route must not be hit, and the response carries fast rate-limit headers.
 func TestFastRouteHit(t *testing.T) {
 	resetStats()
 	var cg struct {
@@ -1566,8 +1566,8 @@ func TestFastRouteHit(t *testing.T) {
 	}
 }
 
-// TestFastRouteNotConfigured 端到端：fast 请求但未配 fast_route 时，
-// 仍按原 model 走 routes（向后兼容），speed 字段原样透传。
+// TestFastRouteNotConfigured end-to-end: a fast request without fast_route configured
+// still follows the original model's routes (backwards compatible), the speed field passing through unchanged.
 func TestFastRouteNotConfigured(t *testing.T) {
 	resetStats()
 	var mg struct {
@@ -1624,8 +1624,8 @@ func TestFastRouteNotConfigured(t *testing.T) {
 	}
 }
 
-// TestFastRouteClassifierPriority 端到端：分类器请求（system 前缀匹配）即使含 "speed":"fast"，
-// 也不走 fast 路由（分类器路由优先）。
+// TestFastRouteClassifierPriority end-to-end: a classifier request (system prefix match) doesn't take the fast route
+// even with "speed":"fast" present (classifier route takes priority).
 func TestFastRouteClassifierPriority(t *testing.T) {
 	resetStats()
 	clfCalled := false
@@ -1682,8 +1682,8 @@ func TestFastRouteClassifierPriority(t *testing.T) {
 	}
 }
 
-// TestFastRouteHeaderOnly header-only 触发：只有 Anthropic-Beta 头（无 "speed":"fast" body 字段），
-// 模拟 Claude Code /fast off 后的残留 header。验证 fast 路由不应命中。
+// TestFastRouteHeaderOnly header-only trigger: only the Anthropic-Beta header (no "speed":"fast" body field),
+// simulating the leftover header after Claude Code /fast off. Verifies the fast route must not be hit.
 func TestFastRouteHeaderOnly(t *testing.T) {
 	resetStats()
 	fastCalled := false
@@ -1723,7 +1723,7 @@ func TestFastRouteHeaderOnly(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
 
-	// body 不带 "speed":"fast"，只靠请求头 Anthropic-Beta 不应触发 fast 路由
+	// The body has no "speed":"fast"; the Anthropic-Beta request header alone must not trigger the fast route
 	req, _ := http.NewRequest("POST", proxy.URL+"/v1/messages",
 		strings.NewReader(`{"model":"claude-sonnet-5","messages":[]}`))
 	req.Header.Set("Anthropic-Beta", "fast-mode-2026-02-01")
@@ -1742,7 +1742,7 @@ func TestFastRouteHeaderOnly(t *testing.T) {
 	}
 }
 
-// TestFastRouteBodyWhitespace 验证 "speed": "fast" 带空格、且字段不在首位时仍能命中并正确移除。
+// TestFastRouteBodyWhitespace verifies "speed": "fast" with whitespace, not in first position, still hits and is correctly removed.
 func TestFastRouteBodyWhitespace(t *testing.T) {
 	resetStats()
 	var cg struct {
@@ -1780,7 +1780,7 @@ func TestFastRouteBodyWhitespace(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
 
-	// speed 字段带空格且不在首位
+	// speed field with whitespace and not in first position
 	resp, err := http.Post(proxy.URL+"/v1/messages", "application/json",
 		strings.NewReader(`{"model":"claude-sonnet-5", "speed": "fast", "messages":[]}`))
 	if err != nil {
@@ -1802,7 +1802,7 @@ func TestFastRouteBodyWhitespace(t *testing.T) {
 	}
 }
 
-// TestHasImage 单测 hasImage：含图片块为 true，纯文本为 false。
+// TestHasImage unit-tests hasImage: true with an image block, false for pure text.
 func TestHasImage(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1822,8 +1822,8 @@ func TestHasImage(t *testing.T) {
 	}
 }
 
-// TestImageFallbackRoute 端到端：含图片 + text_only 模型 + 配了 multimodal_fallback，
-// 应改走兜底上游，model 改成 fallback.model，原 route 上游不应被命中。
+// TestImageFallbackRoute end-to-end: image + text_only model + multimodal_fallback configured
+// should switch to the fallback upstream, model changed to fallback.model, and the original route upstream must not be hit.
 func TestImageFallbackRoute(t *testing.T) {
 	resetStats()
 	var fg struct {
@@ -1868,7 +1868,7 @@ func TestImageFallbackRoute(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
 
-	// 含图片块
+	// Contains an image block
 	resp, err := http.Post(proxy.URL+"/v1/messages", "application/json",
 		strings.NewReader(`{"model":"claude-opus-4-8","messages":[{"role":"user","content":[{"type":"text","text":"看图"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}]}]}`))
 	if err != nil {
@@ -1893,8 +1893,8 @@ func TestImageFallbackRoute(t *testing.T) {
 	}
 }
 
-// TestImageFallbackNoImage 端到端：无图片 + text_only 模型 + 配了 fallback，
-// 应走原 route 上游（兜底不触发）。
+// TestImageFallbackNoImage end-to-end: no image + text_only model + fallback configured
+// should go to the original route upstream (fallback not triggered).
 func TestImageFallbackNoImage(t *testing.T) {
 	resetStats()
 	var rg struct {
@@ -1937,7 +1937,7 @@ func TestImageFallbackNoImage(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
 
-	// 纯文本请求
+	// Pure-text request
 	resp, err := http.Post(proxy.URL+"/v1/messages", "application/json",
 		strings.NewReader(`{"model":"claude-opus-4-8","messages":[{"role":"user","content":"hi"}]}`))
 	if err != nil {
@@ -1959,8 +1959,8 @@ func TestImageFallbackNoImage(t *testing.T) {
 	}
 }
 
-// TestImageFallbackNotTextOnly 端到端：含图片 + 非 text_only 模型 + 配了 fallback，
-// 应走原 route 上游（目标模型自己支持多模态，不兜底）。
+// TestImageFallbackNotTextOnly end-to-end: image + non-text_only model + fallback configured
+// should go to the original route upstream (the target model supports multimodal itself; no fallback).
 func TestImageFallbackNotTextOnly(t *testing.T) {
 	resetStats()
 	var rg struct {
@@ -2018,8 +2018,8 @@ func TestImageFallbackNotTextOnly(t *testing.T) {
 	}
 }
 
-// TestImageFallbackNotConfigured 端到端：含图片 + text_only 模型 + 未配 fallback，
-// 降级走原 route 上游（由上游自行处理图片，可能报错，但代理不应崩）。
+// TestImageFallbackNotConfigured end-to-end: image + text_only model + no fallback configured
+// degrades to the original route upstream (the upstream handles the image itself, may error, but the proxy must not crash).
 func TestImageFallbackNotConfigured(t *testing.T) {
 	resetStats()
 	var rg struct {
@@ -2044,7 +2044,7 @@ func TestImageFallbackNotConfigured(t *testing.T) {
 		Routes: []RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "deepseek-V4-pro", TextOnly: true},
 		},
-		// 不配 MultimodalFallback
+		// MultimodalFallback not configured
 	})
 	stats.resetSampleCap(5)
 
@@ -2066,7 +2066,7 @@ func TestImageFallbackNotConfigured(t *testing.T) {
 	}
 }
 
-// TestHasWebSearch 单测 hasWebSearch：server-side web_search 与 client-side WebSearch 都识别，纯文本为 false。
+// TestHasWebSearch unit-tests hasWebSearch: both server-side web_search and client-side WebSearch are recognized; pure text is false.
 func TestHasWebSearch(t *testing.T) {
 	cases := []struct {
 		name string
@@ -2074,7 +2074,7 @@ func TestHasWebSearch(t *testing.T) {
 		want bool
 	}{
 		{"server-side web_search", `{"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":5}]}`, true},
-		{"client-side WebSearch", `{"tools":[{"name":"WebSearch","description":"x","input_schema":{}}]}`, false}, // client-side 工具定义不识别（每个 Code 请求都带，会误判）
+		{"client-side WebSearch", `{"tools":[{"name":"WebSearch","description":"x","input_schema":{}}]}`, false}, // Client-side tool definitions are not recognized (every Code request carries them; would false-positive)
 		{"纯文本无工具", `{"messages":[{"role":"user","content":"hi"}]}`, false},
 		{"普通工具非搜索", `{"tools":[{"name":"computer","input_schema":{}}]}`, false},
 		{"空body", ``, false},
@@ -2086,8 +2086,8 @@ func TestHasWebSearch(t *testing.T) {
 	}
 }
 
-// TestSearchFallbackRoute 端到端：纯搜索请求 + no_search 模型 + 配了 search_fallback，
-// 应改走搜索兜底上游，model 改成 sf.model，原 route 上游不应被命中。
+// TestSearchFallbackRoute end-to-end: pure search request + no_search model + search_fallback configured
+// should switch to the search-fallback upstream, model changed to sf.model, and the original route upstream must not be hit.
 func TestSearchFallbackRoute(t *testing.T) {
 	resetStats()
 	var fg struct {
@@ -2156,8 +2156,8 @@ func TestSearchFallbackRoute(t *testing.T) {
 	}
 }
 
-// TestSearchFallbackNoSearch 端到端：无搜索工具 + no_search 模型 + 配了 sf，
-// 应走原 route 上游（搜索兜底不触发）。
+// TestSearchFallbackNoSearch end-to-end: no search tool + no_search model + sf configured
+// should go to the original route upstream (search fallback not triggered).
 func TestSearchFallbackNoSearch(t *testing.T) {
 	resetStats()
 	var rg struct {
@@ -2221,8 +2221,8 @@ func TestSearchFallbackNoSearch(t *testing.T) {
 	}
 }
 
-// TestSearchFallbackNotNoSearch 端到端：带搜索 + 非 no_search 模型 + 配了 sf，
-// 应走原 route 上游（目标模型自己支持搜索，不兜底）。
+// TestSearchFallbackNotNoSearch end-to-end: with search + non-no_search model + sf configured
+// should go to the original route upstream (the target model supports search itself; no fallback).
 func TestSearchFallbackNotNoSearch(t *testing.T) {
 	resetStats()
 	var rg struct {
@@ -2280,8 +2280,8 @@ func TestSearchFallbackNotNoSearch(t *testing.T) {
 	}
 }
 
-// TestEnhanceSearchRoute 端到端：route.EnhanceSearch 非 nil + 带搜索工具 + no_search:false，
-// 应走增强搜索（searchAndRespond 用 route 的 url/api/model），不调主力默认 upstream。
+// TestEnhanceSearchRoute end-to-end: route.EnhanceSearch non-nil + search tool present + no_search:false
+// should take enhanced search (searchAndRespond uses the route's url/api/model), not calling the main default upstream.
 func TestEnhanceSearchRoute(t *testing.T) {
 	resetStats()
 	var rg struct {
@@ -2298,7 +2298,7 @@ func TestEnhanceSearchRoute(t *testing.T) {
 		_ = json.Unmarshal(body, &m)
 		stream, _ := m["stream"].(bool)
 		if !stream {
-			// step1：非流式 JSON，返回 server_tool_use + web_search_tool_result。
+			// step1: non-streaming JSON returning server_tool_use + web_search_tool_result.
 			resp := map[string]any{
 				"id":          "msg_step1",
 				"model":       "deepseek-V4-pro",
@@ -2315,7 +2315,7 @@ func TestEnhanceSearchRoute(t *testing.T) {
 			w.Write(b)
 			return
 		}
-		// step2：流式摘要。
+		// step2: streaming summary.
 		w.Header().Set("content-type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", `{"type":"message_start","message":{"model":"deepseek-V4-pro"}}`)
@@ -2368,7 +2368,7 @@ func TestEnhanceSearchRoute(t *testing.T) {
 	}
 }
 
-// TestSearchFallbackWithImage 端到端：带图搜索请求一律走 search_fallback（不管是否含图片），multimodal_fallback 不应被命中。
+// TestSearchFallbackWithImage end-to-end: search requests with images always take search_fallback (image or not), multimodal_fallback must not be hit.
 func TestSearchFallbackWithImage(t *testing.T) {
 	resetStats()
 	var mg struct {
@@ -2413,14 +2413,14 @@ func TestSearchFallbackWithImage(t *testing.T) {
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "ark-opus", TextOnly: true, NoSearch: true},
 		},
 		SearchFallback:     &SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
-		MultimodalFallback: &MultimodalRoute{URL: mfMock.URL, API: "sk-mf-xxx", Model: "kimi-vl"}, // NoSearch 默认 false，支持搜索
+		MultimodalFallback: &MultimodalRoute{URL: mfMock.URL, API: "sk-mf-xxx", Model: "kimi-vl"}, // NoSearch defaults to false; search supported
 	})
 	stats.resetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
 
-	// 同时带图片和搜索工具
+	// Carries both an image and a search tool
 	resp, err := http.Post(proxy.URL+"/v1/messages", "application/json",
 		strings.NewReader(`{"model":"claude-opus-4-8","tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":[{"type":"text","text":"搜图里的"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}]}]}`))
 	if err != nil {
@@ -2442,7 +2442,7 @@ func TestSearchFallbackWithImage(t *testing.T) {
 	}
 }
 
-// TestSearchFallbackWithImageSfSupports 端到端：带图搜索走 search_fallback（mf 不命中）。
+// TestSearchFallbackWithImageSfSupports end-to-end: image search takes search_fallback (mf not hit).
 func TestSearchFallbackWithImageSfSupports(t *testing.T) {
 	resetStats()
 	var fg struct {
@@ -2507,8 +2507,8 @@ func TestSearchFallbackWithImageSfSupports(t *testing.T) {
 	}
 }
 
-// TestSearchFallbackNotConfigured 端到端：带搜索 + no_search + sf/mf 都没配，
-// 降级走原 route 上游。
+// TestSearchFallbackNotConfigured end-to-end: with search + no_search + neither sf/mf configured,
+// degrades to the original route upstream.
 func TestSearchFallbackNotConfigured(t *testing.T) {
 	resetStats()
 	var rg struct {
@@ -2533,7 +2533,7 @@ func TestSearchFallbackNotConfigured(t *testing.T) {
 		Routes: []RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "ark-opus", NoSearch: true},
 		},
-		// 不配 SearchFallback / MultimodalFallback
+		// Neither SearchFallback nor MultimodalFallback configured
 	})
 	stats.resetSampleCap(5)
 
@@ -2555,8 +2555,8 @@ func TestSearchFallbackNotConfigured(t *testing.T) {
 	}
 }
 
-// TestRetryPingKeepalive 端到端：上游前 2 次 429、第 3 次 200。
-// 代理应在重试期间发 SSE ping 保活，且最终透传 200 的 message_start 流。
+// TestRetryPingKeepalive end-to-end: upstream 429s twice, then 200 on the third.
+// The proxy should send SSE pings during retries and finally pass through the 200 message_start stream.
 func TestRetryPingKeepalive(t *testing.T) {
 	resetStats()
 	var mu sync.Mutex
@@ -2611,8 +2611,8 @@ func TestRetryPingKeepalive(t *testing.T) {
 	}
 }
 
-// TestRetryBackoffCancellable 端到端：上游持续 429 + 长 backoff，
-// 客户端中途取消请求，代理应通过 sleepWithPing 的 ctx.Done 快速停止，不睡满 backoff。
+// TestRetryBackoffCancellable end-to-end: persistent upstream 429 + long backoff,
+// client cancels midway; the proxy should stop fast via sleepWithPing's ctx.Done, not sleep the full backoff.
 func TestRetryBackoffCancellable(t *testing.T) {
 	resetStats()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2624,7 +2624,7 @@ func TestRetryBackoffCancellable(t *testing.T) {
 		Upstream:           mock.URL,
 		RetryStatusCodes:   []int{429, 500, 502, 503, 504},
 		MaxRetries:         50,
-		BaseDelaySec:       10, // 长 backoff，确保不靠它结束
+		BaseDelaySec:       10, // Long backoff, to ensure it doesn't end via that
 		MaxDelaySec:        20,
 		TotalBudgetSec:     120,
 		PingIntervalSec:    1,
@@ -2651,14 +2651,14 @@ func TestRetryBackoffCancellable(t *testing.T) {
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}
-	// 客户端取消后，sleepWithPing 应立即检测到 ctx.Done 返回；不应睡满 10s backoff。
+	// After the client cancels, sleepWithPing should immediately detect ctx.Done and return; it must not sleep the full 10s backoff.
 	if elapsed > 2*time.Second {
 		t.Errorf("客户端取消后代理耗时 %v，应快速停止(<2s)", elapsed)
 	}
 }
 
-// TestRetryExhaustedSSEError 端到端：上游持续 429、重试用尽。
-// 首次重试已发 200 保活头，用尽时无法透传 429，应改发 SSE error(overloaded_error)。
+// TestRetryExhaustedSSEError end-to-end: persistent upstream 429, retries exhausted.
+// The first retry already sent 200 keepalive headers, so the 429 can't be passed through; an SSE error (overloaded_error) is sent instead.
 func TestRetryExhaustedSSEError(t *testing.T) {
 	resetStats()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2689,7 +2689,7 @@ func TestRetryExhaustedSSEError(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	// 已发 200 保活头，用尽时改发 SSE error，不应是 429。
+	// 200 keepalive headers already sent; an SSE error is sent at exhaustion instead of 429.
 	if resp.StatusCode != 200 {
 		t.Errorf("状态码 = %d, want 200(已发保活头)", resp.StatusCode)
 	}
@@ -2702,9 +2702,9 @@ func TestRetryExhaustedSSEError(t *testing.T) {
 	}
 }
 
-// TestWriteSSEErrorGaveUp：重试用尽兜底 writeSSEError 置 flight.gaveUp，
-// 完成流状态码列据此显 [重试尽]；Anthropic 口发 overloaded_error，
-// Responses 原生透传口发 response.failed。
+// TestWriteSSEErrorGaveUp: the retry-exhaustion fallback writeSSEError sets flight.gaveUp,
+// which the finished-stream status column shows as [重试尽]; the Anthropic port sends overloaded_error,
+// the Responses native passthrough port sends response.failed.
 func TestWriteSSEErrorGaveUp(t *testing.T) {
 	f := &flight{}
 	rec := httptest.NewRecorder()

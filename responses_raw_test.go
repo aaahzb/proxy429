@@ -1,8 +1,8 @@
 package main
 
-// responses_raw_test.go — url_response_api 原生透传（Responses 口命中带该字段的路由时不翻译、
-// 原文透传到原生 Responses 上游）的测试：路由预检、URL 拼接、Responses 口径统计解析、
-// 保活/错误事件的协议形状，以及端到端透传。
+// responses_raw_test.go — tests for url_response_api native passthrough (when the Responses port hits a route with this field,
+// the original body passes through untranslated to a native Responses upstream): route precheck, URL joining,
+// Responses-side stats parsing, keepalive/error event protocol shapes, and end-to-end passthrough.
 
 import (
 	"context"
@@ -14,8 +14,8 @@ import (
 	"testing"
 )
 
-// TestResponsesAPIPath 验证透传 URL 拼接：base 填到 …/coding、带 /v1、或完整 …/v1/responses
-// 都只补差额不双拼；尾斜杠容错。
+// TestResponsesAPIPath verifies passthrough URL joining: a base filled to …/coding, carrying /v1, or a full …/v1/responses
+// each only gets the missing suffix (no double-joining); trailing slashes tolerated.
 func TestResponsesAPIPath(t *testing.T) {
 	cases := []struct{ base, want string }{
 		{"https://api.kimi.com/coding", "/v1/responses"},
@@ -31,12 +31,12 @@ func TestResponsesAPIPath(t *testing.T) {
 	}
 }
 
-// TestMatchPassthroughResponsesRoute 验证透传预检：命中带 url_response_api 的路由才透传；
-// 保留名（Fallback/fast_route）跳过；routes 有序首个命中生效。
+// TestMatchPassthroughResponsesRoute verifies the passthrough precheck: only a route hit carrying url_response_api passes through;
+// reserved names (Fallback/fast_route) are skipped; routes are ordered, first hit wins.
 func TestMatchPassthroughResponsesRoute(t *testing.T) {
 	c := &Config{Routes: []RouteRule{
-		{Pattern: "fast_route", URLResponseAPI: "https://x.example.com"}, // 保留名，必须跳过
-		{Pattern: "k3*", URL: "https://a.example.com"},                   // 无 url_response_api，不透传
+		{Pattern: "fast_route", URLResponseAPI: "https://x.example.com"}, // Reserved name, must be skipped
+		{Pattern: "k3*", URL: "https://a.example.com"},                   // No url_response_api, no passthrough
 		{Pattern: "k3-256k", URL: "https://b.example.com", URLResponseAPI: "https://b.example.com/coding"},
 	}}
 	if got := matchPassthroughResponsesRoute(c, "fast_route"); got != nil {
@@ -52,7 +52,7 @@ func TestMatchPassthroughResponsesRoute(t *testing.T) {
 	if got := matchPassthroughResponsesRoute(c, ""); got != nil {
 		t.Errorf("空 model 不应命中, got %+v", got)
 	}
-	// 顺序：宽通配在前且带透传字段时截胡窄通配（与 handler 路由循环同规则）。
+	// Ordering: a wide wildcard listed first with the passthrough field intercepts a narrower wildcard (same rule as the handler's route loop).
 	c2 := &Config{Routes: []RouteRule{
 		{Pattern: "k3*", URLResponseAPI: "https://wide.example.com"},
 		{Pattern: "k3-256k", URLResponseAPI: "https://narrow.example.com"},
@@ -62,22 +62,22 @@ func TestMatchPassthroughResponsesRoute(t *testing.T) {
 	}
 }
 
-// TestParseResponsesStreamStats 验证 Responses SSE 的 usage 解析：
-// 只在终局事件出现一次；input_tokens 含缓存总量需拆 fresh=input-cached；负值归零；
-// response.created 等无 usage 事件不计数；终局到达置 sawDeltaUsage。
+// TestParseResponsesStreamStats verifies Responses SSE usage parsing:
+// usage appears once, only in the terminal event; input_tokens includes the cached total and must split fresh=input-cached; negatives clamp to zero;
+// usage-less events like response.created don't count; terminal arrival sets sawDeltaUsage.
 func TestParseResponsesStreamStats(t *testing.T) {
 	resetStats()
 	var last, lastIn, lastCR, lastCC int64
 	var saw bool
 
-	// 非终局事件（无 usage）：忽略，saw 不置位。
+	// Non-terminal event (no usage): ignored, saw not set.
 	parseResponsesStreamStats([]byte(`data: {"type":"response.created","response":{"id":"r1","status":"in_progress"}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
 	parseResponsesStreamStats([]byte(`data: {"type":"response.output_text.delta","delta":"hi"}`), &last, &lastIn, &lastCR, &lastCC, &saw)
 	if stats.inputTokens != 0 || stats.outputTokens != 0 || saw {
 		t.Fatalf("非终局事件不应计数/置位: in=%d out=%d saw=%v", stats.inputTokens, stats.outputTokens, saw)
 	}
 
-	// 终局 response.completed：input 110 含缓存 100 → fresh=10, cr=100, out=7。
+	// Terminal response.completed: input 110 including cached 100 → fresh=10, cr=100, out=7.
 	parseResponsesStreamStats([]byte(`data: {"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":110,"input_tokens_details":{"cached_tokens":100},"output_tokens":7,"total_tokens":117}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
 	if !saw {
 		t.Error("终局 usage 到达应置 sawDeltaUsage")
@@ -89,9 +89,9 @@ func TestParseResponsesStreamStats(t *testing.T) {
 		t.Errorf("追踪器: lastIn=%d lastCR=%d last=%d", lastIn, lastCR, last)
 	}
 
-	// response.incomplete 也认（max_tokens 截断）；缓存超过 input 的异常口径 fresh 归零而不是加成负。
-	// 同一组追踪器再喂一个终局事件，同时验证"后值覆盖前值"：本事件 fresh=0（50-80<0 钳位）、
-	// cr=80——全局 in 10→0、cr 100→80。
+	// response.incomplete also counts (max_tokens truncation); the abnormal case of cache exceeding input clamps fresh to zero instead of going negative.
+	// The same trackers get a second terminal event, also verifying "later overwrites earlier": this event has fresh=0 (50-80<0 clamped),
+	// cr=80 — global in 10→0, cr 100→80.
 	parseResponsesStreamStats([]byte(`data: {"type":"response.incomplete","response":{"id":"r2","status":"incomplete","usage":{"input_tokens":50,"input_tokens_details":{"cached_tokens":80},"output_tokens":3}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
 	if stats.inputTokens != 0 {
 		t.Errorf("负 fresh 应归零: in=%d want 0（fresh 0 覆盖 10，全局加 -10）", stats.inputTokens)
@@ -101,15 +101,15 @@ func TestParseResponsesStreamStats(t *testing.T) {
 	}
 }
 
-// TestParseResponsesToolName 验证 Responses SSE 工具名提取：
-// output_item.added 的 function_call/custom_tool_call 取 name，web_search_call 固定 "web_search"。
+// TestParseResponsesToolName verifies Responses SSE tool-name extraction:
+// output_item.added of function_call/custom_tool_call yields the name; web_search_call is fixed "web_search".
 func TestParseResponsesToolName(t *testing.T) {
 	cases := []struct{ line, want string }{
 		{`data: {"type":"response.output_item.added","item":{"id":"fc1","type":"function_call","name":"exec_command","arguments":""}}`, "exec_command"},
 		{`data: {"type":"response.output_item.added","item":{"id":"c1","type":"custom_tool_call","name":"apply_patch"}}`, "apply_patch"},
 		{`data: {"type":"response.output_item.added","item":{"id":"ws1","type":"web_search_call","status":"in_progress"}}`, "web_search"},
 		{`data: {"type":"response.output_item.added","item":{"id":"m1","type":"message","content":[]}}`, ""},
-		{`data: {"type":"response.output_item.done","item":{"id":"fc1","type":"function_call","name":"exec_command"}}`, ""}, // done 不计数
+		{`data: {"type":"response.output_item.done","item":{"id":"fc1","type":"function_call","name":"exec_command"}}`, ""}, // done doesn't count
 		{`data: {"type":"response.output_text.delta","delta":"x"}`, ""},
 		{`event: response.completed`, ""},
 	}
@@ -120,23 +120,23 @@ func TestParseResponsesToolName(t *testing.T) {
 	}
 }
 
-// TestParseNonStreamUsageResponses 验证 Responses 非流式 usage 拆分（透传 stream:false 兜底）：
-// input_tokens_details 存在即 Responses 形状，input 拆 fresh+cached；
-// 且不会与 Anthropic 形状混淆（Anthropic 无 input_tokens_details）。
+// TestParseNonStreamUsageResponses verifies Responses non-streaming usage splitting (the passthrough stream:false fallback):
+// the presence of input_tokens_details marks the Responses shape, input splits fresh+cached;
+// and it can't be confused with the Anthropic shape (which has no input_tokens_details).
 func TestParseNonStreamUsageResponses(t *testing.T) {
 	in, cr, cc, out, ok := parseNonStreamUsage([]byte(`{"object":"response","usage":{"input_tokens":110,"input_tokens_details":{"cached_tokens":100},"output_tokens":7}}`))
 	if !ok || in != 10 || cr != 100 || cc != 0 || out != 7 {
 		t.Errorf("Responses 拆分: in=%d cr=%d cc=%d out=%d ok=%v, want 10/100/0/7/true", in, cr, cc, out, ok)
 	}
-	// Anthropic 形状仍走原分支（无 input_tokens_details）。
+	// The Anthropic shape still goes through the original branch (no input_tokens_details).
 	in, cr, cc, out, ok = parseNonStreamUsage([]byte(`{"usage":{"input_tokens":110,"cache_read_input_tokens":100,"cache_creation_input_tokens":2,"output_tokens":7}}`))
 	if !ok || in != 110 || cr != 100 || cc != 2 || out != 7 {
 		t.Errorf("Anthropic 分支: in=%d cr=%d cc=%d out=%d ok=%v, want 110/100/2/7/true", in, cr, cc, out, ok)
 	}
 }
 
-// TestWriteSSEPingRawShape 验证保活 ping 的协议分流：透传流写 SSE 注释行（客户端都忽略），
-// 翻译/Anthropic 流维持 Anthropic ping 事件。
+// TestWriteSSEPingRawShape verifies the keepalive ping's protocol split: a passthrough stream writes an SSE comment line (clients ignore it),
+// translated/Anthropic streams keep the Anthropic ping event.
 func TestWriteSSEPingRawShape(t *testing.T) {
 	rec := httptest.NewRecorder()
 	writeSSEPing(rec, nil, &flight{translated: translatedResponsesRaw})
@@ -150,7 +150,7 @@ func TestWriteSSEPingRawShape(t *testing.T) {
 	}
 }
 
-// TestWriteSSEErrorRawShape 验证重试用尽时的 SSE error 协议分流：透传流写 response.failed 事件。
+// TestWriteSSEErrorRawShape verifies the SSE error protocol split at retry exhaustion: a passthrough stream gets a response.failed event.
 func TestWriteSSEErrorRawShape(t *testing.T) {
 	rec := httptest.NewRecorder()
 	writeSSEError(rec, nil, "upstream status 429", &flight{translated: translatedResponsesRaw})
@@ -158,7 +158,7 @@ func TestWriteSSEErrorRawShape(t *testing.T) {
 	if !strings.HasPrefix(s, "event: response.failed\n") || !strings.Contains(s, `"type":"response.failed"`) || !strings.Contains(s, "upstream status 429") {
 		t.Errorf("透传流 error=%q, want response.failed 事件含消息", s)
 	}
-	// data 部分须是合法 JSON（含 response.error.message）。
+	// The data part must be legal JSON (containing response.error.message).
 	data := strings.TrimSpace(strings.TrimPrefix(s[strings.IndexByte(s, '\n')+1:], "data:"))
 	var ev map[string]interface{}
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
@@ -171,9 +171,9 @@ func TestWriteSSEErrorRawShape(t *testing.T) {
 	}
 }
 
-// responsesRawSSE 是假上游返回的 Responses SSE 流：function_call 工具调用 + 文本 + 终局 usage
-// （input 110 含缓存 100，output 7）。response.completed 里 model 是上游真实模型名，
-// 供管线回写成客户端原名。
+// responsesRawSSE is the Responses SSE stream the fake upstream returns: function_call tool call + text + terminal usage
+// (input 110 including cached 100, output 7). The model in response.completed is the upstream's real model name,
+// for the pipeline to write back as the client's original name.
 const responsesRawSSE = `event: response.created
 data: {"type":"response.created","response":{"id":"resp_1","object":"response","status":"in_progress","model":"k3-256k"}}
 
@@ -194,10 +194,10 @@ data: {"type":"response.completed","response":{"id":"resp_1","object":"response"
 
 `
 
-// TestResponsesRawPassthrough 端到端：Responses 口请求命中带 url_response_api 的路由 →
-// 原文透传（不翻译）到该字段指定的上游，model 改写、key 覆盖照常；客户端收到原样的
-// Responses SSE（model 回写客户端原名）；统计按 Responses 口径（缓存拆分）、工具计数、
-// 完成流归档带 "responses-raw" 标记。
+// TestResponsesRawPassthrough end-to-end: a Responses-port request hits a route with url_response_api →
+// the original body passes through (untranslated) to the upstream named by that field, with model rewrite and key override as usual; the client receives verbatim
+// Responses SSE (model written back to the client's original name); stats follow the Responses semantics (cache split), tools are counted,
+// and the finished archive carries the "responses-raw" flag.
 func TestResponsesRawPassthrough(t *testing.T) {
 	resetStats()
 	var gotPath, gotAuth string
@@ -213,7 +213,7 @@ func TestResponsesRawPassthrough(t *testing.T) {
 	defer mock.Close()
 
 	cfg.Store(&Config{
-		Upstream:       "http://default-upstream.invalid", // 透传路由命中后不应使用
+		Upstream:       "http://default-upstream.invalid", // Must not be used once the passthrough route hits
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
 		Routes: []RouteRule{
@@ -236,8 +236,8 @@ func TestResponsesRawPassthrough(t *testing.T) {
 		t.Fatalf("状态码 = %d（应 200），响应: %s", resp.StatusCode, body)
 	}
 
-	// 上游收到的应是 Responses 原文（仅 model 被路由改写）：没有翻译痕迹（无 messages/system 字段），
-	// stream 保持客户端原值（不像翻译口强制 true 后翻 Anthropic）。
+	// What the upstream receives should be the Responses original (only model rewritten by routing): no translation traces (no messages/system fields),
+	// stream keeps the client's value (unlike the translation port, which forces true and converts to Anthropic).
 	if gotPath != "/coding/v1/responses" {
 		t.Errorf("上游路径=%q, want /coding/v1/responses（base 补差额拼接）", gotPath)
 	}
@@ -258,7 +258,7 @@ func TestResponsesRawPassthrough(t *testing.T) {
 		t.Errorf("Responses 原文字段应原样透传: %s", gotBody)
 	}
 
-	// 客户端收到原样 Responses SSE；response.completed 里的 model 回写成客户端原名。
+	// The client receives verbatim Responses SSE; the model in response.completed is written back to the client's original name.
 	s := string(body)
 	if !strings.Contains(s, "response.completed") || !strings.Contains(s, "function_call_arguments.delta") {
 		t.Errorf("客户端应收到 Responses SSE 原文: %s", s)
@@ -267,7 +267,7 @@ func TestResponsesRawPassthrough(t *testing.T) {
 		t.Errorf("响应 model 应回写客户端原名 k3-coding: %s", s)
 	}
 
-	// 统计口径：input 110 拆成 fresh 10 + 缓存命中 100，output 7。
+	// Stats semantics: input 110 splits into fresh 10 + cached-hit 100, output 7.
 	stats.mu.Lock()
 	in, cr, out := stats.inputTokens, stats.cacheRead, stats.outputTokens
 	stats.mu.Unlock()
@@ -275,7 +275,7 @@ func TestResponsesRawPassthrough(t *testing.T) {
 		t.Errorf("聚合统计 in=%d cr=%d out=%d, want 10/100/7", in, cr, out)
 	}
 
-	// 完成流归档：responses-raw 标记、token 拆分、工具标签、delivered（记 200 而非 499）。
+	// Finished archive: responses-raw flag, token split, tool tags, delivered (recorded as 200, not 499).
 	finishedMu.Lock()
 	if len(finished) == 0 {
 		finishedMu.Unlock()
@@ -297,8 +297,8 @@ func TestResponsesRawPassthrough(t *testing.T) {
 	}
 }
 
-// TestResponsesRawPassthroughNonStream 透传 + 客户端 stream:false：上游回非流式 response JSON，
-// 统计走 parseNonStreamUsage 的 Responses 分支。
+// TestResponsesRawPassthroughNonStream passthrough + client stream:false: the upstream returns a non-streaming response JSON,
+// stats go through parseNonStreamUsage's Responses branch.
 func TestResponsesRawPassthroughNonStream(t *testing.T) {
 	resetStats()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -340,16 +340,16 @@ func TestResponsesRawPassthroughNonStream(t *testing.T) {
 	}
 }
 
-// TestResponsesRawRouteLost 配置热重载 race：预检时路由带 url_response_api，
-// 到 handler 路由循环时字段没了——502 明说，不静默错路。
+// TestResponsesRawRouteLost config hot-reload race: at precheck the route had url_response_api,
+// but by the handler's route loop the field is gone — a clear 502, no silent misrouting.
 func TestResponsesRawRouteLost(t *testing.T) {
 	resetStats()
-	// 预检与路由循环读同一份 cfg，中途无法插入换配置；等价验证路径：
-	// 直接构造带 responses-raw 标记的内部请求打 handler，路由循环看到无字段的路由 → 502。
+	// Precheck and the route loop read the same cfg, so no config swap can slip in between; equivalent verification path:
+	// build an internal request carrying the responses-raw flag straight into the handler; the route loop sees a route without the field → 502.
 	cfg.Store(&Config{
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes:         []RouteRule{{Pattern: "k3*", URL: "http://a.invalid"}}, // 无 url_response_api
+		Routes:         []RouteRule{{Pattern: "k3*", URL: "http://a.invalid"}}, // No url_response_api
 	})
 	defer cfg.Store(&Config{})
 

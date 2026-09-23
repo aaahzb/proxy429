@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// detectSystemLang 读 macOS 当前用户的 AppleLocale（如 zh_CN / en_US），
-// zh 开头判中文，其余判英文；读不到回退英文。
+// detectSystemLang reads the current macOS user's AppleLocale (e.g. zh_CN / en_US):
+// a zh prefix means Chinese, anything else English; unreadable falls back to English.
 func detectSystemLang() string {
 	out, err := exec.Command("defaults", "read", "-g", "AppleLocale").Output()
 	if err != nil {

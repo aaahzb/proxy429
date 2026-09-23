@@ -94,11 +94,11 @@ built by AI agents, directed by someone who depends on them all day.
 
 ### Documentation
 
-Full design documentation (Chinese): [docs/DESIGN.md](docs/DESIGN.md) —
-retry semantics, routing, protocol translation, cache-preserving rewrites,
-observability. Also: [使用说明](docs/使用说明.md) ·
-[Windows 快速部署](docs/Windows快速部署说明.md) ·
-[开机自启](docs/开机自启设置说明.md)
+Full design documentation: [docs/DESIGN.md](docs/DESIGN.md) — retry
+semantics, routing, protocol translation, cache-preserving rewrites,
+observability. Also: [Usage guide](docs/usage.md) ·
+[Windows quickstart](docs/windows-quickstart.md) ·
+[Autostart setup](docs/autostart-setup.md)
 
 ### Acknowledgments
 
@@ -178,9 +178,9 @@ agent 写代码。我是量化基金经理，不是 Go 开发者——为 AI age
 ### 文档
 
 完整设计文档见 [docs/DESIGN.md](docs/DESIGN.md)（重试语义、路由、协议翻译、
-保缓存改写、可观测性）。另有 [使用说明](docs/使用说明.md) ·
-[Windows 快速部署](docs/Windows快速部署说明.md) ·
-[开机自启](docs/开机自启设置说明.md)
+保缓存改写、可观测性；英文撰写）。另有英文文档：[使用说明](docs/usage.md) ·
+[Windows 快速部署](docs/windows-quickstart.md) ·
+[开机自启](docs/autostart-setup.md)
 
 ### 致谢与协议
 

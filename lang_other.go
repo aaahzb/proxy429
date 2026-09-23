@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// detectSystemLang 依次看 LC_ALL / LC_MESSAGES / LANG 环境变量（如 zh_CN.UTF-8），
-// zh 开头判中文，其余判英文；都没有回退英文。
+// detectSystemLang checks LC_ALL / LC_MESSAGES / LANG in order (e.g. zh_CN.UTF-8):
+// a zh prefix means Chinese, anything else English; unset falls back to English.
 func detectSystemLang() string {
 	for _, key := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
 		if v := strings.TrimSpace(os.Getenv(key)); v != "" {

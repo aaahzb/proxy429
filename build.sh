@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# 构建代理。版本号注入 "git短hash-构建时分"（如 c639d56-1545）。
-# 跨平台：按宿主 GOOS 出对应产物到 release/：
-#   darwin  -> release/Proxy429.app（LSUIElement 菜单栏应用，无 Dock 图标）+ ad-hoc 签名
+# Build the proxy. Version stamp injected as "<git short hash>-<build HHMM>" (e.g. c639d56-1545).
+# Cross-platform: produces artifacts under release/ per host GOOS:
+#   darwin  -> release/Proxy429.app (LSUIElement menu-bar app, no Dock icon) + ad-hoc signature
 #   linux   -> release/proxy429
-#   windows -> release/proxy429.exe（GUI 子系统 -H=windowsgui，无控制台窗口）
-# 用法：bash build.sh
-# 托盘库 fyne.io/systray：darwin 走 cgo（AppKit，需 clang），linux/windows 纯 Go 免 C 编译器。
+#   windows -> release/proxy429.exe (GUI subsystem -H=windowsgui, no console window)
+# Usage: bash build.sh
+# Tray library fyne.io/systray: darwin goes through cgo (AppKit, needs clang); linux/windows are pure Go, no C compiler needed.
 set -e
 cd "$(dirname "$0")"
 
-# go 不在 PATH 时回落到 ~/go/bin（本机 go 装在此处）；仍找不到则报错退出。
+# Fall back to ~/go/bin when go isn't on PATH (this machine's go lives there); error out if still missing.
 if ! command -v go >/dev/null 2>&1; then
   if [ -x "$HOME/go/bin/go" ]; then export PATH="$HOME/go/bin:$PATH"; else
-    echo "错误：找不到 go，请先安装或加入 PATH" >&2; exit 1
+    echo "error: go not found; install it or add it to PATH first" >&2; exit 1
   fi
 fi
 export GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
@@ -22,7 +22,7 @@ TIME=$(date +%H%M)
 VERSION="$HASH-$TIME"
 mkdir -p release
 
-build_bin() {  # $1 = 输出路径 $2 = 额外 ldflags
+build_bin() {  # $1 = output path, $2 = extra ldflags
   go build -buildvcs=false -ldflags "-X main.Version=$VERSION $2" -o "$1" .
 }
 
@@ -52,26 +52,26 @@ case "$(go env GOOS)" in
 </dict>
 </plist>
 PLIST
-    # ad-hoc 签名：无开发者证书时的最佳选择；首次启动需在 Finder 右键「打开」过 Gatekeeper。
+    # ad-hoc signature: the best option without a developer certificate; first launch needs right-click -> Open in Finder to pass Gatekeeper.
     if codesign -s - --force --deep "$APP" >/dev/null 2>&1; then
-      echo "已 ad-hoc 签名（首次启动需右键->打开）"
+      echo "ad-hoc signed (first launch needs right-click -> Open)"
     else
-      echo "未签名（codesign 不可用，可手动 codesign -s - --force $APP）"
+      echo "unsigned (codesign unavailable; run manually: codesign -s - --force $APP)"
     fi
-    [ -f 使用说明.md ] && cp 使用说明.md release/ || true
-    echo "BUILD_OK 版本=$VERSION 平台=darwin/$(go env GOARCH) -> $APP"
+    [ -f docs/usage.md ] && cp docs/usage.md release/ || true
+    echo "BUILD_OK version=$VERSION platform=darwin/$(go env GOARCH) -> $APP"
     ;;
   linux)
     export CGO_ENABLED=0
     build_bin release/proxy429 ""
-    [ -f 使用说明.md ] && cp 使用说明.md release/ || true
-    echo "BUILD_OK 版本=$VERSION 平台=linux/$(go env GOARCH) -> release/proxy429"
+    [ -f docs/usage.md ] && cp docs/usage.md release/ || true
+    echo "BUILD_OK version=$VERSION platform=linux/$(go env GOARCH) -> release/proxy429"
     ;;
   windows)
     export CGO_ENABLED=0
-    # -H=windowsgui：GUI 子系统，启动不弹控制台窗口，纯托盘运行；日志看网页控制台或 log_file。
+    # -H=windowsgui: GUI subsystem, no console window on launch, pure tray operation; logs via the web console or log_file.
     build_bin release/proxy429.exe "-H=windowsgui"
-    [ -f 使用说明.md ] && cp 使用说明.md release/ || true
-    echo "BUILD_OK 版本=$VERSION 平台=windows/$(go env GOARCH) -> release/proxy429.exe"
+    [ -f docs/usage.md ] && cp docs/usage.md release/ || true
+    echo "BUILD_OK version=$VERSION platform=windows/$(go env GOARCH) -> release/proxy429.exe"
     ;;
 esac

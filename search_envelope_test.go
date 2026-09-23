@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// testSearchBlockPair 造一对真搜索块（server_tool_use 带 query + 结果块带 encrypted_content）。
+// testSearchBlockPair builds a pair of real search blocks (server_tool_use with query + result block with encrypted_content).
 func testSearchBlockPair() (map[string]interface{}, map[string]interface{}) {
 	use := map[string]interface{}{
 		"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
@@ -28,8 +28,8 @@ func testSearchBlockPair() (map[string]interface{}, map[string]interface{}) {
 	return use, res
 }
 
-// TestSearchEnvelopeCodec 验证搜索信封编解码 round-trip、拒绝异形、payload 混淆
-// （key/url 不裸存、错 key 解不出）。
+// TestSearchEnvelopeCodec verifies search-envelope encode/decode round-trip, rejection of malformed shapes, and payload obfuscation
+// (key/url never stored bare; a wrong key can't decode).
 func TestSearchEnvelopeCodec(t *testing.T) {
 	use, res := testSearchBlockPair()
 	tri := newSearchTriple("https://api.kimi.com/coding/", "k3-256k", "sk-secret")
@@ -49,7 +49,7 @@ func TestSearchEnvelopeCodec(t *testing.T) {
 		objStr(blocks[1], "tool_use_id") != "srvtoolu_1" {
 		t.Errorf("块还原错误: %v", blocks)
 	}
-	// 封入时刻随 payload 往返（时间规则剥块的依据）；无 ts 字段的老信封解出零值。
+	// The sealing moment round-trips with the payload (the basis for time-rule stripping); old envelopes without the ts field decode to the zero value.
 	if ts.IsZero() || time.Since(ts) > time.Minute {
 		t.Errorf("封入时刻=%v, want 接近当前", ts)
 	}
@@ -61,9 +61,9 @@ func TestSearchEnvelopeCodec(t *testing.T) {
 		t.Errorf("无 ts 老信封: ok=%v ts=%v, want ok=true 且 ts 零值（按超龄剥）", ok, ts2)
 	}
 
-	// id 归一：Kimi 流式搜索的 stu.id 是 tool_ 开头、注册表只认结果块的 srvtoolu_
-	// id（2026-09-10 受控实验：原样回放 400，改写 stu.id 后 200）。封入时归一，
-	// 且不得改调用方共享的块。
+	// id normalization: Kimi streaming search's stu.id starts with tool_, and the registry only recognizes the result block's srvtoolu_
+	// id (2026-09-10 controlled experiment: verbatim replay 400'd, rewriting stu.id returned 200). Normalized at sealing time,
+	// without mutating the caller's shared blocks.
 	misUse := map[string]interface{}{
 		"type": "server_tool_use", "id": "tool_abc", "name": "web_search",
 		"input": map[string]interface{}{"query": "测试查询"},
@@ -83,8 +83,8 @@ func TestSearchEnvelopeCodec(t *testing.T) {
 		t.Errorf("encodeSearchEnvelope 改了调用方的块: %v", misUse)
 	}
 
-	// payload 混淆：base64 解开是异或密文——key、url、key 哈希都不许裸躺
-	// （用户要求：客户端历史里不放明文归属信息）；异或解混淆后哈希可见。
+	// payload obfuscation: base64-decoding yields XOR ciphertext — the key, url, and key hash never lie bare
+	// (user requirement: no plaintext attribution info in client-side history); hashes are visible after XOR de-obfuscation.
 	raw, _ := base64.RawURLEncoding.DecodeString(enc[len(searchEnvelopePrefix):])
 	if strings.Contains(string(raw), "sk-secret") {
 		t.Errorf("信封 payload 裸存了 key: %s", raw)
@@ -98,7 +98,7 @@ func TestSearchEnvelopeCodec(t *testing.T) {
 	if !strings.Contains(string(xorSearchMask(tri.mask, raw)), tri.KeyH) {
 		t.Errorf("解混淆后应见 key 哈希: %s", raw)
 	}
-	// 错 key：掩码不同，异或出来不是 JSON，自然解不出（key 腿比对含在解混淆里）。
+	// Wrong key: different mask, the XOR result isn't JSON, naturally undecodable (the key-leg comparison is contained in de-obfuscation).
 	if _, _, _, ok := decodeSearchEnvelope(enc, searchEnvMask("sk-wrong")); ok {
 		t.Errorf("错 key 不应解出信封")
 	}
@@ -106,7 +106,7 @@ func TestSearchEnvelopeCodec(t *testing.T) {
 		t.Errorf("无掩码不应解出信封")
 	}
 
-	// 不编码的形态：nil 三元组/块、空 query（空搜索）、无掩码三元组。
+	// Shapes that don't encode: nil triple/blocks, empty query (empty search), maskless triple.
 	if encodeSearchEnvelope(nil, use, res) != "" {
 		t.Errorf("nil 三元组不应编码")
 	}
@@ -121,7 +121,7 @@ func TestSearchEnvelopeCodec(t *testing.T) {
 		t.Errorf("无掩码三元组不应编码（宁可不出信封也不发明文）")
 	}
 
-	// 拒绝的形态：非本前缀、坏 base64、payload 形态不对。
+	// Shapes that are rejected: foreign prefix, bad base64, malformed payload.
 	if _, _, _, ok := decodeSearchEnvelope("p429-ant-thinking-v1:e30", tri.mask); ok {
 		t.Errorf("thinking 信封不应被搜索解码器认领")
 	}
@@ -143,10 +143,10 @@ func TestSearchEnvelopeCodec(t *testing.T) {
 	}
 }
 
-// TestConvertInputSearchEnvelopeRestore 验证 input 里的搜索信封还原分支：
-// url+key 同源 → 还原上行；url 不同源（key 同，解得开但比对不过）→ 跳过；
-// key 不同源（掩码解不开）→ 跳过；reqTriple nil（预测不了路由 key）→ 跳过
-// （v1 的放行分支随明文 payload 退役）。
+// TestConvertInputSearchEnvelopeRestore verifies the search-envelope restoration branch in input:
+// url+key same-origin → restored upstream; url different-origin (same key, unmaskable but comparison fails) → skipped;
+// key different-origin (unmask fails) → skipped; reqTriple nil (route key unpredictable) → skipped
+// (v1's pass-through branch retired together with the plaintext payload).
 func TestConvertInputSearchEnvelopeRestore(t *testing.T) {
 	use, res := testSearchBlockPair()
 	tri := newSearchTriple("https://u1/", "m1", "key1")
@@ -168,7 +168,7 @@ func TestConvertInputSearchEnvelopeRestore(t *testing.T) {
 		return n
 	}
 
-	// 匹配：还原出两个搜索块。
+	// Match: two search blocks restored.
 	msgs, err := convertInputToMessages(items, buildToolRegistry(nil), tri, nil)
 	if err != nil {
 		t.Fatalf("convertInputToMessages: %v", err)
@@ -178,8 +178,8 @@ func TestConvertInputSearchEnvelopeRestore(t *testing.T) {
 		t.Errorf("三元组匹配：搜索块数=%d, want 2: %s", n, b)
 	}
 
-	// 生产形态（#3/#19 实证）：信封与 web_search_call 调用项一起回放——只还原
-	// 信封一对，调用项（代理自造 ws_ id）不出现，否则上行必 400 连坐信封对被剥。
+	// Production shape (#3/#19 evidence): the envelope replays together with the web_search_call item — only
+	// the envelope pair is restored; the call item (proxy-minted ws_ id) must not appear, otherwise going upstream 400s and the envelope pair is punished along.
 	mixed := []interface{}{
 		map[string]interface{}{"type": "message", "role": "user", "content": "搜下X"},
 		map[string]interface{}{"type": "reasoning", "encrypted_content": enc},
@@ -200,7 +200,7 @@ func TestConvertInputSearchEnvelopeRestore(t *testing.T) {
 		t.Errorf("调用项的代理自造 id 不应上行: %s", b)
 	}
 
-	// 不匹配（url 不同、key 同）：解得开但比对不过，跳过还原。
+	// No match (different url, same key): unmaskable but comparison fails, restoration skipped.
 	other := newSearchTriple("https://u2/", "m1", "key1")
 	msgs, err = convertInputToMessages(items, buildToolRegistry(nil), other, nil)
 	if err != nil {
@@ -211,7 +211,7 @@ func TestConvertInputSearchEnvelopeRestore(t *testing.T) {
 		t.Errorf("url 不同源：搜索块数=%d, want 0（跳过省 token）: %s", n, b)
 	}
 
-	// key 不同源：掩码解不开，直接跳过。
+	// Different key: unmasking fails, skipped outright.
 	otherKey := newSearchTriple("https://u1/", "m1", "key2")
 	msgs, err = convertInputToMessages(items, buildToolRegistry(nil), otherKey, nil)
 	if err != nil {
@@ -222,7 +222,7 @@ func TestConvertInputSearchEnvelopeRestore(t *testing.T) {
 		t.Errorf("key 不同源：搜索块数=%d, want 0（解不开混淆）: %s", n, b)
 	}
 
-	// 模型不同但 url+key 同源：照样还原（实测跨模型回放正常解密，模型腿不参与）。
+	// Different model but url+key same-origin: restored all the same (cross-model replay field-tested decrypting fine; the model leg doesn't participate).
 	crossModel := newSearchTriple("https://u1/", "m2", "key1")
 	msgs, err = convertInputToMessages(items, buildToolRegistry(nil), crossModel, nil)
 	if err != nil {
@@ -233,7 +233,7 @@ func TestConvertInputSearchEnvelopeRestore(t *testing.T) {
 		t.Errorf("跨模型同源：搜索块数=%d, want 2（模型腿不参与比对）: %s", n, b)
 	}
 
-	// reqTriple nil：预测不了路由 key，解不开混淆，跳过（v1 放行分支已退役）。
+	// reqTriple nil: route key unpredictable, de-obfuscation impossible, skipped (v1's pass-through branch retired).
 	msgs, err = convertInputToMessages(items, buildToolRegistry(nil), nil, nil)
 	if err != nil {
 		t.Fatalf("convertInputToMessages: %v", err)
@@ -244,8 +244,8 @@ func TestConvertInputSearchEnvelopeRestore(t *testing.T) {
 	}
 }
 
-// TestAnthToRespStreamSearchEnvelope 验证流式翻译在三元组已注入时把一次搜索封成
-// 信封 reasoning 项随行（独立 output_index），未注入时不出信封。
+// TestAnthToRespStreamSearchEnvelope verifies streaming translation seals one search into
+// an accompanying envelope reasoning item (its own output_index) when the triple is injected, and emits no envelope when not.
 func TestAnthToRespStreamSearchEnvelope(t *testing.T) {
 	tri := newSearchTriple("https://u/", "k3-256k", "key1")
 	var events []string
@@ -255,7 +255,7 @@ func TestAnthToRespStreamSearchEnvelope(t *testing.T) {
 
 	final := conv.buildFinalResponse()
 	output := asArr(final["output"])
-	// 无信封时是 5（reasoning + 2×web_search_call + function_call + message），信封 +1。
+	// Without the envelope it's 5 (reasoning + 2×web_search_call + function_call + message); the envelope adds 1.
 	if len(output) != 6 {
 		t.Fatalf("output 数=%d, want 6（含搜索信封项）: %v", len(output), output)
 	}
@@ -276,7 +276,7 @@ func TestAnthToRespStreamSearchEnvelope(t *testing.T) {
 	if objStr(asObj(blocks[0]["input"]), "query") != "测试查询" {
 		t.Errorf("信封里 server_tool_use.query=%v, want 测试查询", blocks[0]["input"])
 	}
-	// 信封项 id 以 rs_ 开头、含 env 标记，且 added+done 都发了。
+	// The envelope item's id starts with rs_ and carries the env marker, and both added+done were sent.
 	joined := strings.Join(events, "")
 	if !strings.Contains(joined, `"id":"rs_resp_msg_9_env`) {
 		t.Errorf("事件流缺信封项 id（rs_..._envN）")
@@ -285,7 +285,7 @@ func TestAnthToRespStreamSearchEnvelope(t *testing.T) {
 		t.Errorf("added 事件数≠6（信封应占独立 output_index）")
 	}
 
-	// 对照：不注入三元组 → 不出信封（output 仍是 5）。
+	// Control: no triple injected → no envelope (output stays 5).
 	var events2 []string
 	conv2 := newAnthToRespStream(func(ev string) { events2 = append(events2, ev) }, "k3-256k", nil)
 	feedSSEToConv(conv2, testSSEAllBlocks())
@@ -294,9 +294,9 @@ func TestAnthToRespStreamSearchEnvelope(t *testing.T) {
 	}
 }
 
-// testSSEStreamedQuerySearch 构造 query 走 input_json_delta 的搜索流（生产 #56 实测
-// 形态）：server_tool_use 块 start 只给 id/name，query 由 input_json_delta 送达；
-// 结果块 start 完整。stu 块 id 与结果块 tool_use_id 天生不一致（Kimi 原生行为）。
+// testSSEStreamedQuerySearch builds a search stream with the query arriving via input_json_delta (production #56's observed
+// shape): the server_tool_use block's start only gives id/name, the query arrives via input_json_delta;
+// the result block is complete at start. The stu block's id and the result block's tool_use_id are naturally inconsistent (Kimi's native behavior).
 func testSSEStreamedQuerySearch() string {
 	return "" +
 		`event: message_start` + "\n" +
@@ -316,9 +316,9 @@ func testSSEStreamedQuerySearch() string {
 		`data: {"type":"message_stop"}` + "\n\n"
 }
 
-// TestAnthToRespStreamSearchStreamedQuery 锁生产 #56 实测形态：query 走 input_json_delta
-// 的 server_tool_use 也要出信封、出带 query 的调用项（修复前 start 无 input → 信封跳过、
-// 调用项丢失，#57 追问因此无块可还原）。
+// TestAnthToRespStreamSearchStreamedQuery locks production #56's observed shape: a server_tool_use whose query arrives via input_json_delta
+// must still produce an envelope and a query-carrying call item (before the fix: start without input → envelope skipped,
+// call item lost — so the #57 follow-up had no blocks to restore).
 func TestAnthToRespStreamSearchStreamedQuery(t *testing.T) {
 	tri := newSearchTriple("https://u/", "k3-256k", "key1")
 	var events []string
@@ -328,7 +328,7 @@ func TestAnthToRespStreamSearchStreamedQuery(t *testing.T) {
 
 	final := conv.buildFinalResponse()
 	output := asArr(final["output"])
-	// 调用项 + 来源项 + 信封项 = 3。
+	// Call item + sources item + envelope item = 3.
 	if len(output) != 3 {
 		t.Fatalf("output 数=%d, want 3: %v", len(output), output)
 	}
@@ -359,19 +359,19 @@ func TestAnthToRespStreamSearchStreamedQuery(t *testing.T) {
 	if !ok || objStr(asObj(blocks[0]["input"]), "query") != "测试查询" {
 		t.Fatalf("信封里的 server_tool_use 缺 query: ok=%v blocks=%v", ok, blocks)
 	}
-	// id 归一：流式 stu 原生 id（tool_abc）注册表不认，信封里必须换成结果块的 id。
+	// id normalization: the streaming stu's native id (tool_abc) isn't recognized by the registry; inside the envelope it must be replaced with the result block's id.
 	if objStr(blocks[0], "id") != "srvtoolu_xyz" {
 		t.Errorf("信封 stu.id=%v, want srvtoolu_xyz（结果块的注册 id）", blocks[0]["id"])
 	}
-	// 搜索块的参数碎片不得走 function_call_arguments 事件（web_search_call 无参数流）。
+	// Search blocks' argument fragments must not go through function_call_arguments events (web_search_call has no argument stream).
 	joined := strings.Join(events, "")
 	if strings.Contains(joined, "function_call_arguments") {
 		t.Errorf("搜索块不应发 function_call_arguments 事件")
 	}
 }
 
-// TestStripSearchBlocksInBody 验证 fail-soft 剥块：搜索块剥光、空壳消息整条删、
-// 相邻同 role 合并；无搜索块/非法 JSON 时 ok=false。
+// TestStripSearchBlocksInBody verifies fail-soft stripping: search blocks stripped bare, shell messages deleted wholesale,
+// adjacent same-role messages merged; ok=false with no search blocks / invalid JSON.
 func TestStripSearchBlocksInBody(t *testing.T) {
 	body := []byte(`{"model":"m","messages":[` +
 		`{"role":"user","content":[{"type":"text","text":"搜下X"}]},` +
@@ -391,7 +391,7 @@ func TestStripSearchBlocksInBody(t *testing.T) {
 		t.Fatalf("剥后非法 JSON: %v", err)
 	}
 	msgs := asArr(m["messages"])
-	// assistant 空壳整条删 → user user 相邻 → 合并成 1 条 user 消息（2 个 text 块）。
+	// assistant shell deleted wholesale → user user adjacent → merged into 1 user message (2 text blocks).
 	if len(msgs) != 1 {
 		b, _ := json.Marshal(msgs)
 		t.Fatalf("消息数=%d, want 1（合并后）: %s", len(msgs), b)
@@ -404,7 +404,7 @@ func TestStripSearchBlocksInBody(t *testing.T) {
 		t.Errorf("剥后仍含搜索块: %s", nb)
 	}
 
-	// assistant 消息里混有正文：剥后保留 text 块，消息不删。
+	// An assistant message mixed with body text: text blocks kept after stripping, message not deleted.
 	body2 := []byte(`{"messages":[` +
 		`{"role":"user","content":"搜下X"},` +
 		`{"role":"assistant","content":[` +
@@ -429,19 +429,19 @@ func TestStripSearchBlocksInBody(t *testing.T) {
 		t.Errorf("body2 assistant 块数=%d, want 1（只剩 text）", n)
 	}
 
-	// 无搜索块 → ok=false（无需重试）。
+	// No search blocks → ok=false (no retry needed).
 	if _, _, ok := stripSearchBlocksInBody([]byte(`{"messages":[{"role":"user","content":"hi"}]}`)); ok {
 		t.Errorf("无搜索块应 ok=false")
 	}
-	// 非法 JSON → ok=false。
+	// Invalid JSON → ok=false.
 	if _, _, ok := stripSearchBlocksInBody([]byte(`{bad`)); ok {
 		t.Errorf("非法 JSON 应 ok=false")
 	}
 }
 
-// TestSearchEnvelopeFailSoftRetry 端到端 fail-soft：请求带回放的搜索块，上游首次
-// 400 tool_call_id（注册表不认旧 id）→ 代理剥块立即重试 → 客户端拿到 200，
-// 第二次上游请求体里没有任何搜索块。
+// TestSearchEnvelopeFailSoftRetry end-to-end fail-soft: a request carrying a replayed search block, the upstream first
+// 400s with tool_call_id (registry doesn't recognize the old id) → the proxy strips blocks and retries immediately → the client gets 200,
+// and the second upstream request body contains no search blocks.
 func TestSearchEnvelopeFailSoftRetry(t *testing.T) {
 	resetStats()
 	var rawBodies []string
@@ -478,11 +478,11 @@ func TestSearchEnvelopeFailSoftRetry(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	// 400 不透给客户端：fail-soft 重试成功拿到 200。
+	// The 400 isn't passed to the client: the fail-soft retry succeeds with 200.
 	if resp.StatusCode != 200 {
 		t.Fatalf("客户端状态码=%d, want 200（fail-soft 应兜底）: %s", resp.StatusCode, body)
 	}
-	// 上游恰好收 2 次：首次带搜索块，重试剥光。
+	// The upstream receives exactly 2 requests: the first with search blocks, the retry stripped bare.
 	if len(rawBodies) != 2 {
 		t.Fatalf("上游请求数=%d, want 2", len(rawBodies))
 	}
@@ -496,7 +496,7 @@ func TestSearchEnvelopeFailSoftRetry(t *testing.T) {
 		t.Errorf("重试请求丢了正文: %s", rawBodies[1])
 	}
 
-	// [剥N] 计数：完成流归档应记 2 个 400 兜底剥块（stu+result 各算 1）。
+	// [剥N] counting: the finished archive should record 2 400-fallback strips (stu+result each count 1).
 	finishedMu.Lock()
 	ff := finished[len(finished)-1]
 	finishedMu.Unlock()
@@ -505,8 +505,8 @@ func TestSearchEnvelopeFailSoftRetry(t *testing.T) {
 	}
 }
 
-// encodeSearchEnvelopeWithTs 造指定封入时刻的信封（测试时间规则剥块用；ts=0 省略
-// 字段，模拟 v2 初版无 ts 的老信封）。
+// encodeSearchEnvelopeWithTs builds an envelope with a given sealing moment (for testing time-rule stripping; ts=0 omits
+// the field, simulating old v2-initial envelopes without ts).
 func encodeSearchEnvelopeWithTs(t_ *searchTriple, useBlk, resBlk map[string]interface{}, ts int64) string {
 	p := map[string]interface{}{"t": t_, "b": []map[string]interface{}{useBlk, resBlk}}
 	if ts > 0 {
@@ -516,7 +516,7 @@ func encodeSearchEnvelopeWithTs(t_ *searchTriple, useBlk, resBlk map[string]inte
 	return searchEnvelopePrefix + base64.RawURLEncoding.EncodeToString(xorSearchMask(t_.mask, payload))
 }
 
-// resetSearchCutoffForTest 清对话水位全局表（防测试间串扰），返回恢复函数。
+// resetSearchCutoffForTest clears the global conversation-watermark table (preventing cross-test interference), returning a restore function.
 func resetSearchCutoffForTest() func() {
 	searchCutoff.Lock()
 	searchCutoff.m = make(map[string]time.Time)
@@ -528,10 +528,10 @@ func resetSearchCutoffForTest() func() {
 	}
 }
 
-// TestConvertInputSearchEnvelopeWaterLevel 验证水位主动剥：不设固定年龄上限
-// （老信封无水位也乐观还原——直发探测实证封入 1.7h 的搜索 id 仍存活）；本对话
-// 学到水位后，不比水位新的信封（含恰等于水位）水位剥；无 ts 老信封视同最老——
-// 有水位剥、无水位乐观还原。主动剥不还原、不撞 400，计数进 replay 供 [剥N] 与日志。
+// TestConvertInputSearchEnvelopeWaterLevel verifies proactive watermark stripping: no fixed age ceiling
+// (old envelopes restore optimistically even without a watermark — direct-send probes proved a 1.7h-old sealed search id still alive); once this conversation
+// has learned a watermark, envelopes no newer than it (exactly equal included) are watermark-stripped; ts-less old envelopes count as oldest —
+// stripped when a watermark exists, optimistically restored without one. Proactive stripping doesn't restore and doesn't hit 400s; counts go into replay for [剥N] and logs.
 func TestConvertInputSearchEnvelopeWaterLevel(t *testing.T) {
 	defer resetSearchCutoffForTest()()
 	use, res := testSearchBlockPair()
@@ -555,7 +555,7 @@ func TestConvertInputSearchEnvelopeWaterLevel(t *testing.T) {
 		}
 	}
 
-	// 年龄不剥：封入 2 小时前但本对话无水位 → 照常还原（1h 硬规则已撤）。
+	// Age doesn't strip: sealed 2 hours ago but this conversation has no watermark → restored as usual (the 1h hard rule was removed).
 	replay := &searchReplayCtx{convID: "c-age"}
 	msgs, err := convertInputToMessages(itemsWith(encodeSearchEnvelopeWithTs(tri, use, res, time.Now().Add(-2*time.Hour).Unix())), buildToolRegistry(nil), tri, replay)
 	if err != nil {
@@ -564,16 +564,16 @@ func TestConvertInputSearchEnvelopeWaterLevel(t *testing.T) {
 	if n := countSearchBlocks(msgs); n != 2 || len(replay.restored) != 1 {
 		t.Errorf("无水位的老信封：还原块数=%d(want 2) 还原时刻数=%d(want 1)", n, len(replay.restored))
 	}
-	// 无 ts 老信封无水位时同样乐观还原（无 ts 可收，还原时刻保持 0）。
+	// ts-less old envelopes without a watermark also restore optimistically (no ts to collect; restore moments stay 0).
 	replay = &searchReplayCtx{convID: "c-age"}
 	msgs, _ = convertInputToMessages(itemsWith(encodeSearchEnvelopeWithTs(tri, use, res, 0)), buildToolRegistry(nil), tri, replay)
 	if n := countSearchBlocks(msgs); n != 2 || len(replay.restored) != 0 {
 		t.Errorf("无 ts 信封（无水位）：还原块数=%d(want 2) 还原时刻数=%d(want 0)", n, len(replay.restored))
 	}
 
-	// 水位：对话水位记在 10 分钟前（秒级精度，与信封 ts 解码同口径）——20 分钟
-	// 前的信封水位剥，恰等于水位的也剥（注册表按龄淘汰，同龄必死），无 ts 的
-	// 视同最老一并剥，5 分钟前的照常还原。
+	// Watermark: the conversation watermark is set 10 minutes ago (second precision, same semantics as envelope ts decoding) — envelopes from 20 minutes
+	// ago are watermark-stripped, one exactly equal to the watermark is stripped too (the registry expires by age; same-age ones are certainly dead), ts-less ones
+	// count as oldest and are stripped along, 5-minutes-ago restores as usual.
 	cut := time.Unix(time.Now().Add(-10*time.Minute).Unix(), 0)
 	learnSearchCutoff("c-water", cut)
 	replay = &searchReplayCtx{convID: "c-water"}
@@ -598,10 +598,10 @@ func TestConvertInputSearchEnvelopeWaterLevel(t *testing.T) {
 	}
 }
 
-// TestSearchEnvelopeCutoffLearning 端到端：Responses 口带回放信封 → 上游 400
-// tool_call_id → 兜底剥块重试并学到对话水位；同对话更老与恰等于水位的信封下一轮
-// 被水位直接剥（上游一发即 200、无搜索块、无 400），比水位新的信封照常还原。
-// [剥N] 计数含水位剥与 400 兜底剥两部分。
+// TestSearchEnvelopeCutoffLearning end-to-end: the Responses port replays an envelope → upstream 400
+// tool_call_id → fallback stripping retries and learns the conversation watermark; same-conversation envelopes older than or exactly at the watermark get
+// watermark-stripped directly next turn (upstream 200 on first shot, no search blocks, no 400), envelopes newer than the watermark restore as usual.
+// [剥N] counting includes both watermark strips and 400-fallback strips.
 func TestSearchEnvelopeCutoffLearning(t *testing.T) {
 	defer resetSearchCutoffForTest()()
 	resetStats()
@@ -651,7 +651,7 @@ func TestSearchEnvelopeCutoffLearning(t *testing.T) {
 		return finished[len(finished)-1].searchStripped
 	}
 
-	// 第一轮：新信封还原上行 → 上游 400 → 兜底剥 2 块重试 200，水位记为信封封入时刻。
+	// First round: a new envelope restores upstream → upstream 400 → fallback strips 2 blocks, retry 200, watermark set to the envelope's sealing moment.
 	t0 := time.Now().Unix()
 	doReq(encodeSearchEnvelopeWithTs(tri, use, res, t0))
 	if len(rawBodies) != 2 {
@@ -667,7 +667,7 @@ func TestSearchEnvelopeCutoffLearning(t *testing.T) {
 		t.Errorf("对话水位=%v, want 封入时刻 %v", w, time.Unix(t0, 0))
 	}
 
-	// 第二轮：同对话更老的信封 → 水位直接剥，上游一发即 200 且无搜索块（零 400）。
+	// Second round: an older envelope from the same conversation → watermark-stripped directly; upstream 200 on first shot with no search blocks (zero 400s).
 	doReq(encodeSearchEnvelopeWithTs(tri, use, res, t0-60))
 	if len(rawBodies) != 3 {
 		t.Fatalf("第二轮后上游请求数=%d, want 3（水位剥不撞 400）", len(rawBodies))
@@ -679,7 +679,7 @@ func TestSearchEnvelopeCutoffLearning(t *testing.T) {
 		t.Errorf("第二轮剥块计数=%d, want 2（水位剥）", n)
 	}
 
-	// 等于水位轮：封入时刻恰等于水位的信封 → 同样水位剥（同龄必死，不撞 400）。
+	// Equal-to-watermark round: an envelope sealed exactly at the watermark → watermark-stripped the same (same-age ones are certainly dead; no 400 hit).
 	doReq(encodeSearchEnvelopeWithTs(tri, use, res, t0))
 	if len(rawBodies) != 4 {
 		t.Fatalf("等于水位轮后上游请求数=%d, want 4（水位剥不撞 400）", len(rawBodies))
@@ -691,7 +691,7 @@ func TestSearchEnvelopeCutoffLearning(t *testing.T) {
 		t.Errorf("等于水位轮剥块计数=%d, want 2（水位剥）", n)
 	}
 
-	// 第三轮：比水位新的信封 → 照常还原（上行带搜索块，mock 已回 200，不再剥）。
+	// Third round: an envelope newer than the watermark → restored as usual (search blocks go upstream; the mock already returns 200, no more stripping).
 	doReq(encodeSearchEnvelopeWithTs(tri, use, res, t0+60))
 	if len(rawBodies) != 5 {
 		t.Fatalf("第三轮后上游请求数=%d, want 5", len(rawBodies))

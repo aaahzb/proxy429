@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// TestTrayState 验证三态优先级：active>0 绿(2) > waiting>0 黄(1) > 灰(0)。
-// 并行请求时取高优先级，所以两者都设时应返回绿。
+// TestTrayState verifies the three-state priority: active>0 green (2) > waiting>0 yellow (1) > grey (0).
+// With parallel requests the higher priority wins, so setting both should return green.
 func TestTrayState(t *testing.T) {
 	resetStats()
 	if s := trayState(); s != 0 {
@@ -22,7 +22,7 @@ func TestTrayState(t *testing.T) {
 	if s := trayState(); s != 1 {
 		t.Errorf("waiting want 1, got %d", s)
 	}
-	// active 优先于 waiting：两者都设时取绿。
+	// active beats waiting: with both set, green wins.
 	stats.mu.Lock()
 	stats.active = 1
 	stats.mu.Unlock()
@@ -31,7 +31,7 @@ func TestTrayState(t *testing.T) {
 	}
 }
 
-// TestTrayTip 验证多行 tooltip：空闲/单态/两态并存。
+// TestTrayTip verifies the multi-line tooltip: idle / single state / both states coexisting.
 func TestTrayTip(t *testing.T) {
 	cases := []struct {
 		active, waiting int
@@ -49,8 +49,8 @@ func TestTrayTip(t *testing.T) {
 	}
 }
 
-// TestSwitchConfigNotifiesTray 验证 switchConfig 成功后向托盘投递子菜单重建通知——
-// 网页端切配置/新建配置不走托盘点击路径，托盘勾选靠这个通知刷新；失败切换不投递。
+// TestSwitchConfigNotifiesTray verifies switchConfig posts a submenu-rebuild notification to the tray on success —
+// web-side config switches/creates don't go through the tray-click path, so tray checkmarks refresh via this notification; failed switches don't post.
 func TestSwitchConfigNotifiesTray(t *testing.T) {
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.json")
@@ -60,7 +60,7 @@ func TestSwitchConfigNotifiesTray(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// 先清空通知通道，排除其它测试经 switchConfig 留下的积压干扰
+	// Drain the notification channel first, excluding backlog left by other tests via switchConfig
 	select {
 	case <-trayCfgSwitched:
 	default:
@@ -82,7 +82,7 @@ func TestSwitchConfigNotifiesTray(t *testing.T) {
 	if filepath.Base(currentConfigPath()) != "b.json" {
 		t.Errorf("currentConfigPath=%q, want b.json", currentConfigPath())
 	}
-	// 失败切换（文件不存在）不投递通知，勾选保持不动
+	// A failed switch (file doesn't exist) posts no notification; checkmarks stay put
 	if err := switchConfig(filepath.Join(dir, "nope.json")); err == nil {
 		t.Fatal("切换到不存在的文件应报错")
 	}
@@ -93,9 +93,9 @@ func TestSwitchConfigNotifiesTray(t *testing.T) {
 	}
 }
 
-// TestDelConfigNotifiesTray 验证网页端删除配置文件成功后同样投递托盘重建通知——
-// 否则托盘「切换配置」子菜单里被删的项要等手动「刷新列表」才消失；
-// 删除当前在用配置被拒绝且不投递。
+// TestDelConfigNotifiesTray verifies web-side config-file deletion also posts a tray-rebuild notification on success —
+// otherwise the deleted entry in the tray's 「切换配置」 submenu would linger until a manual 「刷新列表」;
+// deleting the config currently in use is refused and posts nothing.
 func TestDelConfigNotifiesTray(t *testing.T) {
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.json")
@@ -113,7 +113,7 @@ func TestDelConfigNotifiesTray(t *testing.T) {
 		configFilePath = ""
 		configMu.Unlock()
 	}()
-	// 先清空通知通道，排除其它测试留下的积压干扰
+	// Drain the notification channel first, excluding backlog left by other tests
 	select {
 	case <-trayCfgSwitched:
 	default:
@@ -121,7 +121,7 @@ func TestDelConfigNotifiesTray(t *testing.T) {
 
 	call := func(name string) int {
 		req := httptest.NewRequest("POST", "/__delconfig", strings.NewReader(`{"name":`+strconv.Quote(name)+`}`))
-		req.RemoteAddr = "127.0.0.1:1" // isLocalRequest 要求本机
+		req.RemoteAddr = "127.0.0.1:1" // isLocalRequest requires localhost
 		rec := httptest.NewRecorder()
 		delConfigHandler(rec, req)
 		return rec.Code
@@ -139,7 +139,7 @@ func TestDelConfigNotifiesTray(t *testing.T) {
 		t.Error("删除配置成功后应投递托盘重建通知")
 	}
 
-	// 删当前在用配置被拒绝，不投递通知
+	// Deleting the config in use is refused; no notification posted
 	if code := call("a.json"); code != 400 {
 		t.Fatalf("删除当前配置应 400，实际 %d", code)
 	}
@@ -150,8 +150,8 @@ func TestDelConfigNotifiesTray(t *testing.T) {
 	}
 }
 
-// TestRenameConfigNotifiesTray 验证网页端重命名配置文件后投递托盘重建通知——
-// 文件名清单变了（重命名当前配置时勾选跟新名字），不等手动「刷新列表」。
+// TestRenameConfigNotifiesTray verifies web-side config-file renaming posts a tray-rebuild notification —
+// the file list changed (when renaming the current config the checkmark follows the new name), not waiting for a manual 「刷新列表」.
 func TestRenameConfigNotifiesTray(t *testing.T) {
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.json")
@@ -166,14 +166,14 @@ func TestRenameConfigNotifiesTray(t *testing.T) {
 		configFilePath = ""
 		configMu.Unlock()
 	}()
-	// 先清空通知通道，排除其它测试留下的积压干扰
+	// Drain the notification channel first, excluding backlog left by other tests
 	select {
 	case <-trayCfgSwitched:
 	default:
 	}
 
 	req := httptest.NewRequest("POST", "/__renameconfig", strings.NewReader(`{"old":"a.json","new":"b.json"}`))
-	req.RemoteAddr = "127.0.0.1:1" // isLocalRequest 要求本机
+	req.RemoteAddr = "127.0.0.1:1" // isLocalRequest requires localhost
 	rec := httptest.NewRecorder()
 	renameConfigHandler(rec, req)
 	if rec.Code != 200 {
@@ -189,9 +189,9 @@ func TestRenameConfigNotifiesTray(t *testing.T) {
 	}
 }
 
-// TestSaveConfigCreateNotifiesTray 验证「保存将创建」路径投递托盘重建通知——
-// 当前配置文件此前不存在（如被外部删除）时保存会新建它，文件名清单变化；
-// 文件已存在的普通保存不改变清单，不投递。
+// TestSaveConfigCreateNotifiesTray verifies the "save will create" path posts a tray-rebuild notification —
+// when the current config file didn't exist before (e.g. deleted externally), saving creates it, changing the file list;
+// an ordinary save of an existing file doesn't change the list and posts nothing.
 func TestSaveConfigCreateNotifiesTray(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.json")
@@ -204,7 +204,7 @@ func TestSaveConfigCreateNotifiesTray(t *testing.T) {
 		configMu.Unlock()
 		cfg.Store(&Config{})
 	}()
-	// 先清空通知通道，排除其它测试留下的积压干扰
+	// Drain the notification channel first, excluding backlog left by other tests
 	select {
 	case <-trayCfgSwitched:
 	default:
@@ -212,7 +212,7 @@ func TestSaveConfigCreateNotifiesTray(t *testing.T) {
 
 	call := func() int {
 		req := httptest.NewRequest("POST", "/__config", strings.NewReader(`{"upstream":"http://127.0.0.1:1"}`))
-		req.RemoteAddr = "127.0.0.1:1" // isLocalRequest 要求本机
+		req.RemoteAddr = "127.0.0.1:1" // isLocalRequest requires localhost
 		rec := httptest.NewRecorder()
 		configPostHandler(rec, req)
 		return rec.Code
@@ -230,7 +230,7 @@ func TestSaveConfigCreateNotifiesTray(t *testing.T) {
 		t.Error("保存新建配置文件后应投递托盘重建通知")
 	}
 
-	// 文件已存在的普通保存不投递
+	// An ordinary save of an existing file posts nothing
 	if code := call(); code != 200 {
 		t.Fatalf("再次保存应 200，实际 %d", code)
 	}

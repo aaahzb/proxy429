@@ -1,6 +1,6 @@
-// responses_tools_test.go — 工具体系翻译的测试，移植 cc-switch 关键用例：
-// custom 工具包装/拆包、namespace(MCP) 拍平与还原、tool_search、Read sanitize、
-// 工具结果媒体剥离（MCP 图片/JSON 字符串嵌套）、error marker、input_file、usage。
+// responses_tools_test.go — tests for tool-system translation, porting cc-switch's key cases:
+// custom tool wrap/unwrap, namespace(MCP) flattening and restoration, tool_search, Read sanitize,
+// tool-result media stripping (MCP images / JSON-string nesting), error markers, input_file, usage.
 package main
 
 // cc-switch: https://github.com/farion1231/cc-switch — MIT License, Copyright (c) 2025 Jason Young.
@@ -11,9 +11,9 @@ import (
 	"testing"
 )
 
-// ---- custom 工具 ----
+// ---- custom tools ----
 
-// 对照 cc-switch test_request_custom_tool_survives_with_required_choice。
+// Mirrors cc-switch test_request_custom_tool_survives_with_required_choice.
 func TestCustomToolWrappedAndChoicePreserved(t *testing.T) {
 	body := map[string]interface{}{
 		"model": "gpt-5-codex",
@@ -49,12 +49,12 @@ func TestCustomToolWrappedAndChoicePreserved(t *testing.T) {
 	if required[0] != "input" {
 		t.Errorf("required=%v", required)
 	}
-	// 原始工具定义（含 format）必须内嵌进 description，模型才能遵循语法。
+	// The original tool definition (including format) must be inlined into the description, so the model can follow the syntax.
 	desc := tool["description"].(string)
 	if !strings.Contains(desc, "Original tool definition:") || !strings.Contains(desc, "lark") {
 		t.Errorf("description 未内嵌原始定义: %v", desc)
 	}
-	// required → any 保留。
+	// required → any preserved.
 	tc := out["tool_choice"].(map[string]interface{})
 	if tc["type"] != "any" {
 		t.Errorf("tool_choice=%v", tc)
@@ -64,7 +64,7 @@ func TestCustomToolWrappedAndChoicePreserved(t *testing.T) {
 	}
 }
 
-// 字符串形式的工具名 = custom 工具（对照 cc-switch add_response_tool 的 String 分支）。
+// String-form tool name = custom tool (mirrors cc-switch add_response_tool's String branch).
 func TestStringToolBecomesCustom(t *testing.T) {
 	reg := buildToolRegistry([]interface{}{"apply_patch"})
 	if !reg.isCustomTool("apply_patch") {
@@ -75,7 +75,7 @@ func TestStringToolBecomesCustom(t *testing.T) {
 	}
 }
 
-// custom_tool_call 回放 → tool_use 包 {"input": 裸值}；custom_tool_call_output → tool_result。
+// custom_tool_call replay → tool_use wrapped {"input": raw value}; custom_tool_call_output → tool_result.
 func TestCustomToolCallReplay(t *testing.T) {
 	body := map[string]interface{}{
 		"model": "m",
@@ -114,7 +114,7 @@ func TestCustomToolCallReplay(t *testing.T) {
 	}
 }
 
-// incomplete 的 custom_tool_call 整个丢弃（对照 cc-switch 对三类 call 的统一处理）。
+// incomplete custom_tool_call dropped wholesale (mirrors cc-switch's uniform handling of the three call kinds).
 func TestIncompleteCustomToolCallDropped(t *testing.T) {
 	body := map[string]interface{}{
 		"model": "m",
@@ -136,7 +136,7 @@ func TestIncompleteCustomToolCallDropped(t *testing.T) {
 	}
 }
 
-// custom_tool_input_from_chat_arguments 的 Go 版：包装 JSON 解出裸字符串。
+// Go version of custom_tool_input_from_chat_arguments: unwraps the bare string from the wrapped JSON.
 func TestCustomToolInputUnwrap(t *testing.T) {
 	if got := customToolInputFromArguments(`{"input":"raw text"}`); got != "raw text" {
 		t.Errorf("解包=%q", got)
@@ -152,10 +152,10 @@ func TestCustomToolInputUnwrap(t *testing.T) {
 	}
 }
 
-// ---- namespace(MCP) 工具 ----
+// ---- namespace(MCP) tools ----
 
-// 对照 cc-switch mcp_files 用例：namespace 拍平成 mcp_files__read，响应再拆回
-// 带 namespace 字段的 function_call。
+// Mirrors cc-switch's mcp_files case: namespace flattened to mcp_files__read, responses split back
+// into a function_call with the namespace field.
 func TestNamespaceToolRoundTrip(t *testing.T) {
 	body := map[string]interface{}{
 		"model": "m",
@@ -185,7 +185,7 @@ func TestNamespaceToolRoundTrip(t *testing.T) {
 		t.Fatalf("拍平名=%v", tools[0])
 	}
 
-	// 响应侧：tool_use mcp_files__read → function_call 还原 name+namespace。
+	// Response side: tool_use mcp_files__read → function_call with name+namespace restored.
 	msg := map[string]interface{}{
 		"id":   "msg_1",
 		"type": "message",
@@ -202,7 +202,7 @@ func TestNamespaceToolRoundTrip(t *testing.T) {
 		t.Fatalf("输出项=%v", item)
 	}
 
-	// 回放侧：带 namespace 的 function_call → tool_use 拍平名。
+	// Replay side: function_call with namespace → tool_use flattened name.
 	replay := map[string]interface{}{
 		"model": "m",
 		"tools": body["tools"],
@@ -228,7 +228,7 @@ func TestNamespaceToolRoundTrip(t *testing.T) {
 	}
 }
 
-// 超 64 字节的拍平名：截断 + sha256 后缀（对照 cc-switch flatten_namespace_tool_name）。
+// Flattened names over 64 bytes: truncate + sha256 suffix (mirrors cc-switch flatten_namespace_tool_name).
 func TestFlattenNamespaceToolNameTruncation(t *testing.T) {
 	ns := strings.Repeat("n", 40)
 	name := strings.Repeat("t", 40)
@@ -239,20 +239,20 @@ func TestFlattenNamespaceToolNameTruncation(t *testing.T) {
 	if !strings.HasSuffix(flat[:len(flat)-18], "__") && !strings.Contains(flat, "__") {
 		t.Errorf("形状=%q", flat)
 	}
-	// 同样输入必然同样输出（确定性），不同输入不同后缀。
+	// Same input necessarily same output (deterministic); different inputs get different suffixes.
 	if flat != flattenNamespaceToolName(ns, name) {
 		t.Errorf("不确定")
 	}
 	if flat == flattenNamespaceToolName(ns, name+"x") {
 		t.Errorf("不同输入撞后缀")
 	}
-	// 短名不截断。
+	// Short names not truncated.
 	if got := flattenNamespaceToolName("mcp_files", "read"); got != "mcp_files__read" {
 		t.Errorf("短名=%q", got)
 	}
 }
 
-// tool_choice 带 namespace 时反解拍平名；allowed_tools 等未知形状降级 auto。
+// tool_choice with a namespace resolves back to the flattened name; unknown shapes like allowed_tools degrade to auto.
 func TestToolChoiceNamespaceAndUnknown(t *testing.T) {
 	reg := buildToolRegistry([]interface{}{
 		map[string]interface{}{
@@ -296,7 +296,7 @@ func TestToolSearchRoundTrip(t *testing.T) {
 	if len(tools) != 1 || tools[0].(map[string]interface{})["name"] != "tool_search" {
 		t.Fatalf("tools=%v", tools)
 	}
-	// 响应侧：tool_use tool_search → tool_search_call 项（arguments 解析成对象）。
+	// Response side: tool_use tool_search → tool_search_call item (arguments parsed into an object).
 	msg := map[string]interface{}{
 		"id": "msg_1", "type": "message",
 		"content": []interface{}{
@@ -315,7 +315,7 @@ func TestToolSearchRoundTrip(t *testing.T) {
 	if args["query"] != "filesystem" {
 		t.Errorf("arguments=%v", args)
 	}
-	// 回放侧：tool_search_call → tool_use 代理工具名。
+	// Replay side: tool_search_call → tool_use proxy tool name.
 	replay := map[string]interface{}{
 		"model": "m",
 		"tools": body["tools"],
@@ -345,7 +345,7 @@ func TestToolSearchRoundTrip(t *testing.T) {
 
 // ---- Read sanitize ----
 
-// 对照 cc-switch sanitize_anthropic_tool_use_input：Read 工具的 pages:"" 剔除。
+// Mirrors cc-switch sanitize_anthropic_tool_use_input: stripping the Read tool's pages:"".
 func TestReadToolPagesSanitize(t *testing.T) {
 	in := map[string]interface{}{"file_path": "/a", "pages": ""}
 	out := sanitizeToolUseInput("Read", in)
@@ -362,14 +362,14 @@ func TestReadToolPagesSanitize(t *testing.T) {
 	if _, ok := in3["pages"]; !ok {
 		t.Errorf("非 Read 工具不应动")
 	}
-	// JSON 字符串版（流式收拢用）。
+	// JSON-string version (for streaming close-out).
 	if got := sanitizeToolUseInputJSON("Read", `{"file_path":"/a","pages":""}`); strings.Contains(got, "pages") {
 		t.Errorf("JSON 版未剔除: %v", got)
 	}
 	if got := sanitizeToolUseInputJSON("Read", "not json"); got != "not json" {
 		t.Errorf("坏 JSON 应原样: %v", got)
 	}
-	// 回放路径：function_call name=Read 的 arguments 也应被清理。
+	// Replay path: arguments of function_call name=Read should also be cleaned.
 	body := map[string]interface{}{
 		"model": "m",
 		"input": []interface{}{
@@ -391,9 +391,9 @@ func TestReadToolPagesSanitize(t *testing.T) {
 	}
 }
 
-// ---- 流式：custom / namespace / Read ----
+// ---- Streaming: custom / namespace / Read ----
 
-// 构造一条 tool_use 的 Anthropic SSE 流。
+// Build an Anthropic SSE stream with one tool_use.
 func toolUseSSE(toolID, toolName, delta1, delta2 string) string {
 	var b strings.Builder
 	b.WriteString("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"m\",\"usage\":{\"input_tokens\":1}}}\n\n")
@@ -413,8 +413,8 @@ func toolUseSSE(toolID, toolName, delta1, delta2 string) string {
 	return b.String()
 }
 
-// custom 工具流式：中途不发 arguments delta，收拢发 custom_tool_call_input.done，
-// 输出项是 custom_tool_call（ctc_ 前缀 id）。对照 cc-switch 流式 custom 分支。
+// custom tool streaming: no arguments delta midway, custom_tool_call_input.done at close-out,
+// the output item is a custom_tool_call (ctc_ prefixed id). Mirrors cc-switch's streaming custom branch.
 func TestStreamCustomToolCall(t *testing.T) {
 	reg := buildToolRegistry([]interface{}{map[string]interface{}{"type": "custom", "name": "apply_patch"}})
 	var events []string
@@ -459,7 +459,7 @@ func TestStreamCustomToolCall(t *testing.T) {
 	}
 }
 
-// namespace 工具流式：arguments delta 照常透传，done 项还原 name+namespace。
+// namespace tool streaming: arguments deltas pass through as usual, the done item restores name+namespace.
 func TestStreamNamespaceToolCall(t *testing.T) {
 	reg := buildToolRegistry([]interface{}{
 		map[string]interface{}{
@@ -500,7 +500,7 @@ func TestStreamNamespaceToolCall(t *testing.T) {
 	}
 }
 
-// Read 工具流式：中途抑制 delta（避免漏出待清理片段），收拢时 sanitize pages:""。
+// Read tool streaming: deltas suppressed midway (avoiding leaking unsanitized fragments), pages:"" sanitized at close-out.
 func TestStreamReadToolSanitize(t *testing.T) {
 	var events []string
 	conv := newAnthToRespStream(func(ev string) { events = append(events, ev) }, "m", nil)
@@ -536,10 +536,10 @@ func TestStreamReadToolSanitize(t *testing.T) {
 	}
 }
 
-// ---- 工具结果媒体剥离 ----
+// ---- Tool-result media stripping ----
 
-// 对照 cc-switch test_alternate_mcp_tool_image_is_not_stringified_for_anthropic：
-// output 数组里的 MCP image 块 → [标记文本, image 块]，base64 不进文本。
+// Mirrors cc-switch test_alternate_mcp_tool_image_is_not_stringified_for_anthropic:
+// an MCP image block in the output array → [marker text, image block], base64 doesn't enter text.
 func TestMCPToolImageNotStringified(t *testing.T) {
 	body := map[string]interface{}{
 		"model": "m",
@@ -578,8 +578,8 @@ func TestMCPToolImageNotStringified(t *testing.T) {
 	}
 }
 
-// 对照 cc-switch test_json_string_nested_tool_image_is_not_text_for_anthropic：
-// output 字符串里的 JSON 嵌 image_url → image 块提取，残留大 base64 被 clamp。
+// Mirrors cc-switch test_json_string_nested_tool_image_is_not_text_for_anthropic:
+// a JSON-nested image_url in the output string → extracted into an image block, leftover big base64 clamped.
 func TestJSONStringNestedToolImage(t *testing.T) {
 	residual := strings.Repeat("A", 20000)
 	encoded, _ := json.Marshal(map[string]interface{}{
@@ -628,7 +628,7 @@ func TestJSONStringNestedToolImage(t *testing.T) {
 	}
 }
 
-// error marker 文本 → tool_result is_error（对照 cc-switch TOOL_RESULT_ERROR_MARKER 分支）。
+// error-marker text → tool_result is_error (mirrors cc-switch's TOOL_RESULT_ERROR_MARKER branch).
 func TestToolResultErrorMarker(t *testing.T) {
 	item := map[string]interface{}{
 		"type": "function_call_output", "call_id": "c1",
@@ -645,14 +645,14 @@ func TestToolResultErrorMarker(t *testing.T) {
 	if len(blocks) != 1 || objStr(blocks[0].(map[string]interface{}), "text") != "boom" {
 		t.Errorf("marker 本身不进内容: %v", blocks)
 	}
-	// 普通字符串 output 不受影响。
+	// Plain string output unaffected.
 	c2, e2 := toolResultContentFromResponsesItem(map[string]interface{}{"output": "正常结果"})
 	if e2 || c2 != "正常结果" {
 		t.Errorf("普通字符串=%v err=%v", c2, e2)
 	}
 }
 
-// input_file → document 块（消息内容里与工具结果里两条路径都覆盖）。
+// input_file → document block (both the message-content path and the tool-result path covered).
 func TestInputFileToDocument(t *testing.T) {
 	blk := documentBlockFromInputFile(map[string]interface{}{
 		"type": "input_file", "filename": "a.pdf",
@@ -665,14 +665,14 @@ func TestInputFileToDocument(t *testing.T) {
 	if src["type"] != "base64" || src["media_type"] != "application/pdf" || src["data"] != "AAA=" {
 		t.Errorf("source=%v", src)
 	}
-	// file_url 形式。
+	// file_url form.
 	blk2 := documentBlockFromInputFile(map[string]interface{}{
 		"type": "input_file", "file_url": "https://x.com/a.pdf",
 	})
 	if blk2 == nil || blk2["source"].(map[string]interface{})["url"] != "https://x.com/a.pdf" {
 		t.Errorf("url 形式=%v", blk2)
 	}
-	// 消息内容路径。
+	// Message-content path.
 	body := map[string]interface{}{
 		"model": "m",
 		"input": []interface{}{
@@ -700,7 +700,7 @@ func TestInputFileToDocument(t *testing.T) {
 
 // ---- usage ----
 
-// 对照 cc-switch build_responses_usage_from_anthropic：cache_write_tokens 嵌套 + 顶层别名。
+// Mirrors cc-switch build_responses_usage_from_anthropic: cache_write_tokens nested + a top-level alias.
 func TestUsageCacheWriteTokens(t *testing.T) {
 	u := buildResponsesUsage(map[string]interface{}{
 		"input_tokens":                float64(10),

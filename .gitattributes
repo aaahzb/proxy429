@@ -1,2 +1,2 @@
-# bash 脚本必须 LF 签出（本仓库 autocrlf=true，CRLF 会让 bash 报 \r 命令不存在）
+# bash scripts must check out as LF (this repo has autocrlf=true; CRLF makes bash fail with "\r: command not found")
 codex-setup.sh text eol=lf
