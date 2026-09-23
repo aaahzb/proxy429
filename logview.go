@@ -1217,7 +1217,7 @@ let autoTrack = true; // 勾选时 poll 自动跟踪最新在途流（id 最大=
 let maxFlights = 3; // 自动跟踪多流模式下最多并排显示多少个在途流（最新 N 个），防止太多太细
 let flightViewRaw = false; // 查看区显示模式：false=解析文本，true=原始 SSE
 let flightEnded = false; // 选中的流是否已结束（结束后停止拉取，保留最后内容）
-let flightViewWhat = 'resp'; // 手选单流查看内容：'resp'=输出流，'req'=下游请求体（仅手选单流可切）
+let flightViewWhat = 'resp'; // 手选单流查看内容三态：'resp'=输出[流]，'asm'=输出[整理]，'req'=请求体（仅手选单流可切，「看…」按钮按 请求体→输出[流]→输出[整理] 循环）
 let lastReqRaw = ''; // 当前选中流当前链路侧的请求体缓存（切到 req 或切链路侧时拉一次；请求体静态不变）
 let flightViewSide = 'up'; // 查看链路侧：'up'=代理↔上游（默认观测面），'down'=下游↔代理；请求体/输出共用，点「链路」按钮切换
 let fullStoreOn = false; // 「储存完整结构体」开关（以服务端为准）：开=可下载完整请求体/输出
@@ -1525,15 +1525,16 @@ function updateFlightViewChrome(){
   var dlBtn = document.getElementById('flightViewDlBtn');
   var dlOutBtn = document.getElementById('flightViewDlOutBtn');
   var treeBtn = document.getElementById('flightViewTreeBtn');
+  var rawBtn = document.getElementById('flightViewRawBtn');
   var fl = flightFlags[selectedFlight] || {};
   var down = flightViewSide==='down';
   if(selectedFlight){
     whatBtn.style.display = '';
-    whatBtn.textContent = flightViewWhat==='req' ? '看输出' : '看请求体';
+    whatBtn.textContent = flightViewWhat==='req' ? '看输出[流]' : (flightViewWhat==='resp' ? '看输出[整理]' : '看请求体');
     sideBtn.style.display = '';
     sideBtn.textContent = down ? '链路:下游<->代理' : '链路:代理<->上游'; // ASCII 箭头：↔ 在按钮上会走 emoji 字体，挤且丑
     // 类型标签带链路侧后缀：请求体[代理→上游] / 输出[上游→代理] / 请求体[下游→代理] / 输出[代理→下游]
-    var kind = flightViewWhat==='req' ? '请求体' : '输出';
+    var kind = flightViewWhat==='req' ? '请求体' : (flightViewWhat==='asm' ? '输出[整理]' : '输出[流]');
     kind += down ? (flightViewWhat==='req' ? '[下游→代理]' : '[代理→下游]') : (flightViewWhat==='req' ? '[代理→上游]' : '[上游→代理]');
     document.getElementById('flightViewKind').textContent = kind;
     dlBtn.style.display = fullStoreOn ? '' : 'none';
@@ -1542,7 +1543,8 @@ function updateFlightViewChrome(){
     dlOutBtn.style.display = fullStoreOn ? '' : 'none';
     dlOutBtn.disabled = down ? fl.hfd === false : fl.hf === false;
     dlOutBtn.title = dlOutBtn.disabled ? '该流未记录完整输出（开启前已开始/已清空/无透传内容）' : '';
-    treeBtn.style.display = fullStoreOn ? '' : 'none';
+    treeBtn.style.display = (fullStoreOn && flightViewWhat!=='asm') ? '' : 'none';
+    rawBtn.style.display = flightViewWhat==='asm' ? 'none' : ''; // 整理视图没有 解析/原始 之分（也没有交互树的对象来源），两个按钮藏起
     treeBtn.textContent = flightViewTree ? '退出交互' : '交互式JSON';
   } else {
     whatBtn.style.display = 'none';
@@ -1551,6 +1553,7 @@ function updateFlightViewChrome(){
     dlBtn.style.display = 'none';
     dlOutBtn.style.display = 'none';
     treeBtn.style.display = 'none';
+    rawBtn.style.display = ''; // 无手选（grid 多流）时 显示原始/解析 仍可用
     document.getElementById('flightViewKind').textContent = '输出';
   }
 }
@@ -1574,12 +1577,13 @@ function renderReqBody(){
   if(fullStoreOn && !rt && disp.length > 262144) disp = disp.slice(0, 262144);
   fv.textContent = note + disp;
 }
-// renderRespFromLastRaw 用 lastRaw 按 解析/原始 重渲染输出视图（切回输出/退出交互树时用）。
+// renderRespFromLastRaw 用 lastRaw 重渲染输出视图（切回输出/退出交互树/切链路侧时用）：asm=整理成最终结构，否则按 解析/原始 渲染流。
 function renderRespFromLastRaw(){
   var fv = document.getElementById('flightView');
   if(lastRaw === ''){
     fv.textContent = flightEnded ? '（该流无透传内容：失败/重试用尽/非流式）' : '加载中…';
-  } else if(flightViewRaw){ fv.textContent = lastRaw; }
+  } else if(flightViewWhat==='asm'){ fv.textContent = assembledOutputText(lastRaw); }
+  else if(flightViewRaw){ fv.textContent = lastRaw; }
   else { var h = parseSSEHTML(lastRaw); fv.innerHTML = h || '<span class="ss-empty">（未解析出内容，点「显示原始」查看 SSE）</span>'; }
 }
 // ---- 交互式 JSON 树：默认全部折叠，点击键名行懒展开（子节点展开时才构建，大 JSON 不一次卡死）----
@@ -1656,6 +1660,73 @@ function sseToJSONArray(raw){
     out.push({event: ev, data: d});
   });
   return out;
+}
+// assembledOutputText 渲染 输出[整理]：整体 JSON（非流式/重建回传）直接美化；SSE 事件流整理成最终结构
+// （Anthropic 流按 message_start 骨架 + delta 累加组装，Responses 流取 response.completed 的 response 对象）；
+// 流未完整到达时顶部注明是部分快照；两种格式都不像时提示切回 输出[流]。
+function assembledOutputText(raw){
+  try{ return JSON.stringify(JSON.parse(raw), null, 2); }catch(e){}
+  var r = assembleSSEToObject(raw);
+  if(!r) return '（无法整理：输出不是 JSON 也不是可识别的 SSE 事件流；切回 输出[流] 或「显示原始」查看）';
+  return (r.complete ? '' : '（流未完整到达，以下是已到部分的整理）\n') + JSON.stringify(r.obj, null, 2);
+}
+// assembleSSEToObject 把 SSE 原文整理成最终响应对象（规则同服务端 collectStreamToJSON）：Anthropic 事件流 =
+// message_start 骨架 + content_block_start/delta 按 index 累加（text/thinking/signature/input_json）+ message_delta
+// 合并 stop_reason/usage，message_stop 标记完整；Responses 事件流 = response.completed/failed/incomplete 的
+// response 对象，在途则 response.created 壳 + 已到 output_item.done 项。返回 {obj, complete}；不像两种格式返回 null。
+function assembleSSEToObject(raw){
+  var evs = sseToJSONArray(raw);
+  if(!evs.length) return null;
+  var isResp = false;
+  for(var i=0;i<evs.length;i++){
+    var t0 = evs[i].event || (evs[i].data && evs[i].data.type) || '';
+    if(typeof t0 === 'string' && t0.indexOf('response.')===0){ isResp = true; break; }
+  }
+  if(isResp){
+    var resp = null, complete = false, items = [];
+    evs.forEach(function(e){
+      var d = e.data; if(!d || typeof d !== 'object') return;
+      var t = e.event || d.type || '';
+      if((t==='response.completed'||t==='response.failed'||t==='response.incomplete') && d.response){ resp = d.response; complete = true; }
+      else if((t==='response.created'||t==='response.in_progress') && d.response && !resp){ resp = d.response; }
+      else if(t==='response.output_item.done' && d.item){ items.push({i: d.output_index, item: d.item}); }
+    });
+    if(!resp) return null;
+    if(!complete && items.length){
+      resp = JSON.parse(JSON.stringify(resp));
+      items.sort(function(a,b){ return a.i-b.i; });
+      resp.output = items.map(function(x){ return x.item; });
+    }
+    return {obj: resp, complete: complete};
+  }
+  var msg = null, blocks = {}, usage = null, stopped = false;
+  evs.forEach(function(e){
+    var d = e.data; if(!d || typeof d !== 'object') return;
+    var t = d.type || e.event || '';
+    if(t==='message_start' && d.message){ msg = d.message; if(d.message.usage) usage = d.message.usage; }
+    else if(t==='content_block_start'){ blocks[d.index] = JSON.parse(JSON.stringify(d.content_block || {})); }
+    else if(t==='content_block_delta' && blocks[d.index]){
+      var b = blocks[d.index], dt = d.delta || {};
+      if(dt.type==='text_delta') b.text = (b.text||'') + (dt.text||'');
+      else if(dt.type==='thinking_delta') b.thinking = (b.thinking||'') + (dt.thinking||'');
+      else if(dt.type==='signature_delta') b.signature = (b.signature||'') + (dt.signature||'');
+      else if(dt.type==='input_json_delta') b._pj = (b._pj||'') + (dt.partial_json||'');
+    }
+    else if(t==='message_delta'){
+      if(msg && d.delta) Object.keys(d.delta).forEach(function(k){ msg[k] = d.delta[k]; });
+      if(d.usage){ usage = usage || {}; Object.keys(d.usage).forEach(function(k){ usage[k] = d.usage[k]; }); }
+    }
+    else if(t==='message_stop'){ stopped = true; }
+  });
+  if(!msg) return null;
+  msg = JSON.parse(JSON.stringify(msg));
+  msg.content = Object.keys(blocks).map(function(k){ return +k; }).sort(function(a,b){ return a-b; }).map(function(i){
+    var b = blocks[i];
+    if(b._pj !== undefined){ try{ b.input = JSON.parse(b._pj); }catch(e){ b.input = b._pj; } delete b._pj; }
+    return b;
+  });
+  if(usage) msg.usage = usage;
+  return {obj: msg, complete: stopped};
 }
 // 点击在途流/完成流行：切到单流模式（保持 autoTrack 勾选，由 selectedFlight 优先决定显示），显示该流。
 function selectFlight(id){
@@ -1749,7 +1820,7 @@ async function poll(){
       fv.style.whiteSpace = 'pre-wrap';
       fv.style.wordBreak = 'break-all';
       updateFlightViewChrome();
-      if(!flightEnded && flightViewWhat==='resp' && !flightViewTree){ // req 模式/交互树看的是静态内容，切回输出前不拉流
+      if(!flightEnded && flightViewWhat!=='req' && !flightViewTree){ // req 模式/交互树看的是静态内容，不拉流；输出[流]/输出[整理] 都随 poll 刷新
         try{
           const fr = await fetch('/__flight?id='+selectedFlight+'&side='+flightViewSide,{cache:'no-store'});
           if(fr.ok){
@@ -1760,7 +1831,8 @@ async function poll(){
             if(lastRaw === ''){
               fv.textContent = '（该流无透传内容：失败/重试用尽/非流式）';
             } else {
-              if(flightViewRaw){ fv.textContent = lastRaw; } else { var h = parseSSEHTML(lastRaw); fv.innerHTML = h || '<span class="ss-empty">（未解析出内容，点「显示原始」查看 SSE）</span>'; }
+              if(flightViewWhat==='asm'){ fv.textContent = assembledOutputText(lastRaw); }
+              else if(flightViewRaw){ fv.textContent = lastRaw; } else { var h = parseSSEHTML(lastRaw); fv.innerHTML = h || '<span class="ss-empty">（未解析出内容，点「显示原始」查看 SSE）</span>'; }
             }
             if(atBottom) fv.scrollTop = fv.scrollHeight; // 用户滚到底则跟随，否则不动
             // 完成流（不在在途列表）内容是静态快照，拉一次即可，停止重复拉取。
@@ -2272,22 +2344,26 @@ document.getElementById('flightViewRawBtn').onclick = () => {
     });
   }
 };
-// ---- 看请求体/看输出切换（仅手选单流；请求体拉一次即静态，下载用同一缓存）----
+// ---- 查看内容三态切换（请求体 → 输出[流] → 输出[整理] 循环；仅手选单流；请求体拉一次即静态，下载用同一缓存）----
 document.getElementById('flightViewWhatBtn').onclick = async () => {
   if(!selectedFlight) return;
-  var fv = document.getElementById('flightView');
-  if(flightViewWhat === 'resp'){
+  flightViewTree = false;
+  if(flightViewWhat === 'req'){
+    // 请求体 → 输出[流]：用 lastRaw 立即重渲染，未结束的流下一次 poll 继续刷新
+    flightViewWhat = 'resp';
+    updateFlightViewChrome();
+    renderRespFromLastRaw();
+  } else if(flightViewWhat === 'resp'){
+    // 输出[流] → 输出[整理]：同一 lastRaw 整理成最终结构（Anthropic 流按 message_start 骨架累加，Responses 流取 response.completed）
+    flightViewWhat = 'asm';
+    updateFlightViewChrome();
+    renderRespFromLastRaw();
+  } else {
+    // 输出[整理] → 请求体：拉一次静态请求体
     flightViewWhat = 'req';
-    flightViewTree = false;
     updateFlightViewChrome();
     await fetchFlightViewSide();
     updateFlightViewChrome();
-  } else {
-    flightViewWhat = 'resp';
-    flightViewTree = false;
-    updateFlightViewChrome();
-    // 回到输出视图：用 lastRaw 立即重渲染，未结束的流下一次 poll 继续刷新
-    renderRespFromLastRaw();
   }
 };
 // fetchFlightViewSide 按当前 请求体/输出 + 链路侧 拉一次查看区内容（看请求体/切链路侧共用）；
@@ -2572,7 +2648,7 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <h3>Responses API 监听口 responses_listen</h3>
       <p>顶层配置 <code>responses_listen</code>（空 = 不启用；配置模板默认演示 <code>127.0.0.1:8081</code>）设为如 <code>127.0.0.1:8081</code> 后，代理在该地址额外开一个 OpenAI Responses API 端点（<code>/v1/responses</code>）：把 Codex CLI 等只说 Responses 协议的工具接到 Anthropic 上游。请求被翻译成 Anthropic Messages 走主管线（路由/重试/本控制台监控照常生效），响应翻译回 Responses（客户端 stream:true 拿 SSE 事件流，false 拿一次性 JSON）。</p>
       <p>工具里的 model 名照常参与路由匹配：在 routes 加一条如 <code>gpt-5*</code> 即可指定上游与改写模型。改动保存重载即生效（监听口随配置动态启停）；与主端口一样永远仅本机可连。</p>
-      <p>翻译规则与 cc-switch 3.20.0 一致：<code>reasoning.effort</code> 按模型分类映射——adaptive 模型（fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6）翻成 <code>thinking:adaptive</code> + <code>output_config.effort</code>（fable-5/mythos-5 关不掉 thinking，显式 none 翻成 effort:low）；其余模型翻成 budget_tokens（low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576）。查表用客户端发来的 model 名（路由改写之前），想让表生效就把客户端 model 直接填目标模型名；反过来别名命中上表但路由目标模型能力不一致时（如别名叫 claude-fable-5 实际路由到只支持 budget 的 Kimi），在该路由条目配 <code>thinking:"budget"/"adaptive"</code> 覆盖（见下方参数速查）。工具映射（function/custom/namespace/tool_search/web_search/input_file）与完整映射表见使用说明.md「Responses 翻译映射表」。</p>
+      <p>翻译规则与 cc-switch 3.20.0 一致：<code>reasoning.effort</code> 按模型分类映射——adaptive 模型（fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6）翻成 <code>thinking:adaptive</code> + <code>output_config.effort</code>（fable-5/mythos-5 关不掉 thinking，显式 none 翻成 effort:low）；其余模型翻成 budget_tokens（low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576）。查表用客户端发来的 model 名（路由改写之前），想让表生效就把客户端 model 直接填目标模型名；反过来别名命中上表但路由目标模型能力不一致时（如别名叫 claude-fable-5 实际路由到只支持 budget 的 Kimi），在该路由条目配 <code>thinking:"budget"/"adaptive"</code> 覆盖（见下方参数速查）。工具映射（function/custom/namespace/tool_search/web_search/input_file）与完整映射表见使用说明.md「Responses 翻译映射表」。工具续轮历史缺可回放的签名思考块时由顶层 <code>allowNoThinkBlock4Anthropic</code> 兜底（<b>默认 true</b>：按所请思考档位照发，真被上游 400 拒了才自动关思考重试一次；false = cc-switch 式直接关思考——见「参数速查」）。</p>
       <p><b>思考/搜索信封</b>：签名 thinking 块与每次搜索的完整结果块（含 encrypted_content 正文）被自封装进 reasoning 项的 encrypted_content 随响应发给客户端，下轮客户端回放历史时还原上行——思考链不丢，追问直接读上次搜索到的正文、不再原关键字重搜。搜索信封带 url+key 哈希归属且整体经 key 派生掩码混淆（客户端历史里不躺明文 url/key 信息）：换了上游或 key 就解不开不还原（省 token），换模型不拦（实测照常解密）；旧对话的搜索块在上游过期（报 tool_call_id）时代理自动剥掉回放块重试一次，无感降级为需要时重新搜。</p>
       <p><b>Codex CLI 接入</b>：最省事——本控制台「配置」标签下方给出 Windows / macOS·Linux 两行一键命令（DeepSeek 文档同款格式，按编辑框实时生成：地址取 <code>responses_listen</code>；routes 每个 pattern 的代表名全部写进 Codex <code>/model</code> 菜单，下拉选中项为默认模型），复制到对应终端回车即运行，脚本由本代理实时烤制下发。仓库根目录另有交互版 <code>codex-setup.ps1</code>（Windows）与 <code>codex-setup.sh</code>（macOS/Linux）：选模型、备份后改写 config.toml、写模型目录、可一键还原。手动：编辑 <code>~/.codex/config.toml</code>——顶层 <code>model_provider = "proxy429"</code>、<code>model = "gpt-5-codex"</code>、<code>preferred_auth_method = "apikey"</code> + <code>forced_login_method = "api"</code>（免官方登录），加 <code>[model_providers.proxy429]</code> 段（<code>base_url = "http://127.0.0.1:8081/v1"</code>、<code>wire_api = "responses"</code>、<code>experimental_bearer_token</code> 填任意占位串）。改完重启 Codex。<b>503 且代理侧零日志</b>：系统代理或终端代理变量会把 127.0.0.1 的请求劫到代理服务器报 503——Windows 一键脚本安装时已自动写用户级 NO_PROXY（含 127.0.0.1）绕过；macOS 脚本自动把 NO_PROXY 写进 launchd 环境（GUI 应用与新终端窗口都生效）并安装登录项持久化（脚本选「还原」可撤销）；Linux 脚本只做体检并提示 <code>export NO_PROXY="localhost,127.0.0.1,::1"</code>；手动配置请自行 <code>setx NO_PROXY "localhost,127.0.0.1,::1"</code>（Windows）后重启 Codex。逐步教程见使用说明.md「让 Codex CLI 走代理」。</p>
       <h3>路由与能力兜底</h3>
@@ -2624,6 +2700,12 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <td style="padding:6px 8px;vertical-align:top">默认关（不写 = 原样透传）。动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」——开着思考避免 K3 被降级路由；budget 类模型 low 放不下（budget≥1024 且 ≤max_tokens/2）时放弃升级保持关；上游拒 thinking 时自动回退关思考重试一次；悄悄升级显双色徽标 [off-&gt;low]，历史兜底如实显示所请档位。注意翻译口在翻译时无法预知图片/搜索兜底交换，故兜底路由上的值只对 Anthropic 原生口生效</td>
       </tr>
       <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>allowNoThinkBlock4Anthropic</code></td>
+      <td style="padding:6px 8px;vertical-align:top">顶层</td>
+      <td style="padding:6px 8px;vertical-align:top"><b>工具续轮历史缺可回放的签名思考块时怎么办</b>（仅 Responses 翻译口；真 Anthropic 对开着思考的这种历史报 400）：true = 按所请思考档位照发，真被 400 拒了自动关思考重试一次（思考块不剥离、随回传带签名让下轮历史自愈）；false = cc-switch 式直接关思考</td>
+      <td style="padding:6px 8px;vertical-align:top"><b>不写 = true（先试模式）</b>。false 优先于 convertOff2Low 的历史兜底门；显式关思考的请求不受影响（convertOff2Low 的 low 升级照常）；fable-5/mythos-5 这种关不掉思考的模型仍直接报错；本就没打算思考的请求不空跑兜底</td>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
       <td style="padding:6px 8px;vertical-align:top"><code>multimodal_fallback</code></td>
       <td style="padding:6px 8px;vertical-align:top">顶层</td>
       <td style="padding:6px 8px;vertical-align:top">图片兜底上游</td>
@@ -2669,7 +2751,7 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <li><b>499</b>：状态码列中非 200 的状态码加方括号显示（如 [499]、[400]），一眼挑出异常流。重试/预算用尽时代理会向下游透传兜底 error 事件（overloaded_error），此类流状态码列显 [重试尽]（点击行可回看该兜底事件）。发生过退避重试的流在状态码后追加金色 <code>[重试N次]</code>（N = 重试次数，如 200[重试2次]；[重试尽] 时同样带，可对照 max_retries 看是否打满）。499 口径与上游提供商后台一致——上游响应没发完连接就结束了记 499（最常见是下游主动取消，取消会传导成上游断连；nginx 惯例 client closed request）；上游完整发完后下游才断开的（Codex 收完 response.completed 即关连接）仍记 200。</li>
       </ul>
       <h3>流查看</h3>
-      <p>点击在途流/最近完成流的行可看该流内容：默认看输出（「显示解析/显示原始」切换）；「看请求体」回看导致这个流的请求体（JSON 自动美化，非完整 JSON 按原文显示）。请求体与输出都按链路侧记录、点「链路」按钮切换：默认 代理↔上游 侧（请求体是实际发给上游的，输出是上游回来的原始流）；下游↔代理 侧是客户端发出/实际收到的。只有两侧有差异的流才双存——Responses 翻译流恒不同（下游 Responses、上游 Anthropic 各一份）；convertAlltoStream 重建 JSON 的流下游侧输出是重建后的一次性 JSON；原生流只在请求体被改写（分类器关思考/路由改模型等）时才单独存下游侧请求体——切到无记录的一侧会自动回退另一侧并在按钮旁提示。浏览一律只给前 256KB。勾选「储存完整结构体」（默认关，重启复位）后，新开始的请求额外记录完整请求体与输出（不设上限，占内存），查看器出现「下载请求体/下载输出」按钮可下载完整文件（JSON 美化后保存，非 JSON 按原文；按当前链路侧下载，缺侧回退时文件名按实际返回侧命名），以及「交互式JSON」按钮——把请求体/输出渲染成可按键折叠展开的 JSON 树（默认全部折叠，点键名行懒展开；输出是 SSE 事件流时解析成事件数组再成树）；取消勾选立即清空已存的完整副本、下载与交互按钮消失。数据残缺的流不会静默当成完整版：请求体只剩截断版的「下载请求体」置灰（悬停见原因），无完整输出副本的「下载输出」置灰（均按当前链路侧判定），交互式JSON 对这两类直接提示不看。</p>
+      <p>点击在途流/最近完成流的行可看该流内容：默认看输出[流]（「显示解析/显示原始」切换）；「看…」按钮三态循环 请求体 → 输出[流] → 输出[整理]——输出[整理]把 SSE 事件流整理成最终 JSON 结构看整体（Anthropic 流按 message_start 骨架累加，Responses 流取 response.completed；流未完整到达时注明是部分快照），请求体视图回看导致这个流的请求体（JSON 自动美化，非完整 JSON 按原文显示）。请求体与输出都按链路侧记录、点「链路」按钮切换：默认 代理↔上游 侧（请求体是实际发给上游的，输出是上游回来的原始流）；下游↔代理 侧是客户端发出/实际收到的。只有两侧有差异的流才双存——Responses 翻译流恒不同（下游 Responses、上游 Anthropic 各一份）；convertAlltoStream 重建 JSON 的流下游侧输出是重建后的一次性 JSON；原生流只在请求体被改写（分类器关思考/路由改模型等）时才单独存下游侧请求体——切到无记录的一侧会自动回退另一侧并在按钮旁提示。浏览一律只给前 256KB。勾选「储存完整结构体」（默认关，重启复位）后，新开始的请求额外记录完整请求体与输出（不设上限，占内存），查看器出现「下载请求体/下载输出」按钮可下载完整文件（JSON 美化后保存，非 JSON 按原文；按当前链路侧下载，缺侧回退时文件名按实际返回侧命名），以及「交互式JSON」按钮——把请求体/输出渲染成可按键折叠展开的 JSON 树（默认全部折叠，点键名行懒展开；输出是 SSE 事件流时解析成事件数组再成树）；取消勾选立即清空已存的完整副本、下载与交互按钮消失。数据残缺的流不会静默当成完整版：请求体只剩截断版的「下载请求体」置灰（悬停见原因），无完整输出副本的「下载输出」置灰（均按当前链路侧判定），交互式JSON 对这两类直接提示不看。</p>
       <h3>配置管理</h3>
       <ul>
       <li>配置页可新建 / 重命名 / 删除 / 切换配置文件。</li>
@@ -2696,7 +2778,7 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <h3>Responses API listener: responses_listen</h3>
       <p>Set the top-level <code>responses_listen</code> (empty = off; the config template demonstrates <code>127.0.0.1:8081</code>) and the proxy opens an extra OpenAI Responses API endpoint (<code>/v1/responses</code>) at that address: tools that only speak the Responses protocol (Codex CLI etc.) are bridged to Anthropic upstreams. Requests are translated to Anthropic Messages and run through the main pipeline (routing/retries/this console's monitoring all apply); responses are translated back to Responses (SSE event stream for stream:true, one-shot JSON for false).</p>
       <p>Model names from the tool still join route matching: add a route like <code>gpt-5*</code> to pick the upstream and rewrite the model. Changes apply on save/reload (the listener starts/stops with config); like the main port, it is only ever reachable from this machine.</p>
-      <p>Translation rules match cc-switch 3.20.0: <code>reasoning.effort</code> maps by model class — adaptive models (fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6) become <code>thinking:adaptive</code> + <code>output_config.effort</code> (fable-5/mythos-5 cannot disable thinking; explicit none becomes effort:low); other models become budget_tokens (low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576). The lookup uses the client-sent model name (before route rewriting), so to make the table apply, set the client model directly to the target model name; conversely, when an alias hits the table but the routed target differs in capability (e.g. alias claude-fable-5 actually routed to budget-only Kimi), set <code>thinking:"budget"/"adaptive"</code> on that route entry to override (see the cheat sheet below). Tool mapping (function/custom/namespace/tool_search/web_search/input_file) and the full mapping table: see docs/USAGE.md, section Responses translation map.</p>
+      <p>Translation rules match cc-switch 3.20.0: <code>reasoning.effort</code> maps by model class — adaptive models (fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6) become <code>thinking:adaptive</code> + <code>output_config.effort</code> (fable-5/mythos-5 cannot disable thinking; explicit none becomes effort:low); other models become budget_tokens (low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576). The lookup uses the client-sent model name (before route rewriting), so to make the table apply, set the client model directly to the target model name; conversely, when an alias hits the table but the routed target differs in capability (e.g. alias claude-fable-5 actually routed to budget-only Kimi), set <code>thinking:"budget"/"adaptive"</code> on that route entry to override (see the cheat sheet below). Tool mapping (function/custom/namespace/tool_search/web_search/input_file) and the full mapping table: see docs/USAGE.md, section Responses translation map. When a tool continuation's history has no replayable signed thinking block, the top-level <code>allowNoThinkBlock4Anthropic</code> governs (<b>default true</b>: send the requested thinking mode; one automatic thinking-off retry if the upstream really 400s; false = cc-switch-style preemptive thinking-off — see the cheat sheet).</p>
       <p><b>Thinking/search envelopes</b>: signed thinking blocks and each search's full result block (with encrypted_content body) are self-enveloped into the reasoning item's encrypted_content and sent to the client with the response; when the client replays history next turn, they are restored upstream — the thinking chain survives, and follow-ups read the previously searched body directly instead of re-searching the same keywords. Search envelopes carry a url+key hash ownership and are wholly masked with a key-derived cipher (no plaintext url/key sits in client history): change upstream or key and they cannot be decrypted or restored (saves tokens); changing models is not blocked (decryption verified to work). When an old conversation's search block has expired upstream (tool_call_id error), the proxy automatically strips the replayed blocks and retries once — a seamless degradation to searching again when needed.</p>
       <p><b>Codex CLI setup</b>: easiest — the Config tab of this console shows two one-line commands for Windows / macOS·Linux (same format as DeepSeek docs, generated live from the editor: address from <code>responses_listen</code>; every routes pattern's representative name is written into the Codex <code>/model</code> menu, the dropdown selection being the default model). Copy into the matching terminal and press Enter; the script is baked and served by this proxy in real time. The repo root also has interactive versions <code>codex-setup.ps1</code> (Windows) and <code>codex-setup.sh</code> (macOS/Linux): pick a model, back up then rewrite config.toml, write the model catalog, one-command restore. Manual: edit <code>~/.codex/config.toml</code> — top-level <code>model_provider = "proxy429"</code>, <code>model = "gpt-5-codex"</code>, <code>preferred_auth_method = "apikey"</code> + <code>forced_login_method = "api"</code> (no official login), plus a <code>[model_providers.proxy429]</code> section (<code>base_url = "http://127.0.0.1:8081/v1"</code>, <code>wire_api = "responses"</code>, <code>experimental_bearer_token</code> = any placeholder string). Restart Codex after editing. <b>503 with zero proxy-side logs</b>: a system proxy or terminal proxy variables hijack 127.0.0.1 requests to a proxy server that returns 503 — the Windows one-line installer already writes a user-level NO_PROXY (including 127.0.0.1) to bypass; the macOS script writes NO_PROXY into the launchd environment (applies to GUI apps and new terminals) and installs a login item for persistence (choose "restore" in the script to undo); the Linux script only checks and suggests <code>export NO_PROXY="localhost,127.0.0.1,::1"</code>; for manual setup run <code>setx NO_PROXY "localhost,127.0.0.1,::1"</code> (Windows) then restart Codex. Step-by-step guide: docs/USAGE.md, section Run Codex CLI through the proxy.</p>
       <h3>Routing & capability fallbacks</h3>
@@ -2744,6 +2826,12 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <td style="padding:6px 8px;vertical-align:top">Default off (unset = requests pass through untouched). Motivation: Kimi's docs state that with thinking off, K3-series requests are routed to the K2.8 Preview (no-thinking) model — keeping thinking on avoids that downgrade. Budget-class models abandon the upgrade (staying off) when low doesn't fit (budget ≥1024 and ≤max_tokens/2). One automatic retry with thinking off if the upstream rejects thinking. The quiet upgrade shows a two-tone [off-&gt;low] badge; the history fallback shows the requested effort as-is. Note the translation port can't foresee an image/search fallback swap at translation time, so fallback-route values only affect the native port</td>
       </tr>
       <tr style="border-bottom:1px solid #2a2a2a">
+      <td style="padding:6px 8px;vertical-align:top"><code>allowNoThinkBlock4Anthropic</code></td>
+      <td style="padding:6px 8px;vertical-align:top">Top level</td>
+      <td style="padding:6px 8px;vertical-align:top"><b>What to do when a tool continuation's history has no replayable signed thinking block</b> (Responses translation port only; real Anthropic 400s on such histories with thinking on): true = send the requested thinking mode as-is, one automatic thinking-off retry if really rejected (blocks are NOT stripped — they ride the return carrying signatures, so next-turn history heals); false = cc-switch-style preemptive thinking-off</td>
+      <td style="padding:6px 8px;vertical-align:top"><b>Unset = true (try-first mode)</b>. false wins over convertOff2Low's history door; explicit thinking-off requests are unaffected (convertOff2Low's low upgrade still applies); models that cannot disable thinking (fable-5/mythos-5) still error; requests that wouldn't think anyway don't waste the fallback round trip</td>
+      </tr>
+      <tr style="border-bottom:1px solid #2a2a2a">
       <td style="padding:6px 8px;vertical-align:top"><code>multimodal_fallback</code></td>
       <td style="padding:6px 8px;vertical-align:top">Top level</td>
       <td style="padding:6px 8px;vertical-align:top">Image fallback upstream</td>
@@ -2784,7 +2872,7 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <li><b>API column</b>: protocol origin + thinking value in one cell. Name = protocol origin: orange <code>[Anthropic]</code> = native Anthropic-port traffic (Claude Code etc.), purple <code>[translate]</code> = Responses port translated to Anthropic via the main pipeline. The <code>[value]</code> after the name = the shortest form of the thinking config <b>actually sent upstream</b> (final state after proxy rewrites like translation mapping and classifier thinking-off), <b>its color = the vocabulary</b> (thinking targets the upstream: upstreams always receive Anthropic format, so a purple name is followed by an orange value) — orange = Anthropic thinking. Values: <code>off</code> = thinking disabled or effort none/off/disabled; <code>on N</code> = enabled + budget_tokens N; <code>adaptive</code> = adaptive without level; <code>low</code>/<code>high</code>/<code>max</code> etc = effort of adaptive; no <code>[value]</code> = the request carried no thinking field. Examples: <code>[translate][on 16384]</code> = Codex sent effort high, translated to an Anthropic upstream; <code>[Anthropic][off]</code> = hit the classifier and the proxy disabled thinking.</li>
       <li><b>499</b>: non-200 status codes in the status column are bracketed (e.g. [499], [400]) to spot abnormal streams at a glance. When retries/budget are exhausted, the proxy forwards a fallback error event (overloaded_error) downstream; such streams show [retries exhausted] in the status column (click the row to replay that fallback event). Streams that went through backoff retries get a gold <code>[retried Nx]</code> after the status code (N = retry count, e.g. 200[retried 2x]; [retries exhausted] carries it too — compare against max_retries to see if it maxed out). The 499 semantics match upstream provider dashboards — the connection ended before the upstream finished sending (most commonly the downstream actively cancelled, and the cancellation propagates into an upstream disconnect; nginx convention: client closed request); when the downstream disconnects only after the upstream finished completely (Codex closes the connection right after response.completed), it's still 200.</li>
       <h3>Stream viewer</h3>
-      <p>Click an in-flight or finished stream's row to view its content: output by default (toggle "Parsed/Raw"); "Request body" replays the request body that caused this stream (JSON pretty-printed, non-complete JSON shown verbatim). Request body and output are recorded per link side — toggle with the "Link" button: the default proxy↔upstream side holds the request body actually sent upstream and the raw stream coming back; the client↔proxy side holds what the client sent and actually received. Only streams whose two sides differ are stored twice — Responses translation streams always differ (Responses downstream, Anthropic upstream, one copy each); for convertAlltoStream JSON-rebuilt streams the downstream output is the rebuilt one-shot JSON; direct streams record a separate downstream request body only when the body was rewritten (classifier thinking-off, route model change, etc.) — switching to a side with no record falls back to the other side, with a hint next to the button. Browsing always caps at the first 256KB. With "Store full payloads" on (default off, resets on restart), new requests additionally record the full request body and output (no cap, in memory), and the viewer shows "Download request/Download output" buttons for complete files (JSON pretty-printed, non-JSON verbatim; downloads follow the current link side, and on fallback the file name uses the actually-served side), plus an "Interactive JSON" button — rendering the request body/output as a collapsible JSON tree (all collapsed by default, click a key row to lazily expand; SSE event streams are parsed into an event array first). Unchecking immediately purges stored full copies and the download/interactive buttons disappear. Streams with incomplete data are never silently treated as complete: "Download request" is greyed out when only a truncated request body remains (hover for the reason), "Download output" is greyed out without a full output copy (both judged per current link side), and Interactive JSON plainly declines both cases.</p>
+      <p>Click an in-flight or finished stream's row to view its content: Output [stream] by default (toggle "Parsed/Raw"); the view button cycles three states — Request body → Output [stream] → Output [assembled], the last folding the SSE event stream into the final JSON structure (Anthropic streams accumulate onto the message_start skeleton, Responses streams take the response.completed object; an incomplete stream is marked as a partial snapshot); the request-body state replays the request body that caused this stream (JSON pretty-printed, non-complete JSON shown verbatim). Request body and output are recorded per link side — toggle with the "Link" button: the default proxy↔upstream side holds the request body actually sent upstream and the raw stream coming back; the client↔proxy side holds what the client sent and actually received. Only streams whose two sides differ are stored twice — Responses translation streams always differ (Responses downstream, Anthropic upstream, one copy each); for convertAlltoStream JSON-rebuilt streams the downstream output is the rebuilt one-shot JSON; direct streams record a separate downstream request body only when the body was rewritten (classifier thinking-off, route model change, etc.) — switching to a side with no record falls back to the other side, with a hint next to the button. Browsing always caps at the first 256KB. With "Store full payloads" on (default off, resets on restart), new requests additionally record the full request body and output (no cap, in memory), and the viewer shows "Download request/Download output" buttons for complete files (JSON pretty-printed, non-JSON verbatim; downloads follow the current link side, and on fallback the file name uses the actually-served side), plus an "Interactive JSON" button — rendering the request body/output as a collapsible JSON tree (all collapsed by default, click a key row to lazily expand; SSE event streams are parsed into an event array first). Unchecking immediately purges stored full copies and the download/interactive buttons disappear. Streams with incomplete data are never silently treated as complete: "Download request" is greyed out when only a truncated request body remains (hover for the reason), "Download output" is greyed out without a full output copy (both judged per current link side), and Interactive JSON plainly declines both cases.</p>
       <h3>Config management</h3>
       <li>The Config tab can create / rename / delete / switch config files.</li>
       <li>While on the Config tab, the file list auto-refreshes every 3 seconds — adding/removing config files needs no manual "refresh list".</li>
@@ -2946,8 +3034,10 @@ var enHTMLRepl = [][2]string{
 	{`'（内容不是 JSON 也不是 SSE 事件流，无法交互查看）'`, `'(Content is neither JSON nor an SSE event stream; cannot browse interactively)'`},
 	{`'该流请求体只剩截断版（前 256KB），完整版未记录或已清空'`, `'Only a truncated copy (first 256KB) of this stream request body remains; the full version was not recorded or was purged'`},
 	{`'该流未记录完整输出（开启前已开始/已清空/无透传内容）'`, `'No full output recorded for this stream (started before the switch was on / purged / no proxied content)'`},
-	{`flightViewWhat==='req' ? '看输出' : '看请求体'`, `flightViewWhat==='req' ? 'Output' : 'Request body'`},
-	{`flightViewWhat==='req' ? '请求体' : '输出'`, `flightViewWhat==='req' ? 'Request body' : 'Output'`},
+	{`flightViewWhat==='req' ? '看输出[流]' : (flightViewWhat==='resp' ? '看输出[整理]' : '看请求体')`, `flightViewWhat==='req' ? 'Output [stream]' : (flightViewWhat==='resp' ? 'Output [assembled]' : 'Request body')`},
+	{`flightViewWhat==='req' ? '请求体' : (flightViewWhat==='asm' ? '输出[整理]' : '输出[流]')`, `flightViewWhat==='req' ? 'Request body' : (flightViewWhat==='asm' ? 'Output [assembled]' : 'Output [stream]')`},
+	{`'（无法整理：输出不是 JSON 也不是可识别的 SSE 事件流；切回 输出[流] 或「显示原始」查看）'`, `'(Cannot assemble: the output is neither JSON nor a recognizable SSE event stream; switch back to Output [stream] or "Raw")'`},
+	{`'（流未完整到达，以下是已到部分的整理）\n'`, `'(Stream incomplete; the assembly below covers only what has arrived)\n'`},
 	{`down ? (flightViewWhat==='req' ? '[下游→代理]' : '[代理→下游]') : (flightViewWhat==='req' ? '[代理→上游]' : '[上游→代理]')`, `down ? (flightViewWhat==='req' ? '[client→proxy]' : '[proxy→client]') : (flightViewWhat==='req' ? '[proxy→upstream]' : '[upstream→proxy]')`},
 	{`链路:下游<->代理`, `Link: client<->proxy`},
 	{`链路:代理<->上游`, `Link: proxy<->upstream`},

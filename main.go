@@ -50,10 +50,22 @@ type Config struct {
 	SearchDebugDir           string           `json:"search_debug_dir,omitempty"`    // Search debug directory; when set, the raw request/response of each search-summary step is written there for troubleshooting
 	ConvertAllToStream       bool             `json:"convertAlltoStream"`            // Global stream conversion: when on, all non-streaming requests are sent upstream as streams, then rebuilt into a single non-streaming JSON response (transparent to the client; the web console shows live output/first-token/tok/s)
 	ResponsesListen          string           `json:"responses_listen"`              // OpenAI Responses API listener (e.g. 127.0.0.1:8081); empty = disabled. Translates Responses-protocol requests into Anthropic and feeds the main pipeline, for Codex CLI and similar tools. Starts/stops dynamically on save/reload
+
+	// AllowNoThinkBlock4Anthropic (Responses translation port only; nil/unset = true): a tool-continuation whose history has no
+	// replayable signed thinking block gets 400'd by real Anthropic when thinking is on. true (default) = send the requested thinking
+	// mode anyway; the main handler's one-shot fallback retries with thinking off if the upstream really rejects it. false = cc-switch
+	// mode: thinking preemptively off over such histories. Explicit thinking-off requests never take this door (convertOff2Low still
+	// governs those); the native port doesn't check history at all.
+	AllowNoThinkBlock4Anthropic *bool `json:"allowNoThinkBlock4Anthropic,omitempty"`
 }
 
 // The web console UI language is a program-level preference, not routing config: stored in program-settings.txt
 // in the config directory (same family as active-config.txt, see below); config files no longer carry ui_lang (legacy field migrated once at startup).
+
+// allowNoThinkBlock4Anthropic resolves the Config toggle: nil config / nil field = true (the try-first default; see the field's comment).
+func allowNoThinkBlock4Anthropic(c *Config) bool {
+	return c == nil || c.AllowNoThinkBlock4Anthropic == nil || *c.AllowNoThinkBlock4Anthropic
+}
 
 // RouteRule defines one model route: matched requests go to the specified upstream with the model name and API key replaced.
 // Pattern wildcards the model name with *; on hit, URL overrides the default upstream, API overrides the client token, Model rewrites the request body's model field.
@@ -4826,14 +4838,19 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			// The convertOff2Low upgrade was rejected by the upstream (e.g. thinking enabled over a no-thinking history — the history-fallback
-			// thinking-on mainly guards against this; rejection is effort-agnostic: send the requested effort, fall back if rejected): switch thinking back off and retry
-			// once immediately — the downstream wanted thinking off anyway (or at most accepts it off), so it's semantically lossless; no backoff budget burned (attempt--, same as the search-strip fallback).
+			// Thinking over a no-thinking-block history was rejected by the upstream (the n2l modes send thinking on purpose here — the
+			// stealth upgrade's low and the try-on mode's requested level; the rejection is effort-agnostic, rejecting "unsigned history
+			// with thinking on"): switch thinking back off and retry once immediately — the downstream wanted thinking off anyway (or at
+			// most accepts it off), so it's semantically lossless; no backoff budget burned (attempt--, same as the search-strip fallback).
 			// After the fallback the upstream receives thinking-off, so the response carries no thinking blocks and response-side stripping has nothing to do;
 			// the badge falls back to truthful display as well.
 			if n2lMode != n2lNone && bytes.Contains(head, []byte("thinking")) {
 				if nb, ok := disableThinkingInBody(body); ok {
-					log.Printf("[fallback] #%d upstream rejected the low-thinking upgrade (HTTP %d); reverted to thinking-off and retried", f.id, resp.StatusCode)
+					if n2lMode == n2lTryOn {
+						log.Printf("[fallback] #%d upstream rejected thinking over a no-thinking-block history (HTTP %d); reverted to thinking-off and retried", f.id, resp.StatusCode)
+					} else {
+						log.Printf("[fallback] #%d upstream rejected the low-thinking upgrade (HTTP %d); reverted to thinking-off and retried", f.id, resp.StatusCode)
+					}
 					stats.statusRetries.Add(1)
 					stats.addModelRetry(f.realModel())
 					body = nb

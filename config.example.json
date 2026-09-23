@@ -14,6 +14,7 @@
   "recent_sample_window": 20,
   "convertAlltoStream": false,
   "responses_listen": "127.0.0.1:8081",
+  "allowNoThinkBlock4Anthropic": true,
   "routes": [
     {
       "pattern": "claude-opus*",

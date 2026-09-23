@@ -214,7 +214,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// auto: fable-5 in the table → adaptive + effort mapping (high→high).
-	out, _, _, err := responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "", false)
+	out, _, _, err := responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "", false, true)
 	if err != nil {
 		t.Fatalf("auto err: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// budget forced: same fable-5 alias, route declares budget → enabled+16000 (capped), no output_config.
-	out, _, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "budget", false)
+	out, _, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "high"), nil, nil, "budget", false, true)
 	if err != nil {
 		t.Fatalf("budget err: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// adaptive forced: gpt-5-codex not in the table, route declares adaptive → adaptive+effort high.
-	out, _, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "high"), nil, nil, "adaptive", false)
+	out, _, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "high"), nil, nil, "adaptive", false, true)
 	if err != nil {
 		t.Fatalf("adaptive err: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// forced adaptive + explicit off (effort none) → disabled (cannotDisable overridden, off allowed).
-	out, _, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "adaptive", false)
+	out, _, _, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "adaptive", false, true)
 	if err != nil {
 		t.Fatalf("adaptive none err: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	}
 
 	// budget forced + explicit off → disabled.
-	out, _, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "none"), nil, nil, "budget", false)
+	out, _, _, err = responsesToAnthropicTriple(mk("claude-fable-5", "none"), nil, nil, "budget", false, true)
 	if err != nil {
 		t.Fatalf("budget none err: %v", err)
 	}

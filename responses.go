@@ -57,8 +57,9 @@ var ctxKeyNone2Low ctxKeyNone2LowT
 const (
 	n2lNone    = 0 // Not upgraded
 	n2lStealth = 1 // Implicit upgrade: downstream explicitly disabled thinking → sent as low upstream; thinking blocks stripped on return (downstream unaware) + [off->low] badge
-	n2lTryOn   = 2 // Fallback thinking-on: tool-continuation history isn't replayable — the proxy would have disabled thinking itself (off = Kimi routes K3 to the K2.8
-	// no-thinking variant); with the toggle on it instead sends at the downstream-requested level (none/unknown → low as the floor); thinking blocks aren't stripped — the downstream
+	n2lTryOn   = 2 // Fallback thinking-on: tool-continuation history isn't replayable — send the requested thinking mode anyway (the default,
+	// allowNoThinkBlock4Anthropic=true) and arm the main handler's one-shot thinking-off retry for a real rejection; under route convertOff2Low the level
+	// gets a low floor (none/unknown → low, keeping K3 off the K2.8 no-thinking variant). Thinking blocks aren't stripped — the downstream
 	// asked for thinking, so blocks ride the return carrying signatures and next-turn history self-heals
 )
 
@@ -264,7 +265,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	if origModel == "fast_route" && c.FastRoute != nil {
 		off2Low = c.FastRoute.ConvertOff2Low
 	}
-	anth, reg, n2l, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle, off2Low == "translate" || off2Low == "all")
+	anth, reg, n2l, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle, off2Low == "translate" || off2Low == "all", allowNoThinkBlock4Anthropic(c))
 	if err != nil {
 		writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -364,7 +365,7 @@ func isMeaningfulText(s string) bool { return strings.TrimSpace(s) != "" }
 // Mirrors cc-switch responses_request_to_anthropic. The returned tool registry records the original identities of custom/
 // namespace/tool_search tools; response translation (streaming and non-streaming) unpacks per it.
 func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, *toolRegistry, error) {
-	out, reg, _, err := responsesToAnthropicTriple(body, nil, nil, "", false)
+	out, reg, _, err := responsesToAnthropicTriple(body, nil, nil, "", false, true) // Test-facing wrapper: exercises the default (allowNoThinkBlock4Anthropic=true) semantics
 	return out, reg, err
 }
 
@@ -377,13 +378,16 @@ func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, 
 // none2Low=true (route convertOff2Low = "translate"/"all") upgrades in two places (4th return value n2l; three states see the constants):
 // ① downstream explicit thinking-off (effort none/off/disabled) → sent as low upstream, n2l=n2lStealth (thinking blocks stripped
 // on return, downstream unaware; usage passed through truthfully); ② tool-continuation history not replayable (trailingTurnSupportsThinking
-// =false) — the proxy's fallback would have been explicit thinking-off, and thinking-off happens to trigger Kimi routing K3 to the K2.8 no-thinking variant
-// (exactly what this parameter guards against). With the toggle on there's no more downgrading: send at the downstream-requested level as-is (none/unknown → low
-// floor), n2l=n2lTryOn (no stripping: blocks ride the return carrying signatures, next-turn history self-heals; if the upstream rejects, the main handler's
-// 400 fallback retreats to thinking-off and resends — the rejection is level-independent, rejecting "unsigned history with thinking on", so sending the requested level
-// and retreating only on rejection is safe).
+// =false) — thinking-off happens to trigger Kimi routing K3 to the K2.8 no-thinking variant (exactly what this parameter guards against), so there's
+// no downgrading: send at the downstream-requested level as-is (none/unknown → low floor), n2l=n2lTryOn (no stripping: blocks ride the return
+// carrying signatures, next-turn history self-heals).
+// allowNoThink (top-level allowNoThinkBlock4Anthropic, default true) governs the history door independently of none2Low: true = the normal
+// thinking decision goes upstream as-is with n2l=n2lTryOn armed — if the upstream really rejects "unsigned history with thinking on"
+// (the rejection is level-independent), the main handler's one-shot fallback retreats to thinking-off and resends; false = cc-switch mode,
+// thinking preemptively off over such histories (explicit thinking-off requests never take this door — they follow ① or plain disabled).
+// Under none2Low, true keeps ②'s floor-low try-on verbatim.
 // Motivation: Kimi's docs — "turning off thinking routes to the K2.8 Preview no-thinking variant"; keeping thinking on keeps K3 from being downgraded.
-func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx, thinkStyle string, none2Low bool) (map[string]interface{}, *toolRegistry, int, error) {
+func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx, thinkStyle string, none2Low bool, allowNoThink bool) (map[string]interface{}, *toolRegistry, int, error) {
 	result := map[string]interface{}{}
 	if model := objStr(body, "model"); model != "" {
 		result["model"] = model
@@ -528,28 +532,33 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		thinkingEnabled = true // The budget model's thinking field is written by the unified tail after the switch
 		return true
 	}
+	// A tool continuation missing a signed thinking block can't be replayed with thinking on (real Anthropic 400s). allowNoThink
+	// (top-level allowNoThinkBlock4Anthropic, default true) picks the strategy for such histories: true = send the normal thinking
+	// decision below anyway and arm the main handler's one-shot thinking-off retry (n2lTryOn); false = cc-switch mode (thinking
+	// preemptively off). Models that can't disable thinking error out directly (cc-switch's wording copied).
+	if !historyValid && cannotDisable {
+		return nil, nil, n2lNone, fmt.Errorf("Anthropic model requires thinking, but the tool history has no signed thinking block to replay")
+	}
 	switch {
-	case !historyValid:
-		// Tool continuation missing a signed thinking block is replayable: models that can't disable thinking error out directly (cc-switch's wording copied).
-		// With convertOff2Low on, the proxy no longer disables thinking itself (off = Kimi routes K3 to the K2.8 no-thinking variant,
-		// exactly what this parameter guards against, #11/#12 live incident): downstream explicit thinking-off goes the implicit upgrade (upgrade to low, strip
-		// thinking blocks on return); a downstream that wanted thinking (effort not an off level, the Codex norm — its level table has no none) is sent at
-		// the requested level (no stripping: blocks ride the return carrying signatures, next-turn history self-heals) — the upstream's rejection of "thinking on without
-		// thinking history" is level-independent; the main handler's one-shot 400 fallback retreats to thinking-off and resends. Toggle off keeps
-		// cc-switch behavior: disable-able adaptive models get explicit disabled; other models get no thinking.
-		if cannotDisable {
-			return nil, nil, n2lNone, fmt.Errorf("Anthropic model requires thinking, but the tool history has no signed thinking block to replay")
+	case !historyValid && explicitlyDisabled:
+		// The downstream asked for thinking off: an off request can't 400 on thinking, so allowNoThink doesn't apply here;
+		// convertOff2Low's implicit upgrade (low + strip on return) still governs. Otherwise off stays off — adaptive
+		// default-on models get an explicit disabled; budget models simply carry no thinking field.
+		if none2Low && upgradeNoneToLow() {
+			n2l = n2lStealth
+		} else if adaptiveShouldThink {
+			result["thinking"] = map[string]interface{}{"type": "disabled"}
 		}
-		switch {
-		case none2Low && explicitlyDisabled:
-			if upgradeNoneToLow() {
-				n2l = n2lStealth
-			}
-		case none2Low:
-			if tryRequestedThinking() {
-				n2l = n2lTryOn
-			}
-		case adaptiveShouldThink:
+	case !historyValid && none2Low && allowNoThink:
+		// convertOff2Low's anti-downgrade door (#11/#12 live incident: off = Kimi routes K3 to the K2.8 no-thinking variant):
+		// send at the downstream-requested level (none/unknown → low floor); no stripping — blocks ride the return carrying
+		// signatures, next-turn history self-heals; the main handler's one-shot fallback retreats to thinking-off on a real rejection.
+		if tryRequestedThinking() {
+			n2l = n2lTryOn
+		}
+	case !historyValid && !allowNoThink:
+		// cc-switch mode (allowNoThinkBlock4Anthropic=false): thinking preemptively off over a non-replayable history.
+		if adaptiveShouldThink {
 			result["thinking"] = map[string]interface{}{"type": "disabled"}
 		}
 	case adaptiveShouldThink && (!explicitlyDisabled || cannotDisable):
@@ -564,6 +573,11 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 				n2l = n2lStealth // The downstream wanted thinking off: with convertOff2Low on, thinking blocks are stripped on the return side
 			}
 		}
+		if !historyValid {
+			// allowNoThink=true without convertOff2Low (the default): the normal decision goes upstream as-is, armed — the
+			// upstream's rejection of "thinking on without thinking history" is level-independent, so the one-shot fallback covers it.
+			n2l = n2lTryOn
+		}
 	case explicitlyDisabled:
 		if none2Low && upgradeNoneToLow() {
 			n2l = n2lStealth
@@ -577,6 +591,9 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		}
 		if budget >= 1024 {
 			thinkingEnabled = true
+			if !historyValid {
+				n2l = n2lTryOn // Same allowNoThink arming as the adaptive arm (reached with !historyValid only in try-first mode)
+			}
 		}
 	}
 	if thinkingEnabled && !adaptiveModel {

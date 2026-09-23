@@ -23,7 +23,7 @@ func TestNone2LowUpgradeShapes(t *testing.T) {
 	}
 
 	// adaptive: adaptive + effort:low, implicit upgrade.
-	out, _, n2l, err := responsesToAnthropicTriple(mk("claude-fable-5", "none"), nil, nil, "", true)
+	out, _, n2l, err := responsesToAnthropicTriple(mk("claude-fable-5", "none"), nil, nil, "", true, true)
 	if err != nil {
 		t.Fatalf("adaptive err: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestNone2LowUpgradeShapes(t *testing.T) {
 	}
 
 	// budget: enabled+2048, implicit upgrade, no output_config.
-	out, _, n2l, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "", true)
+	out, _, n2l, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "", true, true)
 	if err != nil {
 		t.Fatalf("budget err: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestNone2LowUpgradeShapes(t *testing.T) {
 	// max_output_tokens=1000 → capped at 500, below the 1024 floor: upgrade abandoned, stays disabled.
 	small := mk("gpt-5-codex", "none")
 	small["max_output_tokens"] = 1000
-	out, _, n2l, err = responsesToAnthropicTriple(small, nil, nil, "", true)
+	out, _, n2l, err = responsesToAnthropicTriple(small, nil, nil, "", true, true)
 	if err != nil {
 		t.Fatalf("small err: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestNone2LowUpgradeShapes(t *testing.T) {
 	}
 
 	// Toggle off: explicit-off goes down as disabled, no upgrade.
-	out, _, n2l, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "", false)
+	out, _, n2l, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "", false, true)
 	if err != nil {
 		t.Fatalf("off err: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestNone2LowUpgradeShapes(t *testing.T) {
 	}
 
 	// Non-thinking-off requests aren't upgraded: high goes through as enabled/16000 (default 32000 half-capped).
-	out, _, n2l, err = responsesToAnthropicTriple(mk("gpt-5-codex", "high"), nil, nil, "", true)
+	out, _, n2l, err = responsesToAnthropicTriple(mk("gpt-5-codex", "high"), nil, nil, "", true, true)
 	if err != nil {
 		t.Fatalf("high err: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestNone2LowUpgradeShapes(t *testing.T) {
 	// After the upgrade, temperature is not passed through (the thinking-on mutual-exclusion rule, same as the normal path).
 	withTemp := mk("gpt-5-codex", "none")
 	withTemp["temperature"] = 0.5
-	out, _, n2l, err = responsesToAnthropicTriple(withTemp, nil, nil, "", true)
+	out, _, n2l, err = responsesToAnthropicTriple(withTemp, nil, nil, "", true, true)
 	if err != nil {
 		t.Fatalf("temp err: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestNone2LowUpgradeToolContinuation(t *testing.T) {
 		}
 	}
 
-	out, _, n2l, err := responsesToAnthropicTriple(mk(), nil, nil, "", true)
+	out, _, n2l, err := responsesToAnthropicTriple(mk(), nil, nil, "", true, true)
 	if err != nil {
 		t.Fatalf("续轮 err: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestNone2LowUpgradeToolContinuation(t *testing.T) {
 	}
 
 	// Control: with the toggle off, tool continuation doesn't enable thinking (the budget path is skipped wholesale; the thinking field doesn't appear).
-	out, _, n2l, err = responsesToAnthropicTriple(mk(), nil, nil, "", false)
+	out, _, n2l, err = responsesToAnthropicTriple(mk(), nil, nil, "", false, true)
 	if err != nil {
 		t.Fatalf("续轮对照 err: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestNone2LowUpgradeToolContinuation(t *testing.T) {
 // no-thinking variant); with convertOff2Low on, it sends at the downstream-requested effort as-is: a budget route gets the matching budget (max→16384 capped at
 // max_tokens/2=16000), an adaptive route (the user's configured k3-256k route shape) gets output_config.effort=
 // the requested level; none/unknown → low as the floor. n2l=n2lTryOn rather than n2lStealth — the downstream asked for thinking, so the return
-// side must not strip thinking blocks (blocks ride the return carrying signatures; next-turn history self-heals). Toggle off keeps the old behavior.
+// side must not strip thinking blocks (blocks ride the return carrying signatures; next-turn history self-heals). allowNoThinkBlock4Anthropic=false keeps the cc-switch behavior (false wins over convertOff2Low's try-on door).
 func TestNone2LowTryOnInvalidHistory(t *testing.T) {
 	mk := func(model, effort string) map[string]interface{} {
 		return map[string]interface{}{
@@ -161,7 +161,7 @@ func TestNone2LowTryOnInvalidHistory(t *testing.T) {
 	}
 
 	// budget route + effort max + non-replayable history + toggle on → sent at the requested level (not an implicit upgrade).
-	out, _, n2l, err := responsesToAnthropicTriple(mk("gpt-5-codex", "max"), nil, nil, "", true)
+	out, _, n2l, err := responsesToAnthropicTriple(mk("gpt-5-codex", "max"), nil, nil, "", true, true)
 	if err != nil {
 		t.Fatalf("tryon budget err: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestNone2LowTryOnInvalidHistory(t *testing.T) {
 	}
 
 	// adaptive route (the thinkStyle shape of the user's k3-256k route) + effort max → the requested level max.
-	out, _, n2l, err = responsesToAnthropicTriple(mk("fable", "max"), nil, nil, "adaptive", true)
+	out, _, n2l, err = responsesToAnthropicTriple(mk("fable", "max"), nil, nil, "adaptive", true, true)
 	if err != nil {
 		t.Fatalf("tryon adaptive err: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestNone2LowTryOnInvalidHistory(t *testing.T) {
 	// adaptive route + downstream gave no level (reasoning absent) → low as the floor, still a fallback thinking-on.
 	noEffort := mk("fable", "")
 	delete(noEffort, "reasoning")
-	out, _, n2l, err = responsesToAnthropicTriple(noEffort, nil, nil, "adaptive", true)
+	out, _, n2l, err = responsesToAnthropicTriple(noEffort, nil, nil, "adaptive", true, true)
 	if err != nil {
 		t.Fatalf("tryon 保底 err: %v", err)
 	}
@@ -204,8 +204,8 @@ func TestNone2LowTryOnInvalidHistory(t *testing.T) {
 		t.Errorf("tryon 保底: thinking=%v output_config=%v, want adaptive/low", th, out["output_config"])
 	}
 
-	// Control: toggle off → keep the cc-switch fallback, sending explicit thinking-off upstream.
-	out, _, n2l, err = responsesToAnthropicTriple(mk("fable", "max"), nil, nil, "adaptive", false)
+	// Control: allowNoThinkBlock4Anthropic=false wins over convertOff2Low's try-on door → keep the cc-switch fallback, sending explicit thinking-off upstream.
+	out, _, n2l, err = responsesToAnthropicTriple(mk("fable", "max"), nil, nil, "adaptive", true, false)
 	if err != nil {
 		t.Fatalf("tryon 对照 err: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestNone2LowToolChoiceConflict(t *testing.T) {
 		"reasoning":   map[string]interface{}{"effort": "none"},
 		"temperature": 0.5,
 	}
-	out, _, n2l, err := responsesToAnthropicTriple(body, nil, nil, "", true)
+	out, _, n2l, err := responsesToAnthropicTriple(body, nil, nil, "", true, true)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -639,5 +639,213 @@ func TestNone2LowFastRouteFlag(t *testing.T) {
 	th := asObj(gotBody["thinking"])
 	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
 		t.Errorf("fast_route 自带 convertOff2Low 应升级: thinking=%v, want enabled/2048", th)
+	}
+}
+
+// TestAllowNoThinkBlock4Anthropic locks the top-level toggle for tool-continuation histories with no replayable signed
+// thinking block (Responses translation port): true/unset (the default) sends the requested thinking mode even without
+// convertOff2Low and arms the main handler's one-shot thinking-off retry (n2lTryOn); false restores cc-switch preemptive
+// thinking-off — and wins over convertOff2Low's try-on door. Explicit thinking-off requests are unaffected (the stealth
+// upgrade still applies). A request that wouldn't think anyway doesn't arm the fallback (no wasted round trip).
+func TestAllowNoThinkBlock4Anthropic(t *testing.T) {
+	mk := func(model, effort string) map[string]interface{} {
+		return map[string]interface{}{
+			"model": model,
+			"input": []interface{}{
+				map[string]interface{}{"type": "message", "role": "user", "content": "查天气"},
+				map[string]interface{}{"type": "function_call", "call_id": "c1", "name": "get_weather", "arguments": "{\"city\":\"北京\"}"},
+				map[string]interface{}{"type": "function_call_output", "call_id": "c1", "output": "晴"},
+			},
+			"reasoning": map[string]interface{}{"effort": effort},
+		}
+	}
+
+	// Default (true) without convertOff2Low, budget model: the requested budget goes upstream, fallback armed.
+	out, _, n2l, err := responsesToAnthropicTriple(mk("gpt-5-codex", "max"), nil, nil, "", false, true)
+	if err != nil {
+		t.Fatalf("default budget err: %v", err)
+	}
+	if n2l != n2lTryOn {
+		t.Errorf("default budget: n2l=%d, want n2lTryOn", n2l)
+	}
+	th := asObj(out["thinking"])
+	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+		t.Errorf("default budget: thinking=%v, want enabled/16000", th)
+	}
+
+	// Default (true) without convertOff2Low, adaptive route: the requested level max goes upstream, fallback armed.
+	out, _, n2l, err = responsesToAnthropicTriple(mk("fable", "max"), nil, nil, "adaptive", false, true)
+	if err != nil {
+		t.Fatalf("default adaptive err: %v", err)
+	}
+	if n2l != n2lTryOn {
+		t.Errorf("default adaptive: n2l=%d, want n2lTryOn", n2l)
+	}
+	if objStr(asObj(out["thinking"]), "type") != "adaptive" || objStr(asObj(out["output_config"]), "effort") != "max" {
+		t.Errorf("default adaptive: thinking=%v output_config=%v, want adaptive/max", out["thinking"], out["output_config"])
+	}
+
+	// false restores cc-switch preemptive-off — and wins over convertOff2Low's try-on door.
+	out, _, n2l, err = responsesToAnthropicTriple(mk("fable", "max"), nil, nil, "adaptive", true, false)
+	if err != nil {
+		t.Fatalf("false adaptive err: %v", err)
+	}
+	if n2l != n2lNone || objStr(asObj(out["thinking"]), "type") != "disabled" {
+		t.Errorf("false adaptive: n2l=%d thinking=%v, want n2lNone/disabled", n2l, out["thinking"])
+	}
+	out, _, n2l, err = responsesToAnthropicTriple(mk("gpt-5-codex", "max"), nil, nil, "", true, false)
+	if err != nil {
+		t.Fatalf("false budget err: %v", err)
+	}
+	if n2l != n2lNone || out["thinking"] != nil {
+		t.Errorf("false budget: n2l=%d thinking=%v, want n2lNone/无 thinking 字段", n2l, out["thinking"])
+	}
+
+	// false does not touch the explicit-off door: effort none + convertOff2Low still stealth-upgrades.
+	out, _, n2l, err = responsesToAnthropicTriple(mk("gpt-5-codex", "none"), nil, nil, "", true, false)
+	if err != nil {
+		t.Fatalf("false 显式关 err: %v", err)
+	}
+	if n2l != n2lStealth {
+		t.Errorf("false 显式关: n2l=%d, want n2lStealth", n2l)
+	}
+	th = asObj(out["thinking"])
+	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
+		t.Errorf("false 显式关: thinking=%v, want enabled/2048", th)
+	}
+
+	// A request that wouldn't think anyway (no effort → no budget) doesn't arm the fallback: nothing sent, no wasted round trip.
+	noEffort := mk("gpt-5-codex", "")
+	delete(noEffort, "reasoning")
+	out, _, n2l, err = responsesToAnthropicTriple(noEffort, nil, nil, "", false, true)
+	if err != nil {
+		t.Fatalf("无思考意图 err: %v", err)
+	}
+	if n2l != n2lNone || out["thinking"] != nil {
+		t.Errorf("无思考意图: n2l=%d thinking=%v, want n2lNone/无 thinking 字段（不空跑一次）", n2l, out["thinking"])
+	}
+}
+
+// TestAllowNoThinkBlock4AnthropicConfigDefault: the top-level pointer defaults to true when unset (nil config / nil field).
+func TestAllowNoThinkBlock4AnthropicConfigDefault(t *testing.T) {
+	if !allowNoThinkBlock4Anthropic(nil) || !allowNoThinkBlock4Anthropic(&Config{}) {
+		t.Errorf("未设置应默认 true")
+	}
+	f := false
+	if allowNoThinkBlock4Anthropic(&Config{AllowNoThinkBlock4Anthropic: &f}) {
+		t.Errorf("显式 false 应生效")
+	}
+	tr := true
+	if !allowNoThinkBlock4Anthropic(&Config{AllowNoThinkBlock4Anthropic: &tr}) {
+		t.Errorf("显式 true 应生效")
+	}
+}
+
+// TestAllowNoThinkBlockDefaultEndToEnd: with NO convertOff2Low on the route and the config key unset (default true),
+// a tool-continuation with effort max still goes upstream thinking-on at the requested level (fallback armed) —
+// the pre-toggle coupling of the history door to convertOff2Low is gone.
+func TestAllowNoThinkBlockDefaultEndToEnd(t *testing.T) {
+	resetStats()
+	var gotBody map[string]interface{}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		io.WriteString(w, testSSEAllBlocks())
+	}))
+	defer mock.Close()
+
+	cfg.Store(&Config{
+		Upstream:       mock.URL,
+		MaxRetries:     0,
+		TotalBudgetSec: 10,
+		Routes:         []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"}},
+	})
+	defer cfg.Store(&Config{})
+
+	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
+	defer proxy.Close()
+
+	// Tool-continuation shape (no signed thinking block before function_call_output) + effort max.
+	body := `{"model":"gpt-5-codex","input":[
+		{"type":"message","role":"user","content":"查天气"},
+		{"type":"function_call","call_id":"c1","name":"get_weather","arguments":"{\"city\":\"北京\"}"},
+		{"type":"function_call_output","call_id":"c1","output":"晴"}
+	],"reasoning":{"effort":"max"}}`
+	resp, err := http.Post(proxy.URL+"/v1/responses", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("客户端状态=%d, want 200: %s", resp.StatusCode, raw)
+	}
+
+	// What the upstream receives is thinking-on at the requested level (enabled/16000) even without convertOff2Low.
+	th := asObj(gotBody["thinking"])
+	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+		t.Errorf("默认 true: 上游 thinking=%v, want enabled/16000（所请 max 压顶 32000/2）", th)
+	}
+
+	// Armed but not rejected: the return side keeps thinking blocks (tryOn never strips).
+	var out map[string]interface{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("响应不是 JSON: %v (%s)", err, raw)
+	}
+	foundReasoning := false
+	for _, it := range asArr(out["output"]) {
+		if objStr(asObj(it), "type") == "reasoning" {
+			foundReasoning = true
+		}
+	}
+	if !foundReasoning {
+		t.Errorf("默认 true: output 应有 reasoning 项（兜底开思考不剥离）: %v", out["output"])
+	}
+}
+
+// TestAllowNoThinkBlockFalseEndToEnd: config false restores cc-switch mode end-to-end — the same tool-continuation
+// goes upstream with no thinking field at all (thinking preemptively off over the non-replayable history).
+func TestAllowNoThinkBlockFalseEndToEnd(t *testing.T) {
+	resetStats()
+	var gotBody map[string]interface{}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		io.WriteString(w, testSSEAllBlocks())
+	}))
+	defer mock.Close()
+
+	off := false
+	cfg.Store(&Config{
+		Upstream:                    mock.URL,
+		MaxRetries:                  0,
+		TotalBudgetSec:              10,
+		Routes:                      []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"}},
+		AllowNoThinkBlock4Anthropic: &off,
+	})
+	defer cfg.Store(&Config{})
+
+	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
+	defer proxy.Close()
+
+	body := `{"model":"gpt-5-codex","input":[
+		{"type":"message","role":"user","content":"查天气"},
+		{"type":"function_call","call_id":"c1","name":"get_weather","arguments":"{\"city\":\"北京\"}"},
+		{"type":"function_call_output","call_id":"c1","output":"晴"}
+	],"reasoning":{"effort":"max"}}`
+	resp, err := http.Post(proxy.URL+"/v1/responses", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("客户端状态=%d, want 200", resp.StatusCode)
+	}
+	if gotBody["thinking"] != nil {
+		t.Errorf("false: 上游不应带 thinking 字段: %v", gotBody["thinking"])
 	}
 }

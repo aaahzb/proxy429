@@ -30,15 +30,16 @@ providers.
   on the way back so the
   client still sees a thinking-off response (usage stays truthful). Avoids
   Kimi's documented "thinking off routes K3-series to the K2.8 Preview
-  no-thinking model" downgrade. The same protection covers the other door: a
-  tool-continuation whose history has no signed thinking block to replay would
-  make the proxy disable thinking itself (same K2.8 routing) — with this set
-  it sends the downstream's requested effort instead (low as floor when none
-  was given), and does NOT strip the returned thinking blocks so the history
-  heals on the next turn. One automatic retry with thinking off if the
-  upstream rejects thinking. The console shows a two-tone `[off->low]` badge
-  for the quiet upgrade (the history fallback shows the requested effort
-  as-is).
+  no-thinking model" downgrade. The history door is governed separately by
+  the top-level `"allowNoThinkBlock4Anthropic"` (default `true`): a
+  tool-continuation whose history has no signed thinking block to replay
+  still goes upstream with the requested thinking mode (with convertOff2Low
+  on: the requested effort, low as floor when none was given), and only a
+  real upstream 400 triggers one automatic retry with thinking off; returned
+  thinking blocks are NOT stripped, so the history heals on the next turn.
+  Set it to `false` for cc-switch-style preemptive thinking-off over such
+  histories. The console shows a two-tone `[off->low]` badge for the quiet
+  upgrade (the history try-on shows the requested effort as-is).
 - **Live observability**: a local web console showing in-flight streams,
   token and cache-hit telemetry, and per-request diagnostics. The stream
   viewer records request/response bodies per link side — proxy↔upstream
@@ -135,11 +136,12 @@ observability. Also: [Usage guide](docs/usage.md) ·
   translate = 仅 Responses 翻译口，all = 翻译口 + Anthropic 原生口）：
   下游显式关思考的请求自动改成 low 思考发上游，回传剥离思考块，下游无感知、
   用量如实透传。规避 Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」
-  的 K3 降级。另一扇门同样罩住：工具续轮历史不可回放、而下游又没发关思考
-  （Codex 的 effort 列表没有 none 档，最低就是 low）时，代理兜底本会自行关思考
-  ——同样触发 K2.8 路由——开着本参数改为按下游所请档位发（没给/不认识 → low
-  保底），且不剥思考块，块随回传带回签名、下一轮历史自愈。上游拒思考时自动回退
-  关思考重试一次。控制台对悄悄升级显双色徽标 [off->low]，历史兜底如实显示所请档位。
+  的 K3 降级。历史门由顶层参数 `allowNoThinkBlock4Anthropic` 单独掌管（默认
+  true）：工具续轮历史不可回放时仍按所请思考模式发送（开 convertOff2Low 时
+  按下游所请档位发，没给/不认识 → low 保底，同样避开 K2.8 降级路由），真被
+  上游 400 拒了才自动关思考重试一次，且不剥思考块，块随回传带回签名、下一
+  轮历史自愈；设为 false 则回到 cc-switch 式的预防性关思考。控制台对悄悄
+  升级显双色徽标 [off->low]，历史先试如实显示所请档位。
 - 实时可观测性：本地网页控制台显示在途流、token 与缓存命中统计、逐请求
   诊断。流查看器的请求体/返回体按链路侧分存——代理↔上游（代理实发/实收）
   与 下游↔代理（客户端实发/实收），仅两侧有差异的流才双存（翻译流恒不同，

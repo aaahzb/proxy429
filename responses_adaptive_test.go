@@ -162,9 +162,11 @@ func toolTurnBody(model string) map[string]interface{} {
 }
 
 func TestThinkingHistoryInvalid(t *testing.T) {
-	// Tool continuation missing signed thinking replay:
-	// un-disableable fable-5 → error; disable-able adaptive model (sonnet-5) → thinking:disabled;
-	// non-adaptive model with effort → budget path skipped, nothing opened.
+	// Tool continuation missing signed thinking replay, under the default allowNoThinkBlock4Anthropic=true (try-first):
+	// un-disableable fable-5 → error; disable-able adaptive model (sonnet-5) → adaptive goes out as-is; non-adaptive
+	// model with effort → the requested budget goes out (high → 16384 capped at 32000/2). The one-shot thinking-off
+	// retry is armed in all sent cases (the wrapper drops the n2l return; arming is locked in none2low_test.go).
+	// cc-switch preemptive-off outcomes now require allowNoThinkBlock4Anthropic=false — see TestAllowNoThinkBlock4Anthropic.
 	if _, _, err := responsesToAnthropic(toolTurnBody("claude-fable-5")); err == nil {
 		t.Errorf("fable-5 历史无效应报错")
 	}
@@ -172,8 +174,11 @@ func TestThinkingHistoryInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "disabled" {
-		t.Errorf("thinking=%v, want disabled", out["thinking"])
+	if objStr(asObj(out["thinking"]), "type") != "adaptive" {
+		t.Errorf("thinking=%v, want adaptive（默认先试所请思考模式）", out["thinking"])
+	}
+	if _, ok := out["output_config"]; ok {
+		t.Errorf("sonnet-5 未给档位不应有 output_config: %v", out["output_config"])
 	}
 	body := toolTurnBody("gpt-5-codex")
 	body["reasoning"] = map[string]interface{}{"effort": "high"}
@@ -181,8 +186,9 @@ func TestThinkingHistoryInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if _, ok := out2["thinking"]; ok {
-		t.Errorf("历史无效时 budget 路径应跳过: %v", out2["thinking"])
+	th := asObj(out2["thinking"])
+	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+		t.Errorf("thinking=%v, want enabled/16000（默认先试所请 budget）", out2["thinking"])
 	}
 }
 
