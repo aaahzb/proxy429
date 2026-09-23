@@ -29,30 +29,27 @@ import (
 
 // Config is the proxy's configuration, mirroring config.json.
 type Config struct {
-	Listen                     string           `json:"listen"`
-	Upstream                   string           `json:"upstream"`
-	MaxRetries                 int              `json:"max_retries"`
-	BaseDelaySec               float64          `json:"base_delay_s"`
-	MaxDelaySec                float64          `json:"max_delay_s"`
-	TotalBudgetSec             float64          `json:"total_budget_s"`
-	RetryStatusCodes           []int            `json:"retry_status_codes"`
-	RespectRetryAfter          bool             `json:"respect_retry_after"`
-	ClassifierThinkingDisabled bool             `json:"classifier_thinking_disabled"`
-	ClassifierMaxTokens        int              `json:"classifier_max_tokens"`     // Cap max_tokens to this on classifier hits; 0 = no cap (recommended — truncating thinking could make Claude Code miss the safety verdict)
-	UpstreamHeaderTimeoutSec   float64          `json:"upstream_header_timeout_s"` // Max seconds to wait for the upstream's first byte; on timeout the request is considered stuck and resent internally. 0 = default 70s
-	PingIntervalSec            float64          `json:"ping_interval_s"`           // Interval (seconds) for SSE ping keep-alives sent to the client during 429 retries; 0 = default 5s
-	LogRequestDetail           bool             `json:"log_request_detail"`
-	LogFile                    string           `json:"log_file"`                      // Log file path; when set, logs are also appended to this file so they can be viewed/copied without a console (e.g. RemoteApp)
-	RecentSampleWindow         int              `json:"recent_sample_window"`          // Window size for the status row's "last X" latency/throughput stats; 0 = default 20
-	Routes                     []RouteRule      `json:"routes"`                        // Model routing rules; empty = no routing, use the default upstream
-	ClassifierRoute            *ClassifierRoute `json:"classifier_route,omitempty"`    // Dedicated route for classifier requests; classifier hits are routed here regardless of the original model; empty = disabled
-	FastRoute                  *FastRoute       `json:"fast_route,omitempty"`          // Dedicated route for fast-mode requests; non-classifier requests carrying "speed":"fast" are routed here; empty = disabled
-	MultimodalFallback         *MultimodalRoute `json:"multimodal_fallback,omitempty"` // Multimodal fallback route; requests containing images that hit a text_only model are rerouted here; empty = disabled
-	SearchFallback             *SearchRoute     `json:"search_fallback,omitempty"`     // Search fallback route; requests with search tools that hit a no_search upstream are rerouted here; empty = disabled
-	SearchDebugDir             string           `json:"search_debug_dir,omitempty"`    // Search debug directory; when set, the raw request/response of each search-summary step is written there for troubleshooting
-	ConvertAllToStream         bool             `json:"convertAlltoStream"`            // Global stream conversion: when on, all non-streaming requests are sent upstream as streams, then rebuilt into a single non-streaming JSON response (transparent to the client; the web console shows live output/first-token/tok/s)
-	TranslateNone2Low          bool             `json:"translateNone2Low"`             // Responses translation port: ① requests with thinking off are quietly upgraded to low thinking upstream, with thinking blocks stripped on the way back (client unaware, usage passed through truthfully); ② when a tool continuation's history is not replayable and the proxy would otherwise disable thinking itself — off would trigger Kimi routing K3 to the K2.8 no-thinking variant — with the switch on it sends the downstream's requested effort instead (low as floor when absent/unrecognized; thinking blocks NOT stripped, so their signatures come back and the history heals next turn; if upstream rejects thinking, the 400 fallback retries once with thinking off); default false. Motivation: Kimi's docs say "thinking off routes to K2.8 Preview (no thinking)"; keeping thinking on avoids the K3 downgrade route
-	ResponsesListen            string           `json:"responses_listen"`              // OpenAI Responses API listener (e.g. 127.0.0.1:8081); empty = disabled. Translates Responses-protocol requests into Anthropic and feeds the main pipeline, for Codex CLI and similar tools. Starts/stops dynamically on save/reload
+	Listen                   string           `json:"listen"`
+	Upstream                 string           `json:"upstream"`
+	MaxRetries               int              `json:"max_retries"`
+	BaseDelaySec             float64          `json:"base_delay_s"`
+	MaxDelaySec              float64          `json:"max_delay_s"`
+	TotalBudgetSec           float64          `json:"total_budget_s"`
+	RetryStatusCodes         []int            `json:"retry_status_codes"`
+	RespectRetryAfter        bool             `json:"respect_retry_after"`
+	UpstreamHeaderTimeoutSec float64          `json:"upstream_header_timeout_s"` // Max seconds to wait for the upstream's first byte; on timeout the request is considered stuck and resent internally. 0 = default 70s
+	PingIntervalSec          float64          `json:"ping_interval_s"`           // Interval (seconds) for SSE ping keep-alives sent to the client during 429 retries; 0 = default 5s
+	LogRequestDetail         bool             `json:"log_request_detail"`
+	LogFile                  string           `json:"log_file"`                      // Log file path; when set, logs are also appended to this file so they can be viewed/copied without a console (e.g. RemoteApp)
+	RecentSampleWindow       int              `json:"recent_sample_window"`          // Window size for the status row's "last X" latency/throughput stats; 0 = default 20
+	Routes                   []RouteRule      `json:"routes"`                        // Model routing rules; empty = no routing, use the default upstream
+	ClassifierRoute          *ClassifierRoute `json:"classifier_route,omitempty"`    // Dedicated route for classifier requests; classifier hits are routed here regardless of the original model; empty = disabled
+	FastRoute                *FastRoute       `json:"fast_route,omitempty"`          // Dedicated route for fast-mode requests; non-classifier requests carrying "speed":"fast" are routed here; empty = disabled
+	MultimodalFallback       *MultimodalRoute `json:"multimodal_fallback,omitempty"` // Multimodal fallback route; requests containing images that hit a text_only model are rerouted here; empty = disabled
+	SearchFallback           *SearchRoute     `json:"search_fallback,omitempty"`     // Search fallback route; requests with search tools that hit a no_search upstream are rerouted here; empty = disabled
+	SearchDebugDir           string           `json:"search_debug_dir,omitempty"`    // Search debug directory; when set, the raw request/response of each search-summary step is written there for troubleshooting
+	ConvertAllToStream       bool             `json:"convertAlltoStream"`            // Global stream conversion: when on, all non-streaming requests are sent upstream as streams, then rebuilt into a single non-streaming JSON response (transparent to the client; the web console shows live output/first-token/tok/s)
+	ResponsesListen          string           `json:"responses_listen"`              // OpenAI Responses API listener (e.g. 127.0.0.1:8081); empty = disabled. Translates Responses-protocol requests into Anthropic and feeds the main pipeline, for Codex CLI and similar tools. Starts/stops dynamically on save/reload
 }
 
 // The web console UI language is a program-level preference, not routing config: stored in program-settings.txt
@@ -70,6 +67,7 @@ type RouteRule struct {
 	EnhanceSearch  *EnhanceSearchConfig `json:"enhance_search,omitempty"`   // Enhanced search: enabled when non-nil. For requests with search tools, skip the main model and use this route's own upstream in kimi summary mode
 	URLResponseAPI string               `json:"url_response_api,omitempty"` // Native Responses API upstream base URL: when set, Responses-port requests hitting this route are passed through untranslated (affects only the Responses port; Anthropic-port traffic still uses url). Implemented but not battle-tested, hence undocumented
 	Thinking       string               `json:"thinking,omitempty"`         // Thinking shape of the target model (Responses translation only): ""/"auto" = look up by client model name; "adaptive" = force adaptive+effort; "budget" = force enabled+budget_tokens
+	ConvertOff2Low string               `json:"convertOff2Low,omitempty"`   // Per-route thinking-off conversion: ""/unset = off (requests go through untouched); "translate" = Responses translation port only; "all" = translation port + Anthropic native port. When on, an explicit downstream thinking-off is quietly sent upstream as low thinking, with thinking blocks stripped from the response (client unaware)
 }
 
 // EnhanceSearchConfig holds optional enhanced-search parameters inside a routes entry. When the route hits and the request carries search tools,
@@ -84,36 +82,40 @@ type EnhanceSearchConfig struct {
 // ClassifierRoute defines the dedicated route for classifier requests: requests matching the classifier (safety check) signature
 // are routed to the specified upstream regardless of the original model. Used to push Claude Code's lightweight safety checks to a cheap model, saving main-model quota.
 type ClassifierRoute struct {
-	URL   string `json:"url"`   // Target upstream base URL
-	API   string `json:"api"`   // Target API key; empty = pass through the client's token
-	Model string `json:"model"` // Target model name to rewrite to; empty = leave the model field unchanged
+	URL                string `json:"url"`                           // Target upstream base URL
+	API                string `json:"api"`                           // Target API key; empty = pass through the client's token
+	Model              string `json:"model"`                         // Target model name to rewrite to; empty = leave the model field unchanged
+	ClassifierThinking string `json:"classifier_thinking,omitempty"` // Classifier thinking policy: ""/unset = leave the request's thinking untouched; "off" = rewrite the body to thinking-off so classification returns fast
 }
 
 // FastRoute defines the dedicated route for fast-mode requests: non-classifier requests carrying "speed":"fast" go to the specified upstream.
 // Claude Code /fast doesn't change the model name, only speeds up output; the proxy injects fake fast rate-limit headers into responses.
 type FastRoute struct {
-	URL   string `json:"url"`   // Target upstream base URL
-	API   string `json:"api"`   // Target API key; empty = pass through the client's token
-	Model string `json:"model"` // Target model name to rewrite to; empty = leave the model field unchanged
+	URL            string `json:"url"`                      // Target upstream base URL
+	API            string `json:"api"`                      // Target API key; empty = pass through the client's token
+	Model          string `json:"model"`                    // Target model name to rewrite to; empty = leave the model field unchanged
+	ConvertOff2Low string `json:"convertOff2Low,omitempty"` // Same semantics as RouteRule.ConvertOff2Low
 }
 
 // MultimodalRoute defines the multimodal fallback: when a request contains images but hits a text_only text-only model,
 // it is automatically rerouted to the multimodal upstream specified here.
 type MultimodalRoute struct {
-	URL   string `json:"url"`   // Target upstream base URL
-	API   string `json:"api"`   // Target API key; empty = pass through the client's token
-	Model string `json:"model"` // Target model name to rewrite to; empty = leave the model field unchanged
+	URL            string `json:"url"`                      // Target upstream base URL
+	API            string `json:"api"`                      // Target API key; empty = pass through the client's token
+	Model          string `json:"model"`                    // Target model name to rewrite to; empty = leave the model field unchanged
+	ConvertOff2Low string `json:"convertOff2Low,omitempty"` // Same semantics as RouteRule.ConvertOff2Low
 }
 
 // SearchRoute defines the search fallback: when a request carries search tools but hits a no_search search-incapable upstream,
 // it is automatically rerouted to the search-capable upstream specified here.
 type SearchRoute struct {
-	URL             string `json:"url"`              // Target upstream base URL
-	API             string `json:"api"`              // Target API key; empty = pass through the client's token
-	Model           string `json:"model"`            // Target model name to rewrite to; empty = leave the model field unchanged
-	SummaryMode     bool   `json:"summary_mode"`     // Search sub-agent requests: step1 search + step2 detailed summary, synthesize a standard web_search response for the client (no whole-request forwarding, no main model)
-	SummaryThinking bool   `json:"summary_thinking"` // Whether the step2 summary request uses thinking under summary_mode (default off, faster summaries)
-	SummaryLevel    string `json:"summary_level"`    // Summary detail under summary_mode: low (default, brief) / mid (medium) / high (thorough)
+	URL             string `json:"url"`                      // Target upstream base URL
+	API             string `json:"api"`                      // Target API key; empty = pass through the client's token
+	Model           string `json:"model"`                    // Target model name to rewrite to; empty = leave the model field unchanged
+	ConvertOff2Low  string `json:"convertOff2Low,omitempty"` // Same semantics as RouteRule.ConvertOff2Low
+	SummaryMode     bool   `json:"summary_mode"`             // Search sub-agent requests: step1 search + step2 detailed summary, synthesize a standard web_search response for the client (no whole-request forwarding, no main model)
+	SummaryThinking bool   `json:"summary_thinking"`         // Whether the step2 summary request uses thinking under summary_mode (default off, faster summaries)
+	SummaryLevel    string `json:"summary_level"`            // Summary detail under summary_mode: low (default, brief) / mid (medium) / high (thorough)
 }
 
 // Version is the proxy version, injected at build time via -ldflags "-X main.Version=<git-short>"; default dev.
@@ -172,8 +174,35 @@ func loadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseConfig(data)
+}
+
+// removedConfigKeys lists top-level config keys removed in this version, each with its migration hint. Configs containing
+// them are rejected outright: a silently inert key would quietly drop the protection it used to buy. The web save handler
+// probes with parseConfig, so a rejected config never reaches the file.
+var removedConfigKeys = []struct{ key, hint string }{
+	{"classifier_thinking_disabled", `set "classifier_thinking": "off" inside classifier_route instead`},
+	{"classifier_max_tokens", `max_tokens is no longer modified on classifier requests`},
+	{"translateNone2Low", `set "convertOff2Low": "translate" or "all" on routes[]/fast_route/multimodal_fallback/search_fallback entries instead`},
+}
+
+// parseConfig parses and validates config bytes (shared by loadConfig and the web save probe): rejects removed keys with
+// migration hints, validates enum values, then applies defaults and logs warnings.
+func parseConfig(data []byte) (*Config, error) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil {
+		return nil, err
+	}
+	for _, rk := range removedConfigKeys {
+		if _, ok := top[rk.key]; ok {
+			return nil, fmt.Errorf("config key %q was removed: %s", rk.key, rk.hint)
+		}
+	}
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, err
+	}
+	if err := validateConfigEnums(&c); err != nil {
 		return nil, err
 	}
 	if c.UpstreamHeaderTimeoutSec <= 0 {
@@ -192,13 +221,54 @@ func loadConfig(path string) (*Config, error) {
 		if isReservedRoutePattern(c.Routes[i].Pattern) {
 			log.Printf("[config] warning: route #%d pattern exactly matches reserved name %q (Codex menu reserved names: * catch-all=Fallback, fast lane=fast_route); this route is disabled, please rename it", i+1, c.Routes[i].Pattern)
 		}
+	}
+	return &c, nil
+}
+
+// validateConfigEnums rejects config values outside their supported sets (route thinking shapes, classifier thinking
+// policy, convertOff2Low scope), so a typo fails loudly at load/save time instead of silently doing nothing.
+func validateConfigEnums(c *Config) error {
+	if cr := c.ClassifierRoute; cr != nil {
+		switch cr.ClassifierThinking {
+		case "", "off":
+		default:
+			return fmt.Errorf("classifier_route has invalid classifier_thinking value %q: only \"off\" is supported (unset = leave the request's thinking untouched)", cr.ClassifierThinking)
+		}
+	}
+	checkOff2Low := func(owner, v string) error {
+		switch v {
+		case "", "translate", "all":
+			return nil
+		default:
+			return fmt.Errorf("%s has invalid convertOff2Low value %q: only \"translate\" / \"all\" are supported (unset = off)", owner, v)
+		}
+	}
+	for i := range c.Routes {
 		switch c.Routes[i].Thinking {
 		case "", "auto", "adaptive", "budget":
 		default:
-			return nil, fmt.Errorf("route #%d (pattern %q) has invalid thinking value %q: only auto / adaptive / budget are supported", i+1, c.Routes[i].Pattern, c.Routes[i].Thinking)
+			return fmt.Errorf("route #%d (pattern %q) has invalid thinking value %q: only auto / adaptive / budget are supported", i+1, c.Routes[i].Pattern, c.Routes[i].Thinking)
+		}
+		if err := checkOff2Low(fmt.Sprintf("route #%d (pattern %q)", i+1, c.Routes[i].Pattern), c.Routes[i].ConvertOff2Low); err != nil {
+			return err
 		}
 	}
-	return &c, nil
+	if c.FastRoute != nil {
+		if err := checkOff2Low("fast_route", c.FastRoute.ConvertOff2Low); err != nil {
+			return err
+		}
+	}
+	if c.MultimodalFallback != nil {
+		if err := checkOff2Low("multimodal_fallback", c.MultimodalFallback.ConvertOff2Low); err != nil {
+			return err
+		}
+	}
+	if c.SearchFallback != nil {
+		if err := checkOff2Low("search_fallback", c.SearchFallback.ConvertOff2Low); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // defaultCacheTTL is the fixed protection window for finished-stream trimming: the newest row of each anchor key
@@ -431,7 +501,7 @@ func reloadConfig() error {
 	cfg.Store(c)
 	reconcileResponsesServer(c.ResponsesListen) // Responses port starts/stops dynamically with config reload
 	log.Printf("[reload] config reloaded: http://%s -> %s (max retries %d, classifier thinking-off=%v)",
-		c.Listen, c.Upstream, c.MaxRetries, c.ClassifierThinkingDisabled)
+		c.Listen, c.Upstream, c.MaxRetries, classifierThinkingOff(c))
 	return nil
 }
 
@@ -771,6 +841,7 @@ type flight struct {
 	translated       string           // Translation-port origin tag ("responses"=translated stream, "responses-raw"=native passthrough via a route with url_response_api); the web API column shows [translate]/[Response]
 	countTokens      bool             // count_tokens probe stream (countTokensPath); the response is just {"input_tokens":N}; the web model column shows a [count_tokens] prefix
 	searchStripped   atomic.Int32     // Total replayed search blocks stripped (conversation-watermark strip + 400-fallback strip; the web shows a red [剥N] badge, the split only goes to the log)
+	stripThinking    atomic.Bool      // convertOff2Low upgrade (off->low): thinking blocks are stripped from the response before writing downstream (the client keeps seeing a thinking-off response)
 	searchReplay     *searchReplayCtx // Search-restore context of the Responses translation port (carried via ctx, read/written only by the handler goroutine); the 400-fallback strip learns the conversation watermark from restore timestamps
 
 	// Session cache tracking (the status page's "缓存年龄" column): written once during routing, read by addFinished in the same goroutine.
@@ -2248,9 +2319,9 @@ func lastCloseBrace(body []byte) int {
 }
 
 // applyClassifierEdits performs text replacements/deletions/appends on the original body, touching only the target fields and preserving every other byte.
-// thinking->{"type":"disabled"}, reasoning_effort->"none", reasoning->deleted, max_tokens->number;
+// thinking->{"type":"disabled"}, reasoning_effort->"none", reasoning->deleted;
 // fields absent from the original are appended before the top-level closing }. Edits are spliced by ascending start, all based on the original body, without interfering with each other.
-func applyClassifierEdits(body []byte, spans []fieldSpan, maxTokens int) []byte {
+func applyClassifierEdits(body []byte, spans []fieldSpan) []byte {
 	have := map[string]*fieldSpan{}
 	for i := range spans {
 		s := &spans[i]
@@ -2277,11 +2348,6 @@ func applyClassifierEdits(body []byte, spans []fieldSpan, maxTokens int) []byte 
 	if re, ok := have["reasoning_effort"]; ok {
 		edits = append(edits, edit{re.valStart, re.valEnd, []byte(`"none"`)})
 	}
-	if maxTokens > 0 {
-		if m, ok := have["max_tokens"]; ok {
-			edits = append(edits, edit{m.valStart, m.valEnd, []byte(strconv.Itoa(maxTokens))})
-		}
-	}
 
 	// Append fields absent from the original body: inserted before the top-level closing } (original field order preserved, new fields at the end)
 	var appendFields []byte
@@ -2293,14 +2359,6 @@ func applyClassifierEdits(body []byte, spans []fieldSpan, maxTokens int) []byte 
 			appendFields = append(appendFields, ',')
 		}
 		appendFields = append(appendFields, []byte(`"reasoning_effort":"none"`)...)
-	}
-	if maxTokens > 0 {
-		if _, ok := have["max_tokens"]; !ok {
-			if len(appendFields) > 0 {
-				appendFields = append(appendFields, ',')
-			}
-			appendFields = append(appendFields, []byte(`"max_tokens":`+strconv.Itoa(maxTokens))...)
-		}
 	}
 	if len(appendFields) > 0 {
 		braceOff := bytes.IndexByte(body, '{')
@@ -2579,7 +2637,7 @@ func setTopLevelJSONValue(body []byte, key string, rawValue []byte) ([]byte, boo
 }
 
 // disableThinkingInBody rewrites the request body's top-level thinking to {"type":"disabled"} and deletes
-// output_config: the one-shot fallback surgery after a translateNone2Low upgrade is rejected by an upstream 400
+// output_config: the one-shot fallback surgery after a convertOff2Low upgrade is rejected by an upstream 400
 // (the downstream wanted thinking off anyway, so the fallback is semantically lossless). Text-level editing; all other fields preserved.
 func disableThinkingInBody(body []byte) ([]byte, bool) {
 	nb, ok := setTopLevelJSONValue(body, "thinking", []byte(`{"type":"disabled"}`))
@@ -2591,7 +2649,7 @@ func disableThinkingInBody(body []byte) ([]byte, bool) {
 
 // isClassifierRequest reports whether body is a classifier request (system field prefix match).
 // Shares the same check with maybeRewriteClassifier but only checks, never rewrites; used for routing decisions.
-// Independent of ClassifierThinkingDisabled: classifier routing works even when thinking rewriting is off.
+// Independent of classifier_thinking: classifier routing works even when no thinking policy is configured.
 func isClassifierRequest(c *Config, body []byte) bool {
 	if !bytes.Contains(body, []byte(classifierSystemPrefix)) {
 		return false
@@ -2603,13 +2661,19 @@ func isClassifierRequest(c *Config, body []byte) bool {
 	return classifierSystemMatches(body, spans, classifierSystemPrefix)
 }
 
+// classifierThinkingOff reports whether classifier requests get their thinking rewritten off
+// (classifier_route.classifier_thinking == "off"; unset or no classifier_route = the request's thinking goes through untouched).
+func classifierThinkingOff(c *Config) bool {
+	return c.ClassifierRoute != nil && c.ClassifierRoute.ClassifierThinking == "off"
+}
+
 // maybeRewriteClassifier turns thinking off when a classifier request matches, so classification returns fast.
 // A bytes.Contains pre-filter keeps normal requests (without the prefix substring) away from JSON parsing — near-zero cost.
 // On a match, json.Decoder streaming-locates the target fields' byte positions, then text replacement — no wholesale re-serialization;
 // untouched fields keep their exact bytes (key order and formatting included), preserving upstream cache hits.
 func maybeRewriteClassifier(body []byte) []byte {
 	c := cfg.Load()
-	if !c.ClassifierThinkingDisabled {
+	if !classifierThinkingOff(c) {
 		return body
 	}
 	if !bytes.Contains(body, []byte(classifierSystemPrefix)) {
@@ -2622,7 +2686,7 @@ func maybeRewriteClassifier(body []byte) []byte {
 	if !classifierSystemMatches(body, spans, classifierSystemPrefix) {
 		return body
 	}
-	newBody := applyClassifierEdits(body, spans, c.ClassifierMaxTokens)
+	newBody := applyClassifierEdits(body, spans)
 	if len(newBody) == len(body) && bytes.Equal(newBody, body) {
 		return body
 	}
@@ -3710,8 +3774,18 @@ func estimateTokens(text string) int {
 // Returns this stream's final output_tokens, for the handler's token/s sample.
 func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.Reader, f *flight, headersSent bool) int64 {
 	defer resp.Body.Close()
+	// convertOff2Low native-port upgrade (off->low): strip thinking blocks from the response so the client keeps seeing the
+	// thinking-off shape it asked for. Only on a 200 (error bodies pass through untouched), never on Responses passthrough.
+	var stripper *thinkingStripper
+	if f.stripThinking.Load() && !f.responsesRaw() && resp.StatusCode == http.StatusOK {
+		stripper = newThinkingStripper(resp.Header.Get("Content-Type"))
+	}
 	if !headersSent {
 		copyHeaders(w.Header(), resp.Header)
+		if stripper != nil && !stripper.sse {
+			// JSON-mode stripping changes the body length: drop the upstream's Content-Length, let net/http re-frame.
+			w.Header().Del("Content-Length")
+		}
 		w.WriteHeader(resp.StatusCode)
 	}
 
@@ -3788,6 +3862,8 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 		stats.mu.Unlock()
 	}()
 	// writeAndCount forwards a chunk of bytes and parses its data: lines to update stats.
+	// With the convertOff2Low stripper active the order is: tee the original upstream-side bytes (model already written back) →
+	// strip thinking blocks → write the stripped bytes downstream (teed to the downstream side) → byte counts post-strip → stats parse the original.
 	writeAndCount := func(data []byte) {
 		if len(data) == 0 {
 			return
@@ -3816,16 +3892,25 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 				}
 			}
 		}
-		w.Write(data)
-		if canFlush {
-			flusher.Flush()
-		}
-		n := int64(len(data))
-		stats.bytesForward.Add(n) // Live traffic (bytes), growing with each forwarded chunk
-		f.bytes.Add(n)            // Per-stream bytes, for the icon display
-		f.appendContent(data)     // Tee a copy for the web in-flight viewer (after w.Write, pass-through unaffected)
+		f.appendContent(data) // Tee a copy for the web upstream side (the full pre-strip truth, kept regardless of stripping)
 		if f.searchDebug {
 			searchDebugAppend(f.id, "main_resp.sse", data) // Record the main model's raw response when search-summary degrades
+		}
+		out := data
+		if stripper != nil {
+			out = stripper.feed(data) // convertOff2Low: thinking blocks dropped, kept block indexes renumbered (the client sees thinking-off)
+		}
+		if len(out) > 0 {
+			w.Write(out)
+			if canFlush {
+				flusher.Flush()
+			}
+			n := int64(len(out))
+			stats.bytesForward.Add(n) // Live traffic (bytes), growing with each forwarded chunk
+			f.bytes.Add(n)            // Per-stream bytes, for the icon display (post-strip: what the client actually received)
+			if stripper != nil {
+				f.appendContentDown(out) // A stripped stream differs per side: the downstream side gets its own tee
+			}
 		}
 		responsesRaw := f.responsesRaw() // Computed once outside the loop: passthrough streams parse by Responses semantics
 		for _, line := range bytes.Split(data, []byte("\n")) {
@@ -3895,6 +3980,21 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 				f.delivered.Store(true)
 			}
 			break
+		}
+	}
+	if stripper != nil {
+		// Flush what the stripper still holds: a partial trailing line (SSE), or the whole transformed document (JSON mode).
+		if tail := stripper.flush(); len(tail) > 0 {
+			w.Write(tail)
+			if canFlush {
+				flusher.Flush()
+			}
+			stats.bytesForward.Add(int64(len(tail)))
+			f.bytes.Add(int64(len(tail)))
+			f.appendContentDown(tail)
+		}
+		if stripper.stripped > 0 {
+			log.Printf("[off->low] #%d stripped %d thinking block(s) from the response (client sees thinking-off)", f.id, stripper.stripped)
 		}
 	}
 	// Tool calls still open at stream end (missing content_block_stop, e.g. a truncated stream) get their empty-args verdict from what was received,
@@ -4070,6 +4170,12 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 	content := make([]interface{}, 0, len(indexes))
 	for _, i := range indexes {
 		b := blocks[i]
+		// convertOff2Low upgrade: thinking blocks never reach the assembled response (the client asked for thinking-off)
+		if f.stripThinking.Load() {
+			if t, _ := b["type"].(string); t == "thinking" || t == "redacted_thinking" {
+				continue
+			}
+		}
 		if s, ok := b["input"].(string); ok && s != "" {
 			var obj interface{}
 			if json.Unmarshal([]byte(s), &obj) == nil {
@@ -4192,9 +4298,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if v, ok := r.Context().Value(ctxKeyThink).(string); ok {
 		f.think = v
 	}
-	// translateNone2Low upgrade modes (the Responses translation port quietly upgrading off-thinking to low / sending the downstream's
+	// convertOff2Low upgrade modes (the Responses translation port quietly upgrading off-thinking to low / sending the downstream's
 	// requested effort when history is unreplayable; see the n2l constants): the API column shows a two-tone [off->low] badge for implicit upgrades; in the forwarding loop,
-	// an upstream 400 rejecting thinking falls back to one retry with thinking off (both modes are covered).
+	// an upstream 400 rejecting thinking falls back to one retry with thinking off (both modes are covered). The Anthropic native port
+	// sets the same mode directly at its own upgrade point below (convFlag=="all"), no ctx involved.
 	n2lMode, _ := r.Context().Value(ctxKeyNone2Low).(int)
 	// Dual-link recording: the Responses translation port's downstream-side response (the bytes actually written proxy→client) is teed
 	// in full into contentDown via translatingWriter's tap; on the native port w is not a translatingWriter,
@@ -4297,9 +4404,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	var targetModel string
 	fastRouteHit := false
 	searchSummaryMode := false // Search-summary mode: step1+step2 self-built response, bypassing the main upstream.
+	convFlag := ""             // The effective route's convertOff2Low value, captured where routing settles ("" = feature off)
 	var summarySF *SearchRoute // Built from the matched RouteRule when enhance-search triggers; otherwise c.SearchFallback is used
-	if isClassifier && c.ClassifierRoute != nil {
+	if isClassifier && c.ClassifierRoute != nil && c.ClassifierRoute.URL != "" {
 		// Classifier route: shunt safety-check requests to the designated upstream, saving main-model quota.
+		// (url empty = no reroute: a bare {"classifier_thinking":"off"} configures the thinking rewrite only.)
 		cr := c.ClassifierRoute
 		upstream = cr.URL
 		authToken = cr.API
@@ -4316,6 +4425,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		upstream = fr.URL
 		authToken = fr.API
 		fastRouteHit = true
+		convFlag = fr.ConvertOff2Low
 		if fr.Model != "" && fr.Model != origModel {
 			body = replaceModelValue(body, fr.Model)
 			targetModel = fr.Model
@@ -4382,11 +4492,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 							break
 						}
 						applyFB(sf.URL, sf.API, sf.Model, "search-fallback", routeSearch)
+						convFlag = sf.ConvertOff2Low // The fallback's own flag overwrites the matched route's
 						break
 					}
 					// Pure images (no search): use multimodal_fallback when configured; search requests never land on mf (degrade to passthrough when there's no sf).
 					if needImage && mf != nil && !needSearch {
 						applyFB(mf.URL, mf.API, mf.Model, "image-fallback", routeMultimodal)
+						convFlag = mf.ConvertOff2Low // The fallback's own flag overwrites the matched route's
 						break
 					}
 					// Degrade: search without sf, or pure images without mf — pass through to the original route (the upstream handles it, possibly with an error).
@@ -4399,6 +4511,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.id, origModel, rr.URL, origModel, rr.Model)
 				f.routeReason.Store(routePattern)
+				convFlag = rr.ConvertOff2Low
 				// Enhance search: when the route supports search (no_search:false) and has enhance_search configured, a request carrying search tools
 				// skips the main model and uses this route's own upstream in kimi summary mode (equivalent to no_search going through search_fallback.summary_mode,
 				// except the search upstream is the route's own url/api/model and the summary parameters come from the route's enhance_search).
@@ -4408,6 +4521,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 						URL:             rr.URL,
 						API:             rr.API,
 						Model:           rr.Model,
+						ConvertOff2Low:  rr.ConvertOff2Low,
 						SummaryMode:     true,
 						SummaryLevel:    rr.EnhanceSearch.SummaryLevel,
 						SummaryThinking: rr.EnhanceSearch.SummaryThinking,
@@ -4445,7 +4559,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				body = replaceModelValue(body, sf.Model)
 				targetModel = sf.Model
 			}
-			f.searchDebug = true // When degrading to Kimi whole-request forwarding, record the main model's raw response for comparison
+			convFlag = sf.ConvertOff2Low // The degraded whole-request forwarding answers to the fallback route's own flag
+			f.searchDebug = true         // When degrading to Kimi whole-request forwarding, record the main model's raw response for comparison
 		}
 	}
 
@@ -4474,6 +4589,25 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				effKey = r.Header.Get("Authorization")
 			}
 			t.setSearchTriple(upstream, effKey, m)
+		}
+	}
+
+	// convertOff2Low="all" native-port upgrade: an explicit downstream thinking-off is quietly sent upstream as low thinking,
+	// with thinking blocks stripped from the response (the client stays unaware). The classifier's thinking is governed by
+	// classifier_thinking exclusively, and Responses-port requests already carry their own upgrade decision via ctx — both excluded.
+	if convFlag == "all" && !isClassifier && f.translated == "" && r.URL.Path == "/v1/messages" {
+		effModel := targetModel
+		if effModel == "" {
+			effModel = origModel
+		}
+		if nb, upgraded, abandoned := maybeUpgradeOffToLow(body, effModel); upgraded {
+			log.Printf("[off->low] #%d explicit thinking-off quietly upgraded to low thinking (body %d->%d bytes); thinking blocks stripped on return", f.id, len(body), len(nb))
+			body = nb
+			n2lMode = n2lStealth // Reuses the one-shot 400 fallback below (retreat to thinking-off if the upstream rejects thinking)
+			f.think = "off->low"
+			f.stripThinking.Store(true)
+		} else if abandoned {
+			log.Printf("[off->low] #%d upgrade abandoned: max_tokens too small for the 1024-token budget floor; request stays thinking-off", f.id)
 		}
 	}
 
@@ -4660,7 +4794,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			// The translateNone2Low upgrade was rejected by the upstream (e.g. thinking enabled over a no-thinking history — the history-fallback
+			// The convertOff2Low upgrade was rejected by the upstream (e.g. thinking enabled over a no-thinking history — the history-fallback
 			// thinking-on mainly guards against this; rejection is effort-agnostic: send the requested effort, fall back if rejected): switch thinking back off and retry
 			// once immediately — the downstream wanted thinking off anyway (or at most accepts it off), so it's semantically lossless; no backoff budget burned (attempt--, same as the search-strip fallback).
 			// After the fallback the upstream receives thinking-off, so the response carries no thinking blocks and response-side stripping has nothing to do;
@@ -4671,8 +4805,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					stats.statusRetries.Add(1)
 					stats.addModelRetry(f.realModel())
 					body = nb
+					// A native-port upgrade may also have set reasoning_effort:"low"; the belt-and-braces off form is "none"
+					// (setTopLevelJSONValue appends the key when absent — harmless, same shape as the classifier rewrite).
+					if nb2, ok2 := setTopLevelJSONValue(body, "reasoning_effort", []byte(`"none"`)); ok2 {
+						body = nb2
+					}
 					n2lMode = n2lNone
 					f.think = extractThinkMode(body)
+					f.stripThinking.Store(false) // The retried response is genuinely thinking-off; there is nothing left to strip
 					attempt--
 					resp.Body.Close()
 					continue
@@ -4820,7 +4960,7 @@ func main() {
 	log.SetOutput(logOut)
 
 	log.Printf("proxy started v%s: listening http://%s -> forwarding to %s (max retries %d, classifier thinking-off=%v)",
-		Version, c.Listen, c.Upstream, c.MaxRetries, c.ClassifierThinkingDisabled)
+		Version, c.Listen, c.Upstream, c.MaxRetries, classifierThinkingOff(c))
 
 	// The HTTP server runs in a goroutine: the tray event loop (systray.Run) must occupy the main thread (macOS requires UI on the main thread),
 	// so the main thread's blocking spot belongs to the tray and HTTP runs in the background.

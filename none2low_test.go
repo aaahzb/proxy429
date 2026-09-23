@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// TestNone2LowUpgradeShapes locks the thinking shapes after translateNone2Low upgrade:
+// TestNone2LowUpgradeShapes locks the thinking shapes after the convertOff2Low upgrade:
 // adaptive model → adaptive+effort:low (fable-5 can't be turned off; low is how an explicit off is expressed there);
 // budget model → enabled+2048 (capped at max_tokens/2; if the 1024 floor doesn't fit, the upgrade is abandoned and thinking stays off);
 // toggle off or non-thinking-off requests are never upgraded.
@@ -142,7 +142,7 @@ func TestNone2LowUpgradeToolContinuation(t *testing.T) {
 // TestNone2LowTryOnInvalidHistory locks the #11/#12 live-incident fix: when tool-continuation history isn't replayable and the downstream did
 // NOT explicitly disable thinking (effort=max — Codex config's norm; enabled-reasoning-efforts has no
 // none level at all), the proxy's fallback is no longer disabling thinking itself (off = Kimi routes K3 to the K2.8
-// no-thinking variant); with translateNone2Low on, it sends at the downstream-requested effort as-is: a budget route gets the matching budget (max→16384 capped at
+// no-thinking variant); with convertOff2Low on, it sends at the downstream-requested effort as-is: a budget route gets the matching budget (max→16384 capped at
 // max_tokens/2=16000), an adaptive route (the user's configured k3-256k route shape) gets output_config.effort=
 // the requested level; none/unknown → low as the floor. n2l=n2lTryOn rather than n2lStealth — the downstream asked for thinking, so the return
 // side must not strip thinking blocks (blocks ride the return carrying signatures; next-turn history self-heals). Toggle off keeps the old behavior.
@@ -427,11 +427,10 @@ func TestNone2LowFallbackRetry(t *testing.T) {
 	defer mock.Close()
 
 	cfg.Store(&Config{
-		Upstream:          mock.URL,
-		MaxRetries:        0,
-		TotalBudgetSec:    10,
-		TranslateNone2Low: true,
-		Routes:            []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"}},
+		Upstream:       mock.URL,
+		MaxRetries:     0,
+		TotalBudgetSec: 10,
+		Routes:         []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash", ConvertOff2Low: "translate"}},
 	})
 	defer cfg.Store(&Config{})
 
@@ -485,11 +484,10 @@ func TestNone2LowTryOnNoStrip(t *testing.T) {
 	defer mock.Close()
 
 	cfg.Store(&Config{
-		Upstream:          mock.URL,
-		MaxRetries:        0,
-		TotalBudgetSec:    10,
-		TranslateNone2Low: true,
-		Routes:            []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"}},
+		Upstream:       mock.URL,
+		MaxRetries:     0,
+		TotalBudgetSec: 10,
+		Routes:         []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash", ConvertOff2Low: "translate"}},
 	})
 	defer cfg.Store(&Config{})
 
@@ -531,5 +529,115 @@ func TestNone2LowTryOnNoStrip(t *testing.T) {
 	}
 	if !foundReasoning {
 		t.Errorf("兜底开思考不得剥思考块: output=%v", out["output"])
+	}
+}
+
+// TestNone2LowOffByDefault: a route WITHOUT convertOff2Low never upgrades — the translation port sends
+// thinking-off through as-is (the feature is strictly opt-in per route; the old global switch is gone).
+func TestNone2LowOffByDefault(t *testing.T) {
+	resetStats()
+	var gotBody map[string]interface{}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		io.WriteString(w, testSSEAllBlocks())
+	}))
+	defer mock.Close()
+
+	cfg.Store(&Config{
+		Upstream:       mock.URL,
+		MaxRetries:     0,
+		TotalBudgetSec: 10,
+		Routes:         []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"}},
+	})
+	defer cfg.Store(&Config{})
+
+	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
+	defer proxy.Close()
+
+	resp, err := http.Post(proxy.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"gpt-5-codex","input":"hi","reasoning":{"effort":"none"}}`))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	resp.Body.Close()
+	if objStr(asObj(gotBody["thinking"]), "type") != "disabled" {
+		t.Errorf("未设 convertOff2Low 时上游 thinking=%v, want disabled（不升级）", gotBody["thinking"])
+	}
+}
+
+// TestNone2LowAllAlsoTranslates: convertOff2Low:"all" upgrades at the translation port too (translate+native both).
+func TestNone2LowAllAlsoTranslates(t *testing.T) {
+	resetStats()
+	var gotBody map[string]interface{}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		io.WriteString(w, testSSEAllBlocks())
+	}))
+	defer mock.Close()
+
+	cfg.Store(&Config{
+		Upstream:       mock.URL,
+		MaxRetries:     0,
+		TotalBudgetSec: 10,
+		Routes:         []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash", ConvertOff2Low: "all"}},
+	})
+	defer cfg.Store(&Config{})
+
+	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
+	defer proxy.Close()
+
+	resp, err := http.Post(proxy.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"gpt-5-codex","input":"hi","reasoning":{"effort":"none"}}`))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	resp.Body.Close()
+	th := asObj(gotBody["thinking"])
+	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
+		t.Errorf(`convertOff2Low:"all" 在翻译口也应升级: thinking=%v, want enabled/2048`, th)
+	}
+}
+
+// TestNone2LowFastRouteFlag: the Codex menu's literal "fast_route" model name takes fast_route's own
+// convertOff2Low, overriding whatever a pre-matched catch-all routes[] entry carries (here: nothing).
+func TestNone2LowFastRouteFlag(t *testing.T) {
+	resetStats()
+	var gotBody map[string]interface{}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		io.WriteString(w, testSSEAllBlocks())
+	}))
+	defer mock.Close()
+
+	cfg.Store(&Config{
+		Upstream:       mock.URL,
+		MaxRetries:     0,
+		TotalBudgetSec: 10,
+		Routes:         []RouteRule{{Pattern: "*", URL: mock.URL, Model: "deepseek-v4-flash"}},
+		FastRoute:      &FastRoute{URL: mock.URL, Model: "deepseek-v4-flash", ConvertOff2Low: "translate"},
+	})
+	defer cfg.Store(&Config{})
+
+	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
+	defer proxy.Close()
+
+	resp, err := http.Post(proxy.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"fast_route","input":"hi","reasoning":{"effort":"none"}}`))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	resp.Body.Close()
+	th := asObj(gotBody["thinking"])
+	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
+		t.Errorf("fast_route 自带 convertOff2Low 应升级: thinking=%v, want enabled/2048", th)
 	}
 }

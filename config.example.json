@@ -7,15 +7,12 @@
   "total_budget_s": 120,
   "retry_status_codes": [429, 500, 502, 503, 504],
   "respect_retry_after": true,
-  "classifier_thinking_disabled": true,
-  "classifier_max_tokens": 0,
   "upstream_header_timeout_s": 70,
   "ping_interval_s": 5,
   "log_request_detail": false,
   "log_file": "",
   "recent_sample_window": 20,
   "convertAlltoStream": false,
-  "translateNone2Low": false,
   "responses_listen": "127.0.0.1:8081",
   "routes": [
     {
@@ -48,7 +45,8 @@
       "pattern": "gpt-5*",
       "url": "https://api.deepseek.com",
       "api": "sk-deepseek-replace-with-your-key",
-      "model": "deepseek-V4-pro"
+      "model": "deepseek-V4-pro",
+      "convertOff2Low": "translate"
     },
     {
       "pattern": "codex-fable*",
@@ -61,7 +59,8 @@
   "classifier_route": {
     "url": "https://api.deepseek.com",
     "api": "sk-deepseek-replace-with-your-key",
-    "model": "deepseek-v4-flash"
+    "model": "deepseek-v4-flash",
+    "classifier_thinking": "off"
   },
   "fast_route": {
     "url": "https://api.deepseek.com",

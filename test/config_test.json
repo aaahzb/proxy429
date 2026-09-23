@@ -7,8 +7,10 @@
   "total_budget_s": 10,
   "retry_status_codes": [429, 500, 502, 503, 504],
   "respect_retry_after": false,
-  "classifier_thinking_disabled": true,
-  "classifier_max_tokens": 512,
+  "classifier_route": {
+    "url": "http://127.0.0.1:9099",
+    "classifier_thinking": "off"
+  },
   "log_request_detail": false,
   "recent_sample_window": 20
 }

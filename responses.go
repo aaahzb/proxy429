@@ -46,14 +46,14 @@ type ctxKeyThinkT struct{}
 
 var ctxKeyThink ctxKeyThinkT
 
-// ctxKeyNone2Low is the internal request context key: the translateNone2Low upgrade mode (int, see below).
+// ctxKeyNone2Low is the internal request context key: the convertOff2Low upgrade mode (int, see below).
 // The main handler badges the flight [off->low] from it (n2lStealth only) and falls back to a thinking-off
 // retry once when the upstream 400-rejects thinking (covers both n2lStealth and n2lTryOn).
 type ctxKeyNone2LowT struct{}
 
 var ctxKeyNone2Low ctxKeyNone2LowT
 
-// translateNone2Low upgrade modes (responsesToAnthropicTriple's 4th return value, passed through via ctxKeyNone2Low):
+// convertOff2Low upgrade modes (responsesToAnthropicTriple's 4th return value, passed through via ctxKeyNone2Low):
 const (
 	n2lNone    = 0 // Not upgraded
 	n2lStealth = 1 // Implicit upgrade: downstream explicitly disabled thinking → sent as low upstream; thinking blocks stripped on return (downstream unaware) + [off->low] badge
@@ -250,13 +250,21 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	// handed down with the internal request; the main handler feeds the strip count into the flight ([剥N] display)
 	// and learns the conversation watermark from restore moments during 400-fallback stripping.
 	replay := &searchReplayCtx{convID: convID}
-	// The route-declared thinking shape (thinking parameter): at translation time only the client model name is known; the adaptive/budget
-	// decision defaults to the client name's mapping table — when the target model's capability disagrees, the route config overrides.
+	// The route-declared thinking shape (thinking parameter) and the convertOff2Low scope: at translation time only the client model
+	// name is known; the adaptive/budget decision defaults to the client name's mapping table — when the target model's capability
+	// disagrees, the route config overrides. convertOff2Low likewise resolves by client model name pre-match ("translate"/"all" enable it here).
 	thinkStyle := ""
+	off2Low := ""
 	if rr := matchRouteRule(c, origModel); rr != nil {
 		thinkStyle = rr.Thinking
+		off2Low = rr.ConvertOff2Low
 	}
-	anth, reg, n2l, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle, c.TranslateNone2Low)
+	// The Codex menu's fast lane goes by the literal name "fast_route": its convertOff2Low comes from fast_route itself,
+	// taking priority over any catch-all routes[] entry the name may have pre-matched above.
+	if origModel == "fast_route" && c.FastRoute != nil {
+		off2Low = c.FastRoute.ConvertOff2Low
+	}
+	anth, reg, n2l, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle, off2Low == "translate" || off2Low == "all")
 	if err != nil {
 		writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -305,7 +313,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tw := newTranslatingWriter(w, clientStream, origModel, reg)
-	// translateNone2Low implicit-upgrade stream (downstream explicit thinking-off → low): thinking blocks are stripped on return (streaming by the conv
+	// convertOff2Low implicit-upgrade stream (downstream explicit thinking-off → low): thinking blocks are stripped on return (streaming by the conv
 	// state machine, non-streaming by finishBuffered wholesale conversion); the downstream still sees a thinking-off response; usage
 	// untouched, passed through truthfully. History-fallback thinking-on (at the downstream-requested level) doesn't strip: the downstream asked for thinking; blocks ride the return
 	// carrying signatures.
@@ -366,7 +374,7 @@ func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, 
 // model thinking shape thinkStyle (""/"auto"=look up by client model name; "adaptive"=force adaptive;
 // "budget"=force enabled+budget_tokens — the route thinking parameter, solving target-model vs client-alias
 // thinking-capability mismatches, e.g. the client says claude-fable-5 but actually routes to a budget-only Kimi).
-// none2Low=true (config translateNone2Low) upgrades in two places (4th return value n2l; three states see the constants):
+// none2Low=true (route convertOff2Low = "translate"/"all") upgrades in two places (4th return value n2l; three states see the constants):
 // ① downstream explicit thinking-off (effort none/off/disabled) → sent as low upstream, n2l=n2lStealth (thinking blocks stripped
 // on return, downstream unaware; usage passed through truthfully); ② tool-continuation history not replayable (trailingTurnSupportsThinking
 // =false) — the proxy's fallback would have been explicit thinking-off, and thinking-off happens to trigger Kimi routing K3 to the K2.8 no-thinking variant
@@ -471,7 +479,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	historyValid := trailingTurnSupportsThinking(msgs)
 	thinkingEnabled := false
 	budget := effortToThinkingBudget(effort)
-	// n2l: the translateNone2Low upgrade mode (three states see the constants) — the return side strips thinking blocks
+	// n2l: the convertOff2Low upgrade mode (three states see the constants) — the return side strips thinking blocks
 	// per it for implicit upgrades (n2lStealth) (the main handler adds the [off->low] badge); both upgrade kinds retreat and retry on upstream 400 rejection.
 	n2l := n2lNone
 	// upgradeNoneToLow upgrades thinking-off to low: adaptive models get thinking:adaptive+effort:low;
@@ -484,13 +492,11 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			thinkingEnabled = true
 			return true
 		}
-		budget = effortToThinkingBudget("low")
-		if ceiling := maxTokens / 2; budget > ceiling {
-			budget = ceiling
-		}
-		if budget < 1024 {
+		b, ok := lowThinkingBudget(maxTokens) // Shared with the native port (off2low.go): same cap and floor
+		if !ok {
 			return false
 		}
+		budget = b
 		thinkingEnabled = true // The budget model's thinking field is written by the unified tail after the switch
 		return true
 	}
@@ -525,7 +531,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	switch {
 	case !historyValid:
 		// Tool continuation missing a signed thinking block is replayable: models that can't disable thinking error out directly (cc-switch's wording copied).
-		// With translateNone2Low on, the proxy no longer disables thinking itself (off = Kimi routes K3 to the K2.8 no-thinking variant,
+		// With convertOff2Low on, the proxy no longer disables thinking itself (off = Kimi routes K3 to the K2.8 no-thinking variant,
 		// exactly what this parameter guards against, #11/#12 live incident): downstream explicit thinking-off goes the implicit upgrade (upgrade to low, strip
 		// thinking blocks on return); a downstream that wanted thinking (effort not an off level, the Codex norm — its level table has no none) is sent at
 		// the requested level (no stripping: blocks ride the return carrying signatures, next-turn history self-heals) — the upstream's rejection of "thinking on without
@@ -555,7 +561,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			// Fable/Mythos can't disable thinking: use low to express Codex's explicit none.
 			result["output_config"] = map[string]interface{}{"effort": "low"}
 			if none2Low {
-				n2l = n2lStealth // The downstream wanted thinking off: with translateNone2Low on, thinking blocks are stripped on the return side
+				n2l = n2lStealth // The downstream wanted thinking off: with convertOff2Low on, thinking blocks are stripped on the return side
 			}
 		}
 	case explicitlyDisabled:
@@ -1665,7 +1671,7 @@ func buildResponsesUsage(usage map[string]interface{}) map[string]interface{} {
 // The model parameter is the client's original model name (fallback for scenarios where the pipeline's return hasn't already written it back).
 // reg is the request-side tool registry: tool_use blocks recover their custom/namespace/tool_search identities from it.
 // triple is the search envelope's attribution triple (nil = no search envelopes, e.g. direct Anthropic-port calls).
-// stripThinking=true (translateNone2Low upgrade streams) drops thinking/redacted_thinking blocks
+// stripThinking=true (convertOff2Low upgrade streams) drops thinking/redacted_thinking blocks
 // (no reasoning items produced); usage is unaffected, passed through truthfully.
 func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *toolRegistry, triple *searchTriple, stripThinking bool) map[string]interface{} {
 	id := objStr(msg, "id")
@@ -1726,7 +1732,7 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 			output = append(output, toolCallItemFromRegistry(reg, itemID, "completed", callID, name, args))
 		case "thinking", "redacted_thinking":
 			if stripThinking {
-				continue // translateNone2Low: thinking blocks stripped; the downstream sees a thinking-off response
+				continue // convertOff2Low: thinking blocks stripped; the downstream sees a thinking-off response
 			}
 			flushText()
 			if enc := encodeThinkingEnvelope(blk); enc != "" {

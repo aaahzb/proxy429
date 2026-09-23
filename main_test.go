@@ -743,12 +743,14 @@ func TestToolCallsTag(t *testing.T) {
 	}
 }
 
-// setCfg sets the test config (maybeRewriteClassifier reads the global cfg).
-func setCfg(thinkingDisabled bool, maxTokens int) {
-	cfg.Store(&Config{
-		ClassifierThinkingDisabled: thinkingDisabled,
-		ClassifierMaxTokens:        maxTokens,
-	})
+// setCfg sets the test config (maybeRewriteClassifier reads the global cfg): thinkingOff maps to
+// classifier_route.classifier_thinking="off"; false leaves the classifier route unset (requests pass through untouched).
+func setCfg(thinkingOff bool) {
+	var cr *ClassifierRoute
+	if thinkingOff {
+		cr = &ClassifierRoute{ClassifierThinking: "off"}
+	}
+	cfg.Store(&Config{ClassifierRoute: cr})
 }
 
 // parseBody parses a JSON body into a map.
@@ -764,7 +766,7 @@ func parseBody(t *testing.T, b []byte) map[string]interface{} {
 // TestMaybeRewriteClassifierString verifies a string system matching the classifier disables thinking.
 func TestMaybeRewriteClassifierString(t *testing.T) {
 	resetStats()
-	setCfg(true, 0)
+	setCfg(true)
 	body := []byte(`{"model":"x","system":"You are a security monitor. Check this.","thinking":{"type":"enabled","budget_tokens":1024},"reasoning_effort":"high","reasoning":{"effort":"high"},"max_tokens":2048,"messages":[]}`)
 	p := parseBody(t, maybeRewriteClassifier(body))
 	if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "disabled" {
@@ -776,16 +778,16 @@ func TestMaybeRewriteClassifierString(t *testing.T) {
 	if _, ok := p["reasoning"]; ok {
 		t.Errorf("reasoning 应被删除，got %v", p["reasoning"])
 	}
-	// ClassifierMaxTokens=0 means no clamping; the original value is kept.
+	// max_tokens is never touched: the original value is kept.
 	if mt, _ := p["max_tokens"].(float64); mt != 2048 {
-		t.Errorf("max_tokens=%v want 2048（0 不压）", p["max_tokens"])
+		t.Errorf("max_tokens=%v want 2048（不动）", p["max_tokens"])
 	}
 }
 
 // TestMaybeRewriteClassifierArray verifies an array system matching the classifier disables thinking.
 func TestMaybeRewriteClassifierArray(t *testing.T) {
 	resetStats()
-	setCfg(true, 0)
+	setCfg(true)
 	body := []byte(`{"system":[{"type":"text","text":"You are a security monitor."}],"thinking":{"type":"enabled"},"max_tokens":1024}`)
 	out := maybeRewriteClassifier(body)
 	p := parseBody(t, out)
@@ -806,7 +808,7 @@ func TestMaybeRewriteClassifierArray(t *testing.T) {
 // TestMaybeRewriteClassifierNonClassifier verifies ordinary requests (system doesn't match) aren't rewritten.
 func TestMaybeRewriteClassifierNonClassifier(t *testing.T) {
 	resetStats()
-	setCfg(true, 0)
+	setCfg(true)
 	body := []byte(`{"system":"You are a helpful assistant.","thinking":{"type":"enabled"},"max_tokens":1024}`)
 	if out := maybeRewriteClassifier(body); !bytes.Equal(body, out) {
 		t.Errorf("普通请求不应被改写")
@@ -816,21 +818,10 @@ func TestMaybeRewriteClassifierNonClassifier(t *testing.T) {
 // TestMaybeRewriteClassifierDisabled verifies no rewriting when the toggle is off.
 func TestMaybeRewriteClassifierDisabled(t *testing.T) {
 	resetStats()
-	setCfg(false, 0)
+	setCfg(false)
 	body := []byte(`{"system":"You are a security monitor.","thinking":{"type":"enabled"},"max_tokens":1024}`)
 	if out := maybeRewriteClassifier(body); !bytes.Equal(body, out) {
-		t.Errorf("ClassifierThinkingDisabled=false 时不应改写")
-	}
-}
-
-// TestMaybeRewriteClassifierMaxTokens verifies max_tokens>0 is clamped to the configured value.
-func TestMaybeRewriteClassifierMaxTokens(t *testing.T) {
-	resetStats()
-	setCfg(true, 512)
-	body := []byte(`{"system":"You are a security monitor.","thinking":{"type":"enabled"},"max_tokens":4096}`)
-	p := parseBody(t, maybeRewriteClassifier(body))
-	if mt, _ := p["max_tokens"].(float64); mt != 512 {
-		t.Errorf("max_tokens=%v want 512", p["max_tokens"])
+		t.Errorf("classifier_thinking 未配 off 时不应改写")
 	}
 }
 
@@ -838,7 +829,7 @@ func TestMaybeRewriteClassifierMaxTokens(t *testing.T) {
 // This is the core of the bug fix: the old implementation's json.Unmarshal into a map + Marshal reordered keys alphabetically.
 func TestMaybeRewriteClassifierPreservesOrder(t *testing.T) {
 	resetStats()
-	setCfg(true, 0)
+	setCfg(true)
 	// Deliberately uses a non-alphabetical key order (model first, messages after).
 	body := []byte(`{"model":"x","system":"You are a security monitor.","thinking":{"type":"enabled"},"reasoning_effort":"high","reasoning":{"effort":"high"},"max_tokens":2048,"messages":[]}`)
 	out := maybeRewriteClassifier(body)
@@ -872,14 +863,14 @@ func TestClassifierHitCounting(t *testing.T) {
 	// A classifier request with thinking: with the thinking-off toggle on, a real rewrite is guaranteed (only byte changes count as rewrites).
 	cls := `{"model":"x","system":"You are a security monitor.","thinking":{"type":"enabled"},"max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
 
-	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10, ClassifierThinkingDisabled: false})
+	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
 	post(cls)
 	post(cls)
 	if h, rw := stats.classifierHits.Load(), stats.classifierRewrites.Load(); h != 2 || rw != 0 {
 		t.Errorf("关思考关闭时：hits=%d want 2, rewrites=%d want 0", h, rw)
 	}
 
-	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10, ClassifierThinkingDisabled: true})
+	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10, ClassifierRoute: &ClassifierRoute{URL: mock.URL, ClassifierThinking: "off"}})
 	post(cls)
 	if h, rw := stats.classifierHits.Load(), stats.classifierRewrites.Load(); h != 3 || rw != 1 {
 		t.Errorf("关思考开启后：hits=%d want 3, rewrites=%d want 1", h, rw)
@@ -982,6 +973,75 @@ func TestLoadConfigThinkingValidation(t *testing.T) {
 	}
 	if _, err := loadConfig(writeCfg(t, "turbo")); err == nil {
 		t.Errorf("thinking=turbo 应报错")
+	}
+}
+
+// TestLoadConfigRemovedKeys locks the migration rejection: the three removed top-level keys fail loadConfig
+// with an error naming the replacement, so an old config can't silently run with the feature gone.
+func TestLoadConfigRemovedKeys(t *testing.T) {
+	cases := []struct{ key, hint string }{
+		{"classifier_thinking_disabled", `"classifier_thinking": "off"`},
+		{"classifier_max_tokens", "no longer modified"},
+		{"translateNone2Low", "convertOff2Low"},
+	}
+	for _, tc := range cases {
+		body := `{"upstream":"http://x","` + tc.key + `":true}`
+		p := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadConfig(p)
+		if err == nil {
+			t.Errorf("旧键 %q 应报错拒载", tc.key)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.hint) {
+			t.Errorf("旧键 %q 的报错应含迁移提示 %q: %v", tc.key, tc.hint, err)
+		}
+	}
+}
+
+// TestLoadConfigEnumValidation locks the new enums: classifier_route.classifier_thinking accepts only ""/"off",
+// and convertOff2Low on all four route kinds (routes[]/fast_route/multimodal_fallback/search_fallback) accepts
+// only ""/"translate"/"all" — anything else fails at load instead of silently degrading to off.
+func TestLoadConfigEnumValidation(t *testing.T) {
+	writeCfg := func(t *testing.T, body string) string {
+		p := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// classifier_thinking: only off is legal.
+	if _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"off"}}`)); err != nil {
+		t.Errorf("classifier_thinking=off 应合法: %v", err)
+	}
+	if _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"low"}}`)); err == nil {
+		t.Errorf("classifier_thinking=low 应报错（只有 off）")
+	}
+	// convertOff2Low: translate/all legal on all four kinds...
+	good := []string{
+		`{"upstream":"http://x","routes":[{"pattern":"m*","url":"http://y","convertOff2Low":"translate"}]}`,
+		`{"upstream":"http://x","fast_route":{"url":"http://y","convertOff2Low":"all"}}`,
+		`{"upstream":"http://x","multimodal_fallback":{"url":"http://y","convertOff2Low":"translate"}}`,
+		`{"upstream":"http://x","search_fallback":{"url":"http://y","model":"m","convertOff2Low":"all"}}`,
+	}
+	for _, body := range good {
+		if _, err := loadConfig(writeCfg(t, body)); err != nil {
+			t.Errorf("应合法: %v (%s)", err, body)
+		}
+	}
+	// ...anything else rejected on all four kinds.
+	bad := []string{
+		`{"upstream":"http://x","routes":[{"pattern":"m*","url":"http://y","convertOff2Low":"yes"}]}`,
+		`{"upstream":"http://x","fast_route":{"url":"http://y","convertOff2Low":"native"}}`,
+		`{"upstream":"http://x","multimodal_fallback":{"url":"http://y","convertOff2Low":"1"}}`,
+		`{"upstream":"http://x","search_fallback":{"url":"http://y","model":"m","convertOff2Low":"on"}}`,
+	}
+	for _, body := range bad {
+		if _, err := loadConfig(writeCfg(t, body)); err == nil {
+			t.Errorf("应报错拒载: %s", body)
+		}
 	}
 }
 

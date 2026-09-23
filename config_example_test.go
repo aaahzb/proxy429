@@ -65,11 +65,10 @@ func TestConfigCoversAllStructFields(t *testing.T) {
 	for _, f := range []string{
 		"listen", "upstream", "max_retries", "base_delay_s",
 		"max_delay_s", "total_budget_s", "retry_status_codes", "respect_retry_after",
-		"classifier_thinking_disabled", "classifier_max_tokens",
 		"upstream_header_timeout_s", "ping_interval_s", "log_request_detail",
 		"log_file", "recent_sample_window", "routes", "classifier_route",
 		"fast_route", "multimodal_fallback", "search_fallback",
-		"convertAlltoStream", "translateNone2Low", "responses_listen",
+		"convertAlltoStream", "responses_listen",
 	} {
 		if exempt[f] {
 			continue

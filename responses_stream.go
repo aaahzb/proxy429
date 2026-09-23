@@ -71,7 +71,7 @@ const (
 	bkToolUse
 	bkSearchUse   // server_tool_use: the query may arrive via input_json_delta (Kimi often sends only id/name in the field), so the item ships only after stop completes it
 	bkInstantDone // web_search_tool_result and unknown blocks: complete at start; add+done already sent
-	bkDropped     // translateNone2Low stripped thinking block: a placeholder keeps index alignment; no events, no items
+	bkDropped     // convertOff2Low stripped thinking block: a placeholder keeps index alignment; no events, no items
 )
 
 type blockState struct {
@@ -104,7 +104,7 @@ type anthToRespStream struct {
 	stopReason      string
 	triple          *searchTriple          // Search-envelope attribution triple (injected by translatingWriter after routing is settled; nil = no envelopes)
 	lastSearchUse   map[string]interface{} // The most recent server_tool_use block (paired into an envelope when the result block arrives)
-	stripThinking   bool                   // translateNone2Low: strip thinking/redacted_thinking blocks (the downstream sees a thinking-off response)
+	stripThinking   bool                   // convertOff2Low: strip thinking/redacted_thinking blocks (the downstream sees a thinking-off response)
 }
 
 func newAnthToRespStream(emit func(string), model string, reg *toolRegistry) *anthToRespStream {
@@ -236,7 +236,7 @@ func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}
 		// repeated bare preambles stripped bare / pure preamble dropped), so it must wait for the text to diverge from the prefix (or the block to end).
 	case "thinking", "redacted_thinking":
 		if s.stripThinking {
-			// translateNone2Low: wholesale strip — no events, no items, and the pre-allocated
+			// convertOff2Low: wholesale strip — no events, no items, and the pre-allocated
 			// outputIndex is reclaimed to keep later block indices contiguous; delta/stop skip on bkDropped.
 			bs.kind = bkDropped
 			s.nextOutputIndex--
@@ -547,7 +547,7 @@ type translatingWriter struct {
 	model         string
 	reg           *toolRegistry
 	triple        *searchTriple // Search-envelope attribution triple (injected by the main handler via setSearchTriple after routing is settled)
-	stripThinking bool          // translateNone2Low upgrade stream: non-streaming wholesale conversion (finishBuffered) strips thinking blocks; streaming is handled by conv.stripThinking
+	stripThinking bool          // convertOff2Low upgrade stream: non-streaming wholesale conversion (finishBuffered) strips thinking blocks; streaming is handled by conv.stripThinking
 
 	header http.Header
 	status int

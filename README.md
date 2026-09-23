@@ -23,14 +23,16 @@ providers.
   envelope in the response; follow-up questions read the previous search
   content directly without re-searching (translation path only — Claude
   Code runs its own independent search).
-- **Silent low-thinking upgrade** (`"translateNone2Low": true`, Responses
-  translation port only): thinking-off requests are quietly upgraded to low
-  thinking upstream, and thinking blocks are stripped on the way back so the
+- **Silent low-thinking upgrade** (per-route `"convertOff2Low": "translate" /
+  "all"` on routes/fallbacks; translate = Responses translation port only,
+  all adds the Anthropic native port): explicit thinking-off requests are
+  quietly upgraded to low thinking upstream, and thinking blocks are stripped
+  on the way back so the
   client still sees a thinking-off response (usage stays truthful). Avoids
   Kimi's documented "thinking off routes K3-series to the K2.8 Preview
   no-thinking model" downgrade. The same protection covers the other door: a
   tool-continuation whose history has no signed thinking block to replay would
-  make the proxy disable thinking itself (same K2.8 routing) — with this flag
+  make the proxy disable thinking itself (same K2.8 routing) — with this set
   it sends the downstream's requested effort instead (low as floor when none
   was given), and does NOT strip the returned thinking blocks so the history
   heals on the next turn. One automatic retry with thinking off if the
@@ -129,8 +131,9 @@ observability. Also: [Usage guide](docs/usage.md) ·
   保持有效。
 - **搜索信封**：web 搜索结果封进加密信封随响应返回，后续提问直接读上次
   搜索内容、不再重搜（仅限翻译场景——Claude Code 会独立开一个代理搜索）。
-- **关思考悄悄升级 low**（`"translateNone2Low": true`，仅 Responses 翻译口）：
-  下游关思考的翻译请求自动改成 low 思考发上游，回传剥离思考块，下游无感知、
+- **关思考悄悄升级 low**（按路由配 `"convertOff2Low": "translate"/"all"`：
+  translate = 仅 Responses 翻译口，all = 翻译口 + Anthropic 原生口）：
+  下游显式关思考的请求自动改成 low 思考发上游，回传剥离思考块，下游无感知、
   用量如实透传。规避 Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」
   的 K3 降级。另一扇门同样罩住：工具续轮历史不可回放、而下游又没发关思考
   （Codex 的 effort 列表没有 none 档，最低就是 low）时，代理兜底本会自行关思考
