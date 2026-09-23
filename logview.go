@@ -159,7 +159,7 @@ type flightInfo struct {
 	CountTokens  bool   `json:"countTokens,omitempty"` // count_tokens probe stream; the model column shows a [count_tokens] prefix
 	SearchPrompt string `json:"searchPrompt,omitempty"`
 	ReqTrunc     bool   `json:"reqTrunc,omitempty"`     // Request body truncated to just the head 256KB (download button greyed out)
-	HasFull      bool   `json:"hasFull,omitempty"`      // Full output copy still held (download output / interactive JSON available)
+	HasFull      bool   `json:"hasFull,omitempty"`      // Full output copy still held (download output available; interactive JSON prefers it when present)
 	StageMs      int64  `json:"stageMs"`                // Milliseconds the current light color has lasted (shown next to the status light; only resets on color change)
 	Tools        string `json:"tools,omitempty"`        // Tool-call tag ("[Read*1][Edit*3]", omitted when no tools; accumulates live during forwarding)
 	Stripped     int    `json:"stripped,omitempty"`     // Total replayed search blocks stripped (conversation watermark + 400 fallback; 0 is omitted); the model column shows a red [剥N]
@@ -167,7 +167,7 @@ type flightInfo struct {
 	ReqDown      bool   `json:"reqDown,omitempty"`      // Downstream-side (downstream→proxy) request body recorded (recorded only when it differs from the upstream side; the viewer can switch link sides)
 	RespDown     bool   `json:"respDown,omitempty"`     // Downstream-side (proxy→downstream) response content recorded (always present for translation streams and rebuilt-JSON streams)
 	ReqDownTrunc bool   `json:"reqDownTrunc,omitempty"` // Downstream-side request body truncated to just the head 256KB (download greyed out after switching to the downstream side)
-	HasFullDown  bool   `json:"hasFullDown,omitempty"`  // Downstream-side full output copy still held (the downstream side's download output / interactive JSON available)
+	HasFullDown  bool   `json:"hasFullDown,omitempty"`  // Downstream-side full output copy still held (the downstream side's download output; interactive JSON prefers it when present)
 }
 
 // logData is the JSON returned by /__logs/data: recent logs + full status counters + the in-flight stream list.
@@ -1515,8 +1515,9 @@ function parseSSEHTML(raw){
   });
   return html;
 }
-// 查看区按钮/标签可见性：看请求体仅手选单流时出现；下载/交互按钮还要「储存完整结构体」开启
-// （完整副本只在该模式下记录，关闭即被服务端清空）。该流数据残缺时下载按钮置灰带悬停提示：
+// 查看区按钮/标签可见性：看请求体仅手选单流时出现；下载按钮还要「储存完整结构体」开启
+// （完整副本只在该模式下记录，关闭即被服务端清空）；交互式JSON 不要求开关——能浏览的内容就能成树。
+// 该流数据残缺时下载按钮置灰带悬停提示：
 // 请求体被截断（rt）的不能当完整版下载，无完整输出副本（!hf）的不能下载输出。
 function updateFlightViewChrome(){
   var whatBtn = document.getElementById('flightViewWhatBtn');
@@ -1543,7 +1544,7 @@ function updateFlightViewChrome(){
     dlOutBtn.style.display = fullStoreOn ? '' : 'none';
     dlOutBtn.disabled = down ? fl.hfd === false : fl.hf === false;
     dlOutBtn.title = dlOutBtn.disabled ? '该流未记录完整输出（开启前已开始/已清空/无透传内容）' : '';
-    treeBtn.style.display = fullStoreOn ? '' : 'none'; // 四态都可交互看树；非流式态对组装结果成树
+    treeBtn.style.display = ''; // 四态都可交互看树，不要求储存开关：该侧有完整副本优先拉完整版，否则对手头浏览内容（前 256KB）成树；非流式态对组装结果成树
     rawBtn.style.display = 'none'; // 单流四态循环已含 渲染/流式原始，解析/原始切换按钮只留给 grid 多流自动跟踪
     treeBtn.textContent = flightViewTree ? '退出交互' : '交互式JSON';
   } else {
@@ -2394,38 +2395,31 @@ document.getElementById('flightViewSideBtn').onclick = async () => {
   document.getElementById('flightViewSideNote').textContent = '';
   updateFlightViewChrome();
   await fetchFlightViewSide();
+  if(flightViewTree) await renderFlightTree(); // 交互树开着时跟随切侧重取：否则常规渲染把树顶掉、状态却还停在树模式（按钮误显「退出交互」）
 };
-// ---- 交互式 JSON 树查看（仅「储存完整结构体」开启时按钮可见；默认全部折叠，点键展开）----
-document.getElementById('flightViewTreeBtn').onclick = async () => {
-  if(!selectedFlight) return;
+// ---- 交互式 JSON 树查看（按钮恒可用，不要求「储存完整结构体」；默认全部折叠，点键展开）----
+// 数据源：请求体视图用已拉取的 lastReqRaw（开关开启时即完整体）；输出视图该侧有完整副本时优先拉 full=1 完整版，
+// 取不到（开关关闭/缺侧/已清空/拉取失败）就对手头浏览内容 lastRaw（前 256KB，截断尾事件按原文挂入）成树——
+// 能显示在屏上的内容就能交互看。切链路侧时由 sideBtn 在刷新后重调本函数，树跟随切侧。
+async function renderFlightTree(){
   var fv = document.getElementById('flightView');
-  if(flightViewTree){
-    // 退出交互：回到当前 请求体/输出 的常规渲染
-    flightViewTree = false;
-    updateFlightViewChrome();
-    if(flightViewWhat==='req'){ if(lastReqRaw) renderReqBody(); } else renderRespFromLastRaw();
-    return;
-  }
-  // 取完整数据：请求体视图用已拉取的 lastReqRaw（开关开启时即完整体）；输出视图现拉 full=1。
-  // 该流数据残缺（rt=截断版 / hf=false=无完整副本）时不拉取，直接提示——残缺内容成不了树。
   var fl = flightFlags[selectedFlight] || {};
   var text = '', err = '';
   if(flightViewWhat==='req'){
     text = lastReqRaw;
     if((flightViewSide==='down' ? fl.rdt : fl.rt) === true) err = '（该流请求体只剩截断版（前 256KB），不是完整 JSON，无法交互查看）';
     else if(!text) err = '（该流未记录请求体，可点「看输出[渲染]」再点回重试）';
-  } else if((flightViewSide==='down' ? fl.hfd : fl.hf) === false){
-    err = '（该流未记录完整输出：开启前已开始/已清空/无透传内容）';
   } else {
-    fv.textContent = '加载中…';
-    try{
-      const r = await fetch('/__flight?id='+selectedFlight+'&full=1&side='+flightViewSide,{cache:'no-store'});
-      if(r.ok) text = await r.text();
-      else err = '（'+await r.text()+'）';
-    }catch(e){ err = '（完整输出拉取失败）'; }
+    if((flightViewSide==='down' ? fl.hfd : fl.hf) === true){
+      fv.textContent = '加载中…';
+      try{
+        const r = await fetch('/__flight?id='+selectedFlight+'&full=1&side='+flightViewSide,{cache:'no-store'});
+        if(r.ok) text = await r.text();
+      }catch(e){}
+    }
+    if(!text) text = lastRaw; // 无完整副本可用时退回手头浏览内容（截断版也能成树，覆盖已到部分）
+    if(!text) err = '（该流暂无输出内容可交互查看）';
   }
-  flightViewTree = true;
-  updateFlightViewChrome();
   if(err){ fv.textContent = err; return; }
   // 先按整个 JSON 解析；失败按状态分流：非流式视图把 SSE 事件流组装成最终对象（便于按结构看树），其余按事件数组解析；都不行则提示。
   var val, ok = false;
@@ -2442,6 +2436,19 @@ document.getElementById('flightViewTreeBtn').onclick = async () => {
   if(!ok){ fv.textContent = '（内容不是 JSON 也不是 SSE 事件流，无法交互查看）'; return; }
   fv.innerHTML = '';
   fv.appendChild(jsonTreeRoot(val));
+}
+document.getElementById('flightViewTreeBtn').onclick = async () => {
+  if(!selectedFlight) return;
+  if(flightViewTree){
+    // 退出交互：回到当前 请求体/输出 的常规渲染
+    flightViewTree = false;
+    updateFlightViewChrome();
+    if(flightViewWhat==='req'){ if(lastReqRaw) renderReqBody(); } else renderRespFromLastRaw();
+    return;
+  }
+  flightViewTree = true;
+  updateFlightViewChrome();
+  await renderFlightTree();
 };
 // ---- 下载（仅「储存完整结构体」开启时按钮可见）：点击才拉取完整内容，Blob 落盘 ----
 // saveBlobText 落盘文本：能解析成 JSON 则美化（pretty，2 空格缩进）存 .json，否则逐字原文存 .txt。
@@ -2744,7 +2751,7 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <li><b>499</b>：状态码列中非 200 的状态码加方括号显示（如 [499]、[400]），一眼挑出异常流。重试/预算用尽时代理会向下游透传兜底 error 事件（overloaded_error），此类流状态码列显 [重试尽]（点击行可回看该兜底事件）。发生过退避重试的流在状态码后追加金色 <code>[重试N次]</code>（N = 重试次数，如 200[重试2次]；[重试尽] 时同样带，可对照 max_retries 看是否打满）。499 口径与上游提供商后台一致——上游响应没发完连接就结束了记 499（最常见是下游主动取消，取消会传导成上游断连；nginx 惯例 client closed request）；上游完整发完后下游才断开的（Codex 收完 response.completed 即关连接）仍记 200。</li>
       </ul>
       <h3>流查看</h3>
-      <p>点击在途流/最近完成流的行可看该流内容：「看…」按钮四态循环 请求体 → 输出[渲染] → 输出[流式原始] → 输出[非流式]（默认落 输出[渲染]）。渲染=把 SSE 事件流解析成可读文本；流式原始=逐字原文；非流式=把事件流组装成最终 JSON 结构看整体（Anthropic 流按 message_start 骨架累加，Responses 流取 response.completed；流未完整到达时注明是部分快照），此态下「交互式JSON」直接对组装结果成树；请求体视图回看导致这个流的请求体（JSON 自动美化，非完整 JSON 按原文显示）。请求体与输出都按链路侧记录、点「链路」按钮切换：默认 代理↔上游 侧（请求体是实际发给上游的，输出是上游回来的原始流）；下游↔代理 侧是客户端发出/实际收到的。只有两侧有差异的流才双存——Responses 翻译流恒不同（下游 Responses、上游 Anthropic 各一份）；convertAlltoStream 重建 JSON 的流下游侧输出是重建后的一次性 JSON；原生流只在请求体被改写（分类器关思考/路由改模型等）时才单独存下游侧请求体——切到无记录的一侧会自动回退另一侧并在按钮旁提示。浏览一律只给前 256KB。勾选「储存完整结构体」（默认关，重启复位）后，新开始的请求额外记录完整请求体与输出（不设上限，占内存），查看器出现「下载请求体/下载输出」按钮可下载完整文件（JSON 美化后保存，非 JSON 按原文；按当前链路侧下载，缺侧回退时文件名按实际返回侧命名），以及「交互式JSON」按钮——把请求体/输出渲染成可按键折叠展开的 JSON 树（默认全部折叠，点键名行懒展开；输出是 SSE 事件流时解析成事件数组再成树，非流式态下则对组装后的最终对象成树）；取消勾选立即清空已存的完整副本、下载与交互按钮消失。数据残缺的流不会静默当成完整版：请求体只剩截断版的「下载请求体」置灰（悬停见原因），无完整输出副本的「下载输出」置灰（均按当前链路侧判定），交互式JSON 对这两类直接提示不看。</p>
+      <p>点击在途流/最近完成流的行可看该流内容：「看…」按钮四态循环 请求体 → 输出[渲染] → 输出[流式原始] → 输出[非流式]（默认落 输出[渲染]）。渲染=把 SSE 事件流解析成可读文本；流式原始=逐字原文；非流式=把事件流组装成最终 JSON 结构看整体（Anthropic 流按 message_start 骨架累加，Responses 流取 response.completed；流未完整到达时注明是部分快照），此态下「交互式JSON」直接对组装结果成树；请求体视图回看导致这个流的请求体（JSON 自动美化，非完整 JSON 按原文显示）。请求体与输出都按链路侧记录、点「链路」按钮切换：默认 代理↔上游 侧（请求体是实际发给上游的，输出是上游回来的原始流）；下游↔代理 侧是客户端发出/实际收到的。只有两侧有差异的流才双存——Responses 翻译流恒不同（下游 Responses、上游 Anthropic 各一份）；convertAlltoStream 重建 JSON 的流下游侧输出是重建后的一次性 JSON；原生流只在请求体被改写（分类器关思考/路由改模型等）时才单独存下游侧请求体——切到无记录的一侧会自动回退另一侧并在按钮旁提示。浏览一律只给前 256KB。勾选「储存完整结构体」（默认关，重启复位）后，新开始的请求额外记录完整请求体与输出（不设上限，占内存），查看器出现「下载请求体/下载输出」按钮可下载完整文件（JSON 美化后保存，非 JSON 按原文；按当前链路侧下载，缺侧回退时文件名按实际返回侧命名）；取消勾选立即清空已存的完整副本、下载按钮消失。「交互式JSON」按钮恒可用（不要求勾选储存）：把当前查看内容渲染成可按键折叠展开的 JSON 树（默认全部折叠，点键名行懒展开；输出是 SSE 事件流时解析成事件数组再成树，非流式态下则对组装后的最终对象成树；该侧已记录完整副本时优先拉完整版成树，否则对手头浏览的前 256KB 内容成树，截断尾事件按原文挂入），并跟随链路侧切换。数据残缺的流不会静默当成完整版：请求体只剩截断版的「下载请求体」置灰（悬停见原因），无完整输出副本的「下载输出」置灰（均按当前链路侧判定）；交互式JSON 只拒绝拼不回完整 JSON 的截断请求体，输出一律对手头内容成树。</p>
       <h3>配置管理</h3>
       <ul>
       <li>配置页可新建 / 重命名 / 删除 / 切换配置文件。</li>
@@ -2865,7 +2872,7 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <li><b>API column</b>: protocol origin + thinking value in one cell. Name = protocol origin: orange <code>[Anthropic]</code> = native Anthropic-port traffic (Claude Code etc.), purple <code>[translate]</code> = Responses port translated to Anthropic via the main pipeline. The <code>[value]</code> after the name = the shortest form of the thinking config <b>actually sent upstream</b> (final state after proxy rewrites like translation mapping and classifier thinking-off), <b>its color = the vocabulary</b> (thinking targets the upstream: upstreams always receive Anthropic format, so a purple name is followed by an orange value) — orange = Anthropic thinking. Values: <code>off</code> = thinking disabled or effort none/off/disabled; <code>on N</code> = enabled + budget_tokens N; <code>adaptive</code> = adaptive without level; <code>low</code>/<code>high</code>/<code>max</code> etc = effort of adaptive; no <code>[value]</code> = the request carried no thinking field. Examples: <code>[translate][on 16384]</code> = Codex sent effort high, translated to an Anthropic upstream; <code>[Anthropic][off]</code> = hit the classifier and the proxy disabled thinking.</li>
       <li><b>499</b>: non-200 status codes in the status column are bracketed (e.g. [499], [400]) to spot abnormal streams at a glance. When retries/budget are exhausted, the proxy forwards a fallback error event (overloaded_error) downstream; such streams show [retries exhausted] in the status column (click the row to replay that fallback event). Streams that went through backoff retries get a gold <code>[retried Nx]</code> after the status code (N = retry count, e.g. 200[retried 2x]; [retries exhausted] carries it too — compare against max_retries to see if it maxed out). The 499 semantics match upstream provider dashboards — the connection ended before the upstream finished sending (most commonly the downstream actively cancelled, and the cancellation propagates into an upstream disconnect; nginx convention: client closed request); when the downstream disconnects only after the upstream finished completely (Codex closes the connection right after response.completed), it's still 200.</li>
       <h3>Stream viewer</h3>
-      <p>Click an in-flight or finished stream's row to view its content: the view button cycles four states — Request body → Output [rendered] → Output [raw stream] → Output [non-stream] (default landing: Output [rendered]). Rendered parses the SSE event stream into readable text; raw stream shows it verbatim; non-stream folds the event stream into the final JSON structure (Anthropic streams accumulate onto the message_start skeleton, Responses streams take the response.completed object; an incomplete stream is marked as a partial snapshot), and "Interactive JSON" in this state trees the assembled object; the request-body state replays the request body that caused this stream (JSON pretty-printed, non-complete JSON shown verbatim). Request body and output are recorded per link side — toggle with the "Link" button: the default proxy↔upstream side holds the request body actually sent upstream and the raw stream coming back; the client↔proxy side holds what the client sent and actually received. Only streams whose two sides differ are stored twice — Responses translation streams always differ (Responses downstream, Anthropic upstream, one copy each); for convertAlltoStream JSON-rebuilt streams the downstream output is the rebuilt one-shot JSON; direct streams record a separate downstream request body only when the body was rewritten (classifier thinking-off, route model change, etc.) — switching to a side with no record falls back to the other side, with a hint next to the button. Browsing always caps at the first 256KB. With "Store full payloads" on (default off, resets on restart), new requests additionally record the full request body and output (no cap, in memory), and the viewer shows "Download request/Download output" buttons for complete files (JSON pretty-printed, non-JSON verbatim; downloads follow the current link side, and on fallback the file name uses the actually-served side), plus an "Interactive JSON" button — rendering the request body/output as a collapsible JSON tree (all collapsed by default, click a key row to lazily expand; SSE event streams are parsed into an event array first; in the non-stream state the tree is built from the assembled final object). Unchecking immediately purges stored full copies and the download/interactive buttons disappear. Streams with incomplete data are never silently treated as complete: "Download request" is greyed out when only a truncated request body remains (hover for the reason), "Download output" is greyed out without a full output copy (both judged per current link side), and Interactive JSON plainly declines both cases.</p>
+      <p>Click an in-flight or finished stream's row to view its content: the view button cycles four states — Request body → Output [rendered] → Output [raw stream] → Output [non-stream] (default landing: Output [rendered]). Rendered parses the SSE event stream into readable text; raw stream shows it verbatim; non-stream folds the event stream into the final JSON structure (Anthropic streams accumulate onto the message_start skeleton, Responses streams take the response.completed object; an incomplete stream is marked as a partial snapshot), and "Interactive JSON" in this state trees the assembled object; the request-body state replays the request body that caused this stream (JSON pretty-printed, non-complete JSON shown verbatim). Request body and output are recorded per link side — toggle with the "Link" button: the default proxy↔upstream side holds the request body actually sent upstream and the raw stream coming back; the client↔proxy side holds what the client sent and actually received. Only streams whose two sides differ are stored twice — Responses translation streams always differ (Responses downstream, Anthropic upstream, one copy each); for convertAlltoStream JSON-rebuilt streams the downstream output is the rebuilt one-shot JSON; direct streams record a separate downstream request body only when the body was rewritten (classifier thinking-off, route model change, etc.) — switching to a side with no record falls back to the other side, with a hint next to the button. Browsing always caps at the first 256KB. With "Store full payloads" on (default off, resets on restart), new requests additionally record the full request body and output (no cap, in memory), and the viewer shows "Download request/Download output" buttons for complete files (JSON pretty-printed, non-JSON verbatim; downloads follow the current link side, and on fallback the file name uses the actually-served side). Unchecking immediately purges stored full copies and the download buttons disappear. The "Interactive JSON" button is always available (the store-full switch is not required): it renders the content currently in view as a collapsible JSON tree (all collapsed by default, click a key row to lazily expand; SSE event streams are parsed into an event array first; in the non-stream state the tree is built from the assembled final object; when the side's full copy is recorded the tree fetches it, otherwise it trees the on-screen first-256KB copy, a truncated tail event included verbatim), and it follows link-side switches. Streams with incomplete data are never silently treated as complete: "Download request" is greyed out when only a truncated request body remains (hover for the reason), "Download output" is greyed out without a full output copy (both judged per current link side); Interactive JSON declines only a truncated request body (unparseable as complete JSON) — outputs are treed from whatever copy is on screen.</p>
       <h3>Config management</h3>
       <li>The Config tab can create / rename / delete / switch config files.</li>
       <li>While on the Config tab, the file list auto-refreshes every 3 seconds — adding/removing config files needs no manual "refresh list".</li>
@@ -3022,8 +3029,7 @@ var enHTMLRepl = [][2]string{
 	{`'（请求体拉取失败）'`, `'(failed to fetch the request body)'`},
 	{`'（该流请求体只剩截断版（前 256KB），不是完整 JSON，无法交互查看）'`, `'(Only a truncated copy (first 256KB) of this stream request body remains — not complete JSON, cannot browse interactively)'`},
 	{`'（该流未记录请求体，可点「看输出[渲染]」再点回重试）'`, `'(No request body recorded for this stream; click Output [rendered] then back to retry)'`},
-	{`'（该流未记录完整输出：开启前已开始/已清空/无透传内容）'`, `'(No full output recorded for this stream: started before the switch was on / purged / no proxied content)'`},
-	{`'（完整输出拉取失败）'`, `'(failed to fetch the full output)'`},
+	{`'（该流暂无输出内容可交互查看）'`, `'(No output content for this stream to browse interactively yet)'`},
 	{`'（内容不是 JSON 也不是 SSE 事件流，无法交互查看）'`, `'(Content is neither JSON nor an SSE event stream; cannot browse interactively)'`},
 	{`'该流请求体只剩截断版（前 256KB），完整版未记录或已清空'`, `'Only a truncated copy (first 256KB) of this stream request body remains; the full version was not recorded or was purged'`},
 	{`'该流未记录完整输出（开启前已开始/已清空/无透传内容）'`, `'No full output recorded for this stream (started before the switch was on / purged / no proxied content)'`},
