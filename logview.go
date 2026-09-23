@@ -1217,7 +1217,7 @@ let autoTrack = true; // 勾选时 poll 自动跟踪最新在途流（id 最大=
 let maxFlights = 3; // 自动跟踪多流模式下最多并排显示多少个在途流（最新 N 个），防止太多太细
 let flightViewRaw = false; // 查看区显示模式：false=解析文本，true=原始 SSE
 let flightEnded = false; // 选中的流是否已结束（结束后停止拉取，保留最后内容）
-let flightViewWhat = 'resp'; // 手选单流查看内容三态：'resp'=输出[流]，'asm'=输出[整理]，'req'=请求体（仅手选单流可切，「看…」按钮按 请求体→输出[流]→输出[整理] 循环）
+let flightViewWhat = 'resp'; // 手选单流查看内容四态：'req'=请求体，'resp'=输出[渲染]（SSE 解析成可读文本，默认），'raw'=输出[流式原始]（SSE 原文），'asm'=输出[非流式]（事件流组装成最终 JSON）（仅手选单流可切，「看…」按钮按 请求体→输出[渲染]→输出[流式原始]→输出[非流式] 循环）
 let lastReqRaw = ''; // 当前选中流当前链路侧的请求体缓存（切到 req 或切链路侧时拉一次；请求体静态不变）
 let flightViewSide = 'up'; // 查看链路侧：'up'=代理↔上游（默认观测面），'down'=下游↔代理；请求体/输出共用，点「链路」按钮切换
 let fullStoreOn = false; // 「储存完整结构体」开关（以服务端为准）：开=可下载完整请求体/输出
@@ -1530,11 +1530,11 @@ function updateFlightViewChrome(){
   var down = flightViewSide==='down';
   if(selectedFlight){
     whatBtn.style.display = '';
-    whatBtn.textContent = flightViewWhat==='req' ? '看输出[流]' : (flightViewWhat==='resp' ? '看输出[整理]' : '看请求体');
+    whatBtn.textContent = flightViewWhat==='req' ? '看输出[渲染]' : (flightViewWhat==='resp' ? '看输出[流式原始]' : (flightViewWhat==='raw' ? '看输出[非流式]' : '看请求体'));
     sideBtn.style.display = '';
     sideBtn.textContent = down ? '链路:下游<->代理' : '链路:代理<->上游'; // ASCII 箭头：↔ 在按钮上会走 emoji 字体，挤且丑
     // 类型标签带链路侧后缀：请求体[代理→上游] / 输出[上游→代理] / 请求体[下游→代理] / 输出[代理→下游]
-    var kind = flightViewWhat==='req' ? '请求体' : (flightViewWhat==='asm' ? '输出[整理]' : '输出[流]');
+    var kind = flightViewWhat==='req' ? '请求体' : (flightViewWhat==='resp' ? '输出[渲染]' : (flightViewWhat==='raw' ? '输出[流式原始]' : '输出[非流式]'));
     kind += down ? (flightViewWhat==='req' ? '[下游→代理]' : '[代理→下游]') : (flightViewWhat==='req' ? '[代理→上游]' : '[上游→代理]');
     document.getElementById('flightViewKind').textContent = kind;
     dlBtn.style.display = fullStoreOn ? '' : 'none';
@@ -1543,8 +1543,8 @@ function updateFlightViewChrome(){
     dlOutBtn.style.display = fullStoreOn ? '' : 'none';
     dlOutBtn.disabled = down ? fl.hfd === false : fl.hf === false;
     dlOutBtn.title = dlOutBtn.disabled ? '该流未记录完整输出（开启前已开始/已清空/无透传内容）' : '';
-    treeBtn.style.display = (fullStoreOn && flightViewWhat!=='asm') ? '' : 'none';
-    rawBtn.style.display = flightViewWhat==='asm' ? 'none' : ''; // 整理视图没有 解析/原始 之分（也没有交互树的对象来源），两个按钮藏起
+    treeBtn.style.display = fullStoreOn ? '' : 'none'; // 四态都可交互看树；非流式态对组装结果成树
+    rawBtn.style.display = 'none'; // 单流四态循环已含 渲染/流式原始，解析/原始切换按钮只留给 grid 多流自动跟踪
     treeBtn.textContent = flightViewTree ? '退出交互' : '交互式JSON';
   } else {
     whatBtn.style.display = 'none';
@@ -1577,14 +1577,14 @@ function renderReqBody(){
   if(fullStoreOn && !rt && disp.length > 262144) disp = disp.slice(0, 262144);
   fv.textContent = note + disp;
 }
-// renderRespFromLastRaw 用 lastRaw 重渲染输出视图（切回输出/退出交互树/切链路侧时用）：asm=整理成最终结构，否则按 解析/原始 渲染流。
+// renderRespFromLastRaw 用 lastRaw 重渲染输出视图（切状态/退出交互树/切链路侧时用）：渲染=解析成可读文本，流式原始=逐字原文，非流式=组装成最终结构。
 function renderRespFromLastRaw(){
   var fv = document.getElementById('flightView');
   if(lastRaw === ''){
     fv.textContent = flightEnded ? '（该流无透传内容：失败/重试用尽/非流式）' : '加载中…';
   } else if(flightViewWhat==='asm'){ fv.textContent = assembledOutputText(lastRaw); }
-  else if(flightViewRaw){ fv.textContent = lastRaw; }
-  else { var h = parseSSEHTML(lastRaw); fv.innerHTML = h || '<span class="ss-empty">（未解析出内容，点「显示原始」查看 SSE）</span>'; }
+  else if(flightViewWhat==='raw'){ fv.textContent = lastRaw; }
+  else { var h = parseSSEHTML(lastRaw); fv.innerHTML = h || '<span class="ss-empty">（未解析出内容，切到 输出[流式原始] 查看）</span>'; }
 }
 // ---- 交互式 JSON 树：默认全部折叠，点击键名行懒展开（子节点展开时才构建，大 JSON 不一次卡死）----
 // jtPrimitiveHTML 渲染标量值（字符串带引号转义，null/数字/布尔着色）。
@@ -1661,13 +1661,13 @@ function sseToJSONArray(raw){
   });
   return out;
 }
-// assembledOutputText 渲染 输出[整理]：整体 JSON（非流式/重建回传）直接美化；SSE 事件流整理成最终结构
+// assembledOutputText 渲染 输出[非流式]：整体 JSON（非流式上游/重建回传）直接美化；SSE 事件流组装成最终结构
 // （Anthropic 流按 message_start 骨架 + delta 累加组装，Responses 流取 response.completed 的 response 对象）；
-// 流未完整到达时顶部注明是部分快照；两种格式都不像时提示切回 输出[流]。
+// 流未完整到达时顶部注明是部分快照；两种格式都不像时提示切回 输出[流式原始]。
 function assembledOutputText(raw){
   try{ return JSON.stringify(JSON.parse(raw), null, 2); }catch(e){}
   var r = assembleSSEToObject(raw);
-  if(!r) return '（无法整理：输出不是 JSON 也不是可识别的 SSE 事件流；切回 输出[流] 或「显示原始」查看）';
+  if(!r) return '（无法整理：输出不是 JSON 也不是可识别的 SSE 事件流；切回 输出[流式原始] 查看）';
   return (r.complete ? '' : '（流未完整到达，以下是已到部分的整理）\n') + JSON.stringify(r.obj, null, 2);
 }
 // assembleSSEToObject 把 SSE 原文整理成最终响应对象（规则同服务端 collectStreamToJSON）：Anthropic 事件流 =
@@ -1820,7 +1820,7 @@ async function poll(){
       fv.style.whiteSpace = 'pre-wrap';
       fv.style.wordBreak = 'break-all';
       updateFlightViewChrome();
-      if(!flightEnded && flightViewWhat!=='req' && !flightViewTree){ // req 模式/交互树看的是静态内容，不拉流；输出[流]/输出[整理] 都随 poll 刷新
+      if(!flightEnded && flightViewWhat!=='req' && !flightViewTree){ // req 模式/交互树看的是静态内容，不拉流；输出三态（渲染/流式原始/非流式）都随 poll 刷新
         try{
           const fr = await fetch('/__flight?id='+selectedFlight+'&side='+flightViewSide,{cache:'no-store'});
           if(fr.ok){
@@ -1832,7 +1832,7 @@ async function poll(){
               fv.textContent = '（该流无透传内容：失败/重试用尽/非流式）';
             } else {
               if(flightViewWhat==='asm'){ fv.textContent = assembledOutputText(lastRaw); }
-              else if(flightViewRaw){ fv.textContent = lastRaw; } else { var h = parseSSEHTML(lastRaw); fv.innerHTML = h || '<span class="ss-empty">（未解析出内容，点「显示原始」查看 SSE）</span>'; }
+              else if(flightViewWhat==='raw'){ fv.textContent = lastRaw; } else { var h = parseSSEHTML(lastRaw); fv.innerHTML = h || '<span class="ss-empty">（未解析出内容，切到 输出[流式原始] 查看）</span>'; }
             }
             if(atBottom) fv.scrollTop = fv.scrollHeight; // 用户滚到底则跟随，否则不动
             // 完成流（不在在途列表）内容是静态快照，拉一次即可，停止重复拉取。
@@ -2325,15 +2325,8 @@ document.getElementById('flightViewRawBtn').onclick = () => {
   flightViewRaw = !flightViewRaw;
   document.getElementById('flightViewRawBtn').textContent = flightViewRaw ? '显示解析' : '显示原始';
   var fv = document.getElementById('flightView');
-  if(selectedFlight){
-    if(flightViewTree){ flightViewTree = false; updateFlightViewChrome(); } // 切 解析/原始 先退出交互树
-    // 手选单流：请求体视图按请求体重渲染，输出视图用 lastRaw 重渲染
-    if(flightViewWhat==='req'){
-      if(lastReqRaw) renderReqBody();
-    } else if(lastRaw){
-      if(flightViewRaw){ fv.textContent = lastRaw; } else { var h = parseSSEHTML(lastRaw); fv.innerHTML = h || '<span class="ss-empty">（未解析出内容，点「显示原始」查看 SSE）</span>'; }
-    }
-  } else if(autoTrack){
+  if(selectedFlight) return; // 单流视图里本按钮隐藏：渲染/流式原始 由「看…」按钮循环切换
+  if(autoTrack){
     // 多流模式：用缓存的 autoRaws 重渲染每个 cell
     Array.from(fv.children).forEach(function(cell){
       var raw = autoRaws[cell.dataset.id];
@@ -2344,26 +2337,21 @@ document.getElementById('flightViewRawBtn').onclick = () => {
     });
   }
 };
-// ---- 查看内容三态切换（请求体 → 输出[流] → 输出[整理] 循环；仅手选单流；请求体拉一次即静态，下载用同一缓存）----
+// ---- 查看内容四态切换（请求体 → 输出[渲染] → 输出[流式原始] → 输出[非流式] 循环；仅手选单流；请求体拉一次即静态，下载用同一缓存）----
 document.getElementById('flightViewWhatBtn').onclick = async () => {
   if(!selectedFlight) return;
   flightViewTree = false;
-  if(flightViewWhat === 'req'){
-    // 请求体 → 输出[流]：用 lastRaw 立即重渲染，未结束的流下一次 poll 继续刷新
-    flightViewWhat = 'resp';
-    updateFlightViewChrome();
-    renderRespFromLastRaw();
-  } else if(flightViewWhat === 'resp'){
-    // 输出[流] → 输出[整理]：同一 lastRaw 整理成最终结构（Anthropic 流按 message_start 骨架累加，Responses 流取 response.completed）
-    flightViewWhat = 'asm';
-    updateFlightViewChrome();
-    renderRespFromLastRaw();
-  } else {
-    // 输出[整理] → 请求体：拉一次静态请求体
+  if(flightViewWhat === 'asm'){
+    // 输出[非流式] → 请求体：拉一次静态请求体
     flightViewWhat = 'req';
     updateFlightViewChrome();
     await fetchFlightViewSide();
     updateFlightViewChrome();
+  } else {
+    // 请求体 → 输出[渲染] → 输出[流式原始] → 输出[非流式]：同一份 lastRaw 三种渲染，未结束的流下一次 poll 继续刷新
+    flightViewWhat = flightViewWhat==='req' ? 'resp' : (flightViewWhat==='resp' ? 'raw' : 'asm');
+    updateFlightViewChrome();
+    renderRespFromLastRaw();
   }
 };
 // fetchFlightViewSide 按当前 请求体/输出 + 链路侧 拉一次查看区内容（看请求体/切链路侧共用）；
@@ -2425,7 +2413,7 @@ document.getElementById('flightViewTreeBtn').onclick = async () => {
   if(flightViewWhat==='req'){
     text = lastReqRaw;
     if((flightViewSide==='down' ? fl.rdt : fl.rt) === true) err = '（该流请求体只剩截断版（前 256KB），不是完整 JSON，无法交互查看）';
-    else if(!text) err = '（该流未记录请求体，可点「看输出」再点回重试）';
+    else if(!text) err = '（该流未记录请求体，可点「看输出[渲染]」再点回重试）';
   } else if((flightViewSide==='down' ? fl.hfd : fl.hf) === false){
     err = '（该流未记录完整输出：开启前已开始/已清空/无透传内容）';
   } else {
@@ -2439,12 +2427,17 @@ document.getElementById('flightViewTreeBtn').onclick = async () => {
   flightViewTree = true;
   updateFlightViewChrome();
   if(err){ fv.textContent = err; return; }
-  // 先按整个 JSON 解析；失败再按 SSE 事件流解析成数组；都不行则提示。
+  // 先按整个 JSON 解析；失败按状态分流：非流式视图把 SSE 事件流组装成最终对象（便于按结构看树），其余按事件数组解析；都不行则提示。
   var val, ok = false;
   try{ val = JSON.parse(text); ok = true; }
   catch(e){
-    var arr = sseToJSONArray(text);
-    if(arr.length){ val = arr; ok = true; }
+    if(flightViewWhat==='asm'){
+      var ar = assembleSSEToObject(text);
+      if(ar){ val = ar.obj; ok = true; }
+    } else {
+      var arr = sseToJSONArray(text);
+      if(arr.length){ val = arr; ok = true; }
+    }
   }
   if(!ok){ fv.textContent = '（内容不是 JSON 也不是 SSE 事件流，无法交互查看）'; return; }
   fv.innerHTML = '';
@@ -2751,7 +2744,7 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <li><b>499</b>：状态码列中非 200 的状态码加方括号显示（如 [499]、[400]），一眼挑出异常流。重试/预算用尽时代理会向下游透传兜底 error 事件（overloaded_error），此类流状态码列显 [重试尽]（点击行可回看该兜底事件）。发生过退避重试的流在状态码后追加金色 <code>[重试N次]</code>（N = 重试次数，如 200[重试2次]；[重试尽] 时同样带，可对照 max_retries 看是否打满）。499 口径与上游提供商后台一致——上游响应没发完连接就结束了记 499（最常见是下游主动取消，取消会传导成上游断连；nginx 惯例 client closed request）；上游完整发完后下游才断开的（Codex 收完 response.completed 即关连接）仍记 200。</li>
       </ul>
       <h3>流查看</h3>
-      <p>点击在途流/最近完成流的行可看该流内容：默认看输出[流]（「显示解析/显示原始」切换）；「看…」按钮三态循环 请求体 → 输出[流] → 输出[整理]——输出[整理]把 SSE 事件流整理成最终 JSON 结构看整体（Anthropic 流按 message_start 骨架累加，Responses 流取 response.completed；流未完整到达时注明是部分快照），请求体视图回看导致这个流的请求体（JSON 自动美化，非完整 JSON 按原文显示）。请求体与输出都按链路侧记录、点「链路」按钮切换：默认 代理↔上游 侧（请求体是实际发给上游的，输出是上游回来的原始流）；下游↔代理 侧是客户端发出/实际收到的。只有两侧有差异的流才双存——Responses 翻译流恒不同（下游 Responses、上游 Anthropic 各一份）；convertAlltoStream 重建 JSON 的流下游侧输出是重建后的一次性 JSON；原生流只在请求体被改写（分类器关思考/路由改模型等）时才单独存下游侧请求体——切到无记录的一侧会自动回退另一侧并在按钮旁提示。浏览一律只给前 256KB。勾选「储存完整结构体」（默认关，重启复位）后，新开始的请求额外记录完整请求体与输出（不设上限，占内存），查看器出现「下载请求体/下载输出」按钮可下载完整文件（JSON 美化后保存，非 JSON 按原文；按当前链路侧下载，缺侧回退时文件名按实际返回侧命名），以及「交互式JSON」按钮——把请求体/输出渲染成可按键折叠展开的 JSON 树（默认全部折叠，点键名行懒展开；输出是 SSE 事件流时解析成事件数组再成树）；取消勾选立即清空已存的完整副本、下载与交互按钮消失。数据残缺的流不会静默当成完整版：请求体只剩截断版的「下载请求体」置灰（悬停见原因），无完整输出副本的「下载输出」置灰（均按当前链路侧判定），交互式JSON 对这两类直接提示不看。</p>
+      <p>点击在途流/最近完成流的行可看该流内容：「看…」按钮四态循环 请求体 → 输出[渲染] → 输出[流式原始] → 输出[非流式]（默认落 输出[渲染]）。渲染=把 SSE 事件流解析成可读文本；流式原始=逐字原文；非流式=把事件流组装成最终 JSON 结构看整体（Anthropic 流按 message_start 骨架累加，Responses 流取 response.completed；流未完整到达时注明是部分快照），此态下「交互式JSON」直接对组装结果成树；请求体视图回看导致这个流的请求体（JSON 自动美化，非完整 JSON 按原文显示）。请求体与输出都按链路侧记录、点「链路」按钮切换：默认 代理↔上游 侧（请求体是实际发给上游的，输出是上游回来的原始流）；下游↔代理 侧是客户端发出/实际收到的。只有两侧有差异的流才双存——Responses 翻译流恒不同（下游 Responses、上游 Anthropic 各一份）；convertAlltoStream 重建 JSON 的流下游侧输出是重建后的一次性 JSON；原生流只在请求体被改写（分类器关思考/路由改模型等）时才单独存下游侧请求体——切到无记录的一侧会自动回退另一侧并在按钮旁提示。浏览一律只给前 256KB。勾选「储存完整结构体」（默认关，重启复位）后，新开始的请求额外记录完整请求体与输出（不设上限，占内存），查看器出现「下载请求体/下载输出」按钮可下载完整文件（JSON 美化后保存，非 JSON 按原文；按当前链路侧下载，缺侧回退时文件名按实际返回侧命名），以及「交互式JSON」按钮——把请求体/输出渲染成可按键折叠展开的 JSON 树（默认全部折叠，点键名行懒展开；输出是 SSE 事件流时解析成事件数组再成树，非流式态下则对组装后的最终对象成树）；取消勾选立即清空已存的完整副本、下载与交互按钮消失。数据残缺的流不会静默当成完整版：请求体只剩截断版的「下载请求体」置灰（悬停见原因），无完整输出副本的「下载输出」置灰（均按当前链路侧判定），交互式JSON 对这两类直接提示不看。</p>
       <h3>配置管理</h3>
       <ul>
       <li>配置页可新建 / 重命名 / 删除 / 切换配置文件。</li>
@@ -2872,7 +2865,7 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <li><b>API column</b>: protocol origin + thinking value in one cell. Name = protocol origin: orange <code>[Anthropic]</code> = native Anthropic-port traffic (Claude Code etc.), purple <code>[translate]</code> = Responses port translated to Anthropic via the main pipeline. The <code>[value]</code> after the name = the shortest form of the thinking config <b>actually sent upstream</b> (final state after proxy rewrites like translation mapping and classifier thinking-off), <b>its color = the vocabulary</b> (thinking targets the upstream: upstreams always receive Anthropic format, so a purple name is followed by an orange value) — orange = Anthropic thinking. Values: <code>off</code> = thinking disabled or effort none/off/disabled; <code>on N</code> = enabled + budget_tokens N; <code>adaptive</code> = adaptive without level; <code>low</code>/<code>high</code>/<code>max</code> etc = effort of adaptive; no <code>[value]</code> = the request carried no thinking field. Examples: <code>[translate][on 16384]</code> = Codex sent effort high, translated to an Anthropic upstream; <code>[Anthropic][off]</code> = hit the classifier and the proxy disabled thinking.</li>
       <li><b>499</b>: non-200 status codes in the status column are bracketed (e.g. [499], [400]) to spot abnormal streams at a glance. When retries/budget are exhausted, the proxy forwards a fallback error event (overloaded_error) downstream; such streams show [retries exhausted] in the status column (click the row to replay that fallback event). Streams that went through backoff retries get a gold <code>[retried Nx]</code> after the status code (N = retry count, e.g. 200[retried 2x]; [retries exhausted] carries it too — compare against max_retries to see if it maxed out). The 499 semantics match upstream provider dashboards — the connection ended before the upstream finished sending (most commonly the downstream actively cancelled, and the cancellation propagates into an upstream disconnect; nginx convention: client closed request); when the downstream disconnects only after the upstream finished completely (Codex closes the connection right after response.completed), it's still 200.</li>
       <h3>Stream viewer</h3>
-      <p>Click an in-flight or finished stream's row to view its content: Output [stream] by default (toggle "Parsed/Raw"); the view button cycles three states — Request body → Output [stream] → Output [assembled], the last folding the SSE event stream into the final JSON structure (Anthropic streams accumulate onto the message_start skeleton, Responses streams take the response.completed object; an incomplete stream is marked as a partial snapshot); the request-body state replays the request body that caused this stream (JSON pretty-printed, non-complete JSON shown verbatim). Request body and output are recorded per link side — toggle with the "Link" button: the default proxy↔upstream side holds the request body actually sent upstream and the raw stream coming back; the client↔proxy side holds what the client sent and actually received. Only streams whose two sides differ are stored twice — Responses translation streams always differ (Responses downstream, Anthropic upstream, one copy each); for convertAlltoStream JSON-rebuilt streams the downstream output is the rebuilt one-shot JSON; direct streams record a separate downstream request body only when the body was rewritten (classifier thinking-off, route model change, etc.) — switching to a side with no record falls back to the other side, with a hint next to the button. Browsing always caps at the first 256KB. With "Store full payloads" on (default off, resets on restart), new requests additionally record the full request body and output (no cap, in memory), and the viewer shows "Download request/Download output" buttons for complete files (JSON pretty-printed, non-JSON verbatim; downloads follow the current link side, and on fallback the file name uses the actually-served side), plus an "Interactive JSON" button — rendering the request body/output as a collapsible JSON tree (all collapsed by default, click a key row to lazily expand; SSE event streams are parsed into an event array first). Unchecking immediately purges stored full copies and the download/interactive buttons disappear. Streams with incomplete data are never silently treated as complete: "Download request" is greyed out when only a truncated request body remains (hover for the reason), "Download output" is greyed out without a full output copy (both judged per current link side), and Interactive JSON plainly declines both cases.</p>
+      <p>Click an in-flight or finished stream's row to view its content: the view button cycles four states — Request body → Output [rendered] → Output [raw stream] → Output [non-stream] (default landing: Output [rendered]). Rendered parses the SSE event stream into readable text; raw stream shows it verbatim; non-stream folds the event stream into the final JSON structure (Anthropic streams accumulate onto the message_start skeleton, Responses streams take the response.completed object; an incomplete stream is marked as a partial snapshot), and "Interactive JSON" in this state trees the assembled object; the request-body state replays the request body that caused this stream (JSON pretty-printed, non-complete JSON shown verbatim). Request body and output are recorded per link side — toggle with the "Link" button: the default proxy↔upstream side holds the request body actually sent upstream and the raw stream coming back; the client↔proxy side holds what the client sent and actually received. Only streams whose two sides differ are stored twice — Responses translation streams always differ (Responses downstream, Anthropic upstream, one copy each); for convertAlltoStream JSON-rebuilt streams the downstream output is the rebuilt one-shot JSON; direct streams record a separate downstream request body only when the body was rewritten (classifier thinking-off, route model change, etc.) — switching to a side with no record falls back to the other side, with a hint next to the button. Browsing always caps at the first 256KB. With "Store full payloads" on (default off, resets on restart), new requests additionally record the full request body and output (no cap, in memory), and the viewer shows "Download request/Download output" buttons for complete files (JSON pretty-printed, non-JSON verbatim; downloads follow the current link side, and on fallback the file name uses the actually-served side), plus an "Interactive JSON" button — rendering the request body/output as a collapsible JSON tree (all collapsed by default, click a key row to lazily expand; SSE event streams are parsed into an event array first; in the non-stream state the tree is built from the assembled final object). Unchecking immediately purges stored full copies and the download/interactive buttons disappear. Streams with incomplete data are never silently treated as complete: "Download request" is greyed out when only a truncated request body remains (hover for the reason), "Download output" is greyed out without a full output copy (both judged per current link side), and Interactive JSON plainly declines both cases.</p>
       <h3>Config management</h3>
       <li>The Config tab can create / rename / delete / switch config files.</li>
       <li>While on the Config tab, the file list auto-refreshes every 3 seconds — adding/removing config files needs no manual "refresh list".</li>
@@ -3028,15 +3021,15 @@ var enHTMLRepl = [][2]string{
 	{`show.length+' 个在途流'`, `show.length+' in-flight stream(s)'`},
 	{`'（请求体拉取失败）'`, `'(failed to fetch the request body)'`},
 	{`'（该流请求体只剩截断版（前 256KB），不是完整 JSON，无法交互查看）'`, `'(Only a truncated copy (first 256KB) of this stream request body remains — not complete JSON, cannot browse interactively)'`},
-	{`'（该流未记录请求体，可点「看输出」再点回重试）'`, `'(No request body recorded for this stream; click Output then back to retry)'`},
+	{`'（该流未记录请求体，可点「看输出[渲染]」再点回重试）'`, `'(No request body recorded for this stream; click Output [rendered] then back to retry)'`},
 	{`'（该流未记录完整输出：开启前已开始/已清空/无透传内容）'`, `'(No full output recorded for this stream: started before the switch was on / purged / no proxied content)'`},
 	{`'（完整输出拉取失败）'`, `'(failed to fetch the full output)'`},
 	{`'（内容不是 JSON 也不是 SSE 事件流，无法交互查看）'`, `'(Content is neither JSON nor an SSE event stream; cannot browse interactively)'`},
 	{`'该流请求体只剩截断版（前 256KB），完整版未记录或已清空'`, `'Only a truncated copy (first 256KB) of this stream request body remains; the full version was not recorded or was purged'`},
 	{`'该流未记录完整输出（开启前已开始/已清空/无透传内容）'`, `'No full output recorded for this stream (started before the switch was on / purged / no proxied content)'`},
-	{`flightViewWhat==='req' ? '看输出[流]' : (flightViewWhat==='resp' ? '看输出[整理]' : '看请求体')`, `flightViewWhat==='req' ? 'Output [stream]' : (flightViewWhat==='resp' ? 'Output [assembled]' : 'Request body')`},
-	{`flightViewWhat==='req' ? '请求体' : (flightViewWhat==='asm' ? '输出[整理]' : '输出[流]')`, `flightViewWhat==='req' ? 'Request body' : (flightViewWhat==='asm' ? 'Output [assembled]' : 'Output [stream]')`},
-	{`'（无法整理：输出不是 JSON 也不是可识别的 SSE 事件流；切回 输出[流] 或「显示原始」查看）'`, `'(Cannot assemble: the output is neither JSON nor a recognizable SSE event stream; switch back to Output [stream] or "Raw")'`},
+	{`flightViewWhat==='req' ? '看输出[渲染]' : (flightViewWhat==='resp' ? '看输出[流式原始]' : (flightViewWhat==='raw' ? '看输出[非流式]' : '看请求体'))`, `flightViewWhat==='req' ? 'Output [rendered]' : (flightViewWhat==='resp' ? 'Output [raw stream]' : (flightViewWhat==='raw' ? 'Output [non-stream]' : 'Request body'))`},
+	{`flightViewWhat==='req' ? '请求体' : (flightViewWhat==='resp' ? '输出[渲染]' : (flightViewWhat==='raw' ? '输出[流式原始]' : '输出[非流式]'))`, `flightViewWhat==='req' ? 'Request body' : (flightViewWhat==='resp' ? 'Output [rendered]' : (flightViewWhat==='raw' ? 'Output [raw stream]' : 'Output [non-stream]'))`},
+	{`'（无法整理：输出不是 JSON 也不是可识别的 SSE 事件流；切回 输出[流式原始] 查看）'`, `'(Cannot assemble: the output is neither JSON nor a recognizable SSE event stream; switch back to Output [raw stream])'`},
 	{`'（流未完整到达，以下是已到部分的整理）\n'`, `'(Stream incomplete; the assembly below covers only what has arrived)\n'`},
 	{`down ? (flightViewWhat==='req' ? '[下游→代理]' : '[代理→下游]') : (flightViewWhat==='req' ? '[代理→上游]' : '[上游→代理]')`, `down ? (flightViewWhat==='req' ? '[client→proxy]' : '[proxy→client]') : (flightViewWhat==='req' ? '[proxy→upstream]' : '[upstream→proxy]')`},
 	{`链路:下游<->代理`, `Link: client<->proxy`},
@@ -3121,7 +3114,7 @@ var enHTMLRepl = [][2]string{
 	{`'（请求体超长，仅保留前 256KB）\n'`, `'(Request body too long; only the first 256KB kept)\n'`},
 	{`'（仅显示前 256KB，点「下载请求体」获取完整）\n'`, `'(Showing the first 256KB only; click "Download request" for the full body)\n'`},
 	{`'（请求体非完整 JSON，按原文显示）\n'`, `'(Request body is not complete JSON; shown verbatim)\n'`},
-	{`（未解析出内容，点「显示原始」查看 SSE）`, `(Nothing parsed; click "Raw" to view the SSE)`},
+	{`（未解析出内容，切到 输出[流式原始] 查看）`, `(Nothing parsed; switch to Output [raw stream] to view)`},
 	{`（未解析出内容，点「显示原始」查看）`, `(Nothing parsed; click "Raw" to view)`},
 	{`(isArr?' 项':' 键')`, `(isArr?' items':' keys')`},
 	{`'<div style="color:#9a9a9a;margin-bottom:2px">流 #'`, `'<div style="color:#9a9a9a;margin-bottom:2px">Stream #'`},
