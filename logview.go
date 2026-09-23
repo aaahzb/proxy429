@@ -283,8 +283,9 @@ func configGetHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // configPostHandler saves the edited config and reloads it.
-// It first validates with json.Unmarshal that the content is legal JSON matching the Config struct, writing to disk only on success —
-// avoiding a broken config on disk that would fail the next startup. reloadConfig applies it after the write.
+// It first probes the content with parseConfig — the same validation loadConfig uses (JSON syntax, removed keys with
+// migration hints, enum values) — writing to disk only on success. A rejected config never reaches the file, so it
+// cannot brick the next startup. reloadConfig applies it after the write.
 func configPostHandler(w http.ResponseWriter, r *http.Request) {
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -295,10 +296,10 @@ func configPostHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to read request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Validate first: legal JSON that parses into Config (unknown fields ignored, type errors fail).
-	var probe Config
-	if err := json.Unmarshal(body, &probe); err != nil {
-		http.Error(w, "failed to parse JSON; not saved: "+err.Error(), http.StatusBadRequest)
+	// Probe with parseConfig (not bare json.Unmarshal): unknown-but-removed keys and bad enum values must be
+	// rejected here with their migration hints, before anything touches the disk.
+	if _, err := parseConfig(body); err != nil {
+		http.Error(w, "invalid config; not saved: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	_, statErr := os.Stat(currentConfigPath()) // Didn't exist before the save → this save creates the file; the file list changes
