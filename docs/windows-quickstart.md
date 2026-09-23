@@ -50,7 +50,7 @@ Double-click `proxy429.exe`; a status-light icon appears in the system tray:
 - 🟡 yellow = request sent, awaiting upstream response
 - 🟢 green = streaming forward
 
-Right-click the tray icon -> **「查看日志」 (View logs)**; the browser opens:
+Right-click the tray icon -> **「查看日志」 (Open console)**; the browser opens:
 
 ```
 http://127.0.0.1:8080/__logs
