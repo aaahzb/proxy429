@@ -31,20 +31,27 @@ func TestTrayState(t *testing.T) {
 	}
 }
 
-// TestTrayTip verifies the multi-line tooltip: idle / single state / both states coexisting.
+// TestTrayTip verifies the multi-line tooltip: idle / single state / both states coexisting, plus the config-problem line
+// (removed keys present) prepended before the activity lines.
 func TestTrayTip(t *testing.T) {
+	prev := currentUILang()
+	applyUILang("zh") // Pin the language so the problem-line assertion is deterministic
+	defer applyUILang(prev)
 	cases := []struct {
 		active, waiting int
+		problem         bool
 		want            string
 	}{
-		{0, 0, "Proxy429\nidle"},
-		{2, 0, "Proxy429\nactive 2"},
-		{0, 3, "Proxy429\nwaiting 3"},
-		{2, 3, "Proxy429\nactive 2\nwaiting 3"},
+		{0, 0, false, "Proxy429\nidle"},
+		{2, 0, false, "Proxy429\nactive 2"},
+		{0, 3, false, "Proxy429\nwaiting 3"},
+		{2, 3, false, "Proxy429\nactive 2\nwaiting 3"},
+		{0, 0, true, "Proxy429\n⚠ 配置含已删除的键，详见控制台文档\nidle"},
+		{2, 0, true, "Proxy429\n⚠ 配置含已删除的键，详见控制台文档\nactive 2"},
 	}
 	for _, c := range cases {
-		if got := trayTip(c.active, c.waiting); got != c.want {
-			t.Errorf("trayTip(%d,%d)=%q want %q", c.active, c.waiting, got, c.want)
+		if got := trayTip(c.active, c.waiting, c.problem); got != c.want {
+			t.Errorf("trayTip(%d,%d,%v)=%q want %q", c.active, c.waiting, c.problem, got, c.want)
 		}
 	}
 }
@@ -238,5 +245,36 @@ func TestSaveConfigCreateNotifiesTray(t *testing.T) {
 	case <-trayCfgSwitched:
 		t.Error("普通保存（文件已存在）不应投递托盘重建通知")
 	default:
+	}
+}
+
+// TestConfigPostRemovedKeysRejected locks the save-side strictness: removed keys are non-fatal at startup (degraded run),
+// but the web save handler refuses to write them to disk — HTTP 400 with the migration hint (shown inline in #cfgMsg),
+// and the file is never created/touched.
+func TestConfigPostRemovedKeysRejected(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.json")
+	configMu.Lock()
+	configFilePath = p
+	configMu.Unlock()
+	defer func() {
+		configMu.Lock()
+		configFilePath = ""
+		configMu.Unlock()
+		cfg.Store(&Config{})
+	}()
+
+	req := httptest.NewRequest("POST", "/__config", strings.NewReader(`{"upstream":"http://127.0.0.1:1","translateNone2Low":true}`))
+	req.RemoteAddr = "127.0.0.1:1" // isLocalRequest requires localhost
+	rec := httptest.NewRecorder()
+	configPostHandler(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("含已删除键的保存应 400，实际 %d", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `config key "translateNone2Low" was removed`) || !strings.Contains(body, "convertOff2Low") {
+		t.Errorf("400 文案应含键名与迁移提示: %s", body)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Error("被拒的配置不应写盘")
 	}
 }

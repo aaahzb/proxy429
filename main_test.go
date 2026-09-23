@@ -967,17 +967,18 @@ func TestLoadConfigThinkingValidation(t *testing.T) {
 		return p
 	}
 	for _, v := range []string{"", "auto", "adaptive", "budget"} {
-		if _, err := loadConfig(writeCfg(t, v)); err != nil {
+		if _, _, err := loadConfig(writeCfg(t, v)); err != nil {
 			t.Errorf("thinking=%q 应合法: %v", v, err)
 		}
 	}
-	if _, err := loadConfig(writeCfg(t, "turbo")); err == nil {
+	if _, _, err := loadConfig(writeCfg(t, "turbo")); err == nil {
 		t.Errorf("thinking=turbo 应报错")
 	}
 }
 
-// TestLoadConfigRemovedKeys locks the migration rejection: the three removed top-level keys fail loadConfig
-// with an error naming the replacement, so an old config can't silently run with the feature gone.
+// TestLoadConfigRemovedKeys locks the degraded-migration semantics: the three removed top-level keys no longer fail
+// loadConfig — the config loads and runs (the keys stay inert), and each removed key comes back as a non-fatal warning
+// that drives the red tray icon. (Only the web save handler still rejects them, see TestConfigPostRemovedKeysRejected.)
 func TestLoadConfigRemovedKeys(t *testing.T) {
 	cases := []struct{ key, hint string }{
 		{"classifier_thinking_disabled", `"classifier_thinking": "off"`},
@@ -990,13 +991,20 @@ func TestLoadConfigRemovedKeys(t *testing.T) {
 		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
 			t.Fatal(err)
 		}
-		_, err := loadConfig(p)
-		if err == nil {
-			t.Errorf("旧键 %q 应报错拒载", tc.key)
+		c, warns, err := loadConfig(p)
+		if err != nil {
+			t.Errorf("旧键 %q 不应再拒载（降级启动）: %v", tc.key, err)
 			continue
 		}
-		if !strings.Contains(err.Error(), tc.hint) {
-			t.Errorf("旧键 %q 的报错应含迁移提示 %q: %v", tc.key, tc.hint, err)
+		if c == nil || c.Upstream != "http://x" {
+			t.Errorf("旧键 %q：配置应正常加载: %+v", tc.key, c)
+		}
+		if len(warns) != 1 || warns[0] != tc.key {
+			t.Errorf("旧键 %q 应产生对应警告: %v", tc.key, warns)
+			continue
+		}
+		if got := removedKeyWarningEN(tc.key); !strings.Contains(got, tc.hint) {
+			t.Errorf("旧键 %q 的英文警告应含迁移提示 %q: %s", tc.key, tc.hint, got)
 		}
 	}
 }
@@ -1013,10 +1021,10 @@ func TestLoadConfigEnumValidation(t *testing.T) {
 		return p
 	}
 	// classifier_thinking: only off is legal.
-	if _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"off"}}`)); err != nil {
+	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"off"}}`)); err != nil {
 		t.Errorf("classifier_thinking=off 应合法: %v", err)
 	}
-	if _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"low"}}`)); err == nil {
+	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"low"}}`)); err == nil {
 		t.Errorf("classifier_thinking=low 应报错（只有 off）")
 	}
 	// convertOff2Low: translate/all legal on all four kinds...
@@ -1027,7 +1035,7 @@ func TestLoadConfigEnumValidation(t *testing.T) {
 		`{"upstream":"http://x","search_fallback":{"url":"http://y","model":"m","convertOff2Low":"all"}}`,
 	}
 	for _, body := range good {
-		if _, err := loadConfig(writeCfg(t, body)); err != nil {
+		if _, _, err := loadConfig(writeCfg(t, body)); err != nil {
 			t.Errorf("应合法: %v (%s)", err, body)
 		}
 	}
@@ -1039,7 +1047,7 @@ func TestLoadConfigEnumValidation(t *testing.T) {
 		`{"upstream":"http://x","search_fallback":{"url":"http://y","model":"m","convertOff2Low":"on"}}`,
 	}
 	for _, body := range bad {
-		if _, err := loadConfig(writeCfg(t, body)); err == nil {
+		if _, _, err := loadConfig(writeCfg(t, body)); err == nil {
 			t.Errorf("应报错拒载: %s", body)
 		}
 	}

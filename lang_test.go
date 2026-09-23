@@ -20,7 +20,7 @@ func TestLoadConfigUILangIgnored(t *testing.T) {
 		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := loadConfig(p); err != nil {
+		if _, _, err := loadConfig(p); err != nil {
 			t.Errorf("ui_lang=%q 应被忽略且加载成功: %v", lang, err)
 		}
 	}

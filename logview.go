@@ -296,10 +296,18 @@ func configPostHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to read request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Probe with parseConfig (not bare json.Unmarshal): unknown-but-removed keys and bad enum values must be
-	// rejected here with their migration hints, before anything touches the disk.
-	if _, err := parseConfig(body); err != nil {
+	// Probe with parseConfig (not bare json.Unmarshal): bad JSON and invalid enum values are rejected before anything
+	// touches the disk. Removed keys are non-fatal at startup, but saving is interactive (the user sees this message in
+	// #cfgMsg), so they are rejected here too — a removed key must not be written back to disk from the console.
+	if _, warns, err := parseConfig(body); err != nil {
 		http.Error(w, "invalid config; not saved: "+err.Error(), http.StatusBadRequest)
+		return
+	} else if len(warns) > 0 {
+		msgs := make([]string, 0, len(warns))
+		for _, k := range warns {
+			msgs = append(msgs, removedKeyWarningEN(k))
+		}
+		http.Error(w, "invalid config; not saved: "+strings.Join(msgs, "; "), http.StatusBadRequest)
 		return
 	}
 	_, statErr := os.Stat(currentConfigPath()) // Didn't exist before the save → this save creates the file; the file list changes
@@ -2668,6 +2676,13 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <li>切到配置页后自动每 3 秒刷新文件列表，增删配置文件无需手动按「刷新列表」。</li>
       <li>当前生效的配置不可删除。</li>
       </ul>
+      <h3>已删除的配置键</h3>
+      <p>以下旧版顶层键已删除。配置里带着它们<b>不影响启动、程序照常运行</b>，但对应功能不会生效（不模拟旧行为）：托盘图标会变红，「日志」页的启动警告会逐键列明并给出替代写法。请在「配置」页删除这些键；需要原功能就按替代写法改写后再保存（含旧键的保存会被拒绝）。</p>
+      <ul>
+      <li><code>classifier_thinking_disabled</code> → 在 <code>classifier_route</code> 内设置 <code>"classifier_thinking": "off"</code></li>
+      <li><code>classifier_max_tokens</code> → 直接删除（分类器请求的 max_tokens 不再被修改）</li>
+      <li><code>translateNone2Low</code> → 在 routes[] 条目 / fast_route / multimodal_fallback / search_fallback 上设置 <code>"convertOff2Low": "translate"</code> 或 <code>"all"</code>（见「参数速查」）</li>
+      </ul>
       <h3>访问控制</h3>
       <p>转发通道与管理端点（/__*）都永远仅本机可连（127.0.0.1/::1）：误把 listen / responses_listen 设成 0.0.0.0 也不会把转发通道暴露给内网。</p>
 `
@@ -2774,6 +2789,13 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <li>The Config tab can create / rename / delete / switch config files.</li>
       <li>While on the Config tab, the file list auto-refreshes every 3 seconds — adding/removing config files needs no manual "refresh list".</li>
       <li>The currently active config cannot be deleted.</li>
+      <h3>Removed config keys</h3>
+      <p>These legacy top-level keys were removed. A config still carrying them <b>starts and runs normally</b>, but their behavior stays inactive (not emulated): the tray icon turns red, and the startup warnings on the Logs tab name each key with its replacement. Delete the keys on the Config tab; if you need the old behavior, rewrite it as shown, then save (a save still containing removed keys is rejected).</p>
+      <ul>
+      <li><code>classifier_thinking_disabled</code> → set <code>"classifier_thinking": "off"</code> inside <code>classifier_route</code></li>
+      <li><code>classifier_max_tokens</code> → just delete it (classifier-request max_tokens is no longer modified)</li>
+      <li><code>translateNone2Low</code> → set <code>"convertOff2Low": "translate"</code> or <code>"all"</code> on routes[] entries / fast_route / multimodal_fallback / search_fallback (see the parameter cheat sheet)</li>
+      </ul>
       <h3>Access control</h3>
       <p>Both the forwarding channel and the admin endpoints (/__*) are only ever reachable from this machine (127.0.0.1/::1): even mistakenly setting listen / responses_listen to 0.0.0.0 won't expose the forwarding channel to the LAN.</p>
 `

@@ -168,42 +168,72 @@ func listConfigFiles() []string {
 	return listConfigFilesIn(filepath.Dir(currentConfigPath()))
 }
 
+// configWarnings holds the names of removed config keys present in the running config (empty = clean). Set at startup
+// and on every successful reload/switch; read by the tray poll (red icon + tooltip).
+var configWarnings atomic.Value // []string
+
+// setConfigWarnings replaces the removed-keys warning set (nil/empty clears it).
+func setConfigWarnings(keys []string) {
+	configWarnings.Store(keys)
+}
+
+// getConfigWarnings returns the removed-keys warning set (nil when clean).
+func getConfigWarnings() []string {
+	v, _ := configWarnings.Load().([]string)
+	return v
+}
+
 // loadConfig reads and parses the config file and applies defaults. Shared by main startup and tray reload.
-func loadConfig(path string) (*Config, error) {
+// Removed config keys are non-fatal warnings: the proxy starts and runs with them inert (old behavior is NOT emulated);
+// only malformed JSON or invalid values of live keys come back as errors.
+func loadConfig(path string) (*Config, []string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	return parseConfig(data)
 }
 
-// removedConfigKeys lists top-level config keys removed in this version, each with its migration hint. Configs containing
-// them are rejected outright: a silently inert key would quietly drop the protection it used to buy. The web save handler
-// probes with parseConfig, so a rejected config never reaches the file.
+// removedConfigKeys lists top-level config keys removed in this version, each with its migration hint. A config
+// containing them still loads and runs (the removed keys stay inert — their old behavior is NOT emulated); they surface
+// as warnings (startup log lines naming the key, red tray icon; the console Docs describe the migration). Only the web
+// save handler rejects them outright (HTTP 400), so a removed key never gets written back to disk from the console.
 var removedConfigKeys = []struct{ key, hint string }{
 	{"classifier_thinking_disabled", `set "classifier_thinking": "off" inside classifier_route instead`},
 	{"classifier_max_tokens", `max_tokens is no longer modified on classifier requests`},
 	{"translateNone2Low", `set "convertOff2Low": "translate" or "all" on routes[]/fast_route/multimodal_fallback/search_fallback entries instead`},
 }
 
-// parseConfig parses and validates config bytes (shared by loadConfig and the web save probe): rejects removed keys with
-// migration hints, validates enum values, then applies defaults and logs warnings.
-func parseConfig(data []byte) (*Config, error) {
+// removedKeyWarningEN renders the stable English warning line for a removed key (startup log, web save rejection).
+func removedKeyWarningEN(key string) string {
+	for _, rk := range removedConfigKeys {
+		if rk.key == key {
+			return fmt.Sprintf("config key %q was removed: %s", key, rk.hint)
+		}
+	}
+	return fmt.Sprintf("config key %q was removed", key)
+}
+
+// parseConfig parses and validates config bytes (shared by loadConfig and the web save probe). Removed keys come back as
+// non-fatal warnings (the config still loads; removed keys are simply inert), while malformed JSON and invalid values of
+// live keys come back as errors. Defaults are applied and caveats logged.
+func parseConfig(data []byte) (*Config, []string, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(data, &top); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	var warnings []string
 	for _, rk := range removedConfigKeys {
 		if _, ok := top[rk.key]; ok {
-			return nil, fmt.Errorf("config key %q was removed: %s", rk.key, rk.hint)
+			warnings = append(warnings, rk.key)
 		}
 	}
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := validateConfigEnums(&c); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if c.UpstreamHeaderTimeoutSec <= 0 {
 		c.UpstreamHeaderTimeoutSec = 70 // Default 70s: resend internally if the upstream's first byte times out
@@ -222,7 +252,7 @@ func parseConfig(data []byte) (*Config, error) {
 			log.Printf("[config] warning: route #%d pattern exactly matches reserved name %q (Codex menu reserved names: * catch-all=Fallback, fast lane=fast_route); this route is disabled, please rename it", i+1, c.Routes[i].Pattern)
 		}
 	}
-	return &c, nil
+	return &c, warnings, nil
 }
 
 // validateConfigEnums rejects config values outside their supported sets (route thinking shapes, classifier thinking
@@ -491,24 +521,25 @@ func clearStats(c *Config) {
 }
 
 // reloadConfig re-reads the current config file and atomically swaps the global cfg, without clearing stats (only the "clear stats" button clears).
-// On failure the global cfg keeps the old config.
+// On failure the global cfg keeps the old config. Removed keys in the reloaded file succeed but refresh the warning set (red tray icon).
 func reloadConfig() error {
-	c, err := loadConfig(currentConfigPath())
+	c, warns, err := loadConfig(currentConfigPath())
 	if err != nil {
 		log.Printf("[reload] failed: %v", err)
 		return err
 	}
 	cfg.Store(c)
+	setConfigWarnings(warns)
 	reconcileResponsesServer(c.ResponsesListen) // Responses port starts/stops dynamically with config reload
-	log.Printf("[reload] config reloaded: http://%s -> %s (max retries %d, classifier thinking-off=%v)",
-		c.Listen, c.Upstream, c.MaxRetries, classifierThinkingOff(c))
+	log.Printf("[reload] config reloaded: http://%s -> %s (max retries %d, classifier thinking-off=%v, removed-key warnings=%d)",
+		c.Listen, c.Upstream, c.MaxRetries, classifierThinkingOff(c), len(warns))
 	return nil
 }
 
 // switchConfig switches to the given config file with immediate effect: after loading succeeds, configFilePath + cfg.Store are updated.
 // Stats are NOT cleared (they persist across configs; the "clear stats" button clears independently). On failure configFilePath stays and the old config keeps running.
 func switchConfig(newPath string) error {
-	c, err := loadConfig(newPath)
+	c, warns, err := loadConfig(newPath)
 	if err != nil {
 		log.Printf("[switch] failed to load %s: %v", newPath, err)
 		return err
@@ -518,6 +549,7 @@ func switchConfig(newPath string) error {
 	configMu.Unlock()
 	writeActiveConfigState(newPath)
 	cfg.Store(c)
+	setConfigWarnings(warns)
 	reconcileResponsesServer(c.ResponsesListen) // Responses port starts/stops dynamically with the config
 	// Notify the tray to rebuild the "switch config" submenu and refresh checkmarks (web-initiated switches don't go through tray clicks)
 	notifyTrayCfgChanged()
@@ -4925,11 +4957,12 @@ func main() {
 	flag.Parse()
 	configFilePath = resolveConfigPath(*configPath)
 
-	c, err := loadConfig(configFilePath)
+	c, warns, err := loadConfig(configFilePath)
 	if err != nil {
 		log.Fatalf("failed to read %s: %v", configFilePath, err)
 	}
 	cfg.Store(c)
+	setConfigWarnings(warns)
 	stats.resetSampleCap(c.RecentSampleWindow) // Initialize the "last X" latency/throughput sliding-window capacity
 	resolveProgramUILang()                     // First launch: program-settings.txt wins, legacy config ui_lang is migrated, otherwise follow the OS
 	// The flight registry and log buffer are always initialized (handlers always register flights; the map must not be nil).
@@ -4958,6 +4991,12 @@ func main() {
 		}
 	}
 	log.SetOutput(logOut)
+
+	// Startup removed-key warnings are logged only now: earlier log lines bypass logRing (the standard logger is not
+	// redirected yet), and a GUI-subsystem exe has no console for stderr, so they would be invisible everywhere.
+	for _, k := range warns {
+		log.Printf("[config] WARNING: %s (the key is inert; the proxy runs without its old behavior)", removedKeyWarningEN(k))
+	}
 
 	log.Printf("proxy started v%s: listening http://%s -> forwarding to %s (max retries %d, classifier thinking-off=%v)",
 		Version, c.Listen, c.Upstream, c.MaxRetries, classifierThinkingOff(c))
