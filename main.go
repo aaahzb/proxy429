@@ -3906,12 +3906,23 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 		stats.mu.Unlock()
 	}()
 	// writeAndCount forwards a chunk of bytes and parses its data: lines to update stats.
-	// With the convertOff2Low stripper active the order is: tee the original upstream-side bytes (model already written back) →
-	// strip thinking blocks → write the stripped bytes downstream (teed to the downstream side) → byte counts post-strip → stats parse the original.
+	// Order: tee the exact upstream bytes to the web upstream side (the full truth, before model write-back and stripping) →
+	// rewrite the model back to the client's original (route transparency) → strip thinking blocks (convertOff2Low) →
+	// write the client-bound bytes downstream → byte counts post-strip → stats parse the original upstream bytes.
+	// The downstream side gets its own tee whenever the client-bound bytes can differ from the upstream side — the route rewrote
+	// the model (response model names written back below) and/or the stripper is active — except when w is a translatingWriter:
+	// the translation port tees its own downstream side (the translated client-bound bytes) via its tap.
+	_, downstreamTapped := w.(interface{ setDownTap(*flight) })
+	teeDown := !downstreamTapped && (stripper != nil || (f.targetModel != "" && f.targetModel != f.origModel))
 	writeAndCount := func(data []byte) {
 		if len(data) == 0 {
 			return
 		}
+		f.appendContent(data) // Tee a copy for the web upstream side (the exact upstream bytes, before model write-back and stripping)
+		if f.searchDebug {
+			searchDebugAppend(f.id, "main_resp.sse", data) // Record the main model's raw response when search-summary degrades
+		}
+		out := data
 		if f.targetModel != "" && f.targetModel != f.origModel {
 			lines := bytes.Split(data, []byte("\n"))
 			modified := false
@@ -3927,7 +3938,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 				lines[i] = newLine
 			}
 			if modified {
-				data = bytes.Join(lines, []byte("\n"))
+				out = bytes.Join(lines, []byte("\n"))
 				if f.upstreamModel == "" && actualModel != "" {
 					f.upstreamModel = actualModel
 				}
@@ -3936,13 +3947,8 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 				}
 			}
 		}
-		f.appendContent(data) // Tee a copy for the web upstream side (the full pre-strip truth, kept regardless of stripping)
-		if f.searchDebug {
-			searchDebugAppend(f.id, "main_resp.sse", data) // Record the main model's raw response when search-summary degrades
-		}
-		out := data
 		if stripper != nil {
-			out = stripper.feed(data) // convertOff2Low: thinking blocks dropped, kept block indexes renumbered (the client sees thinking-off)
+			out = stripper.feed(out) // convertOff2Low: thinking blocks dropped, kept block indexes renumbered (the client sees thinking-off)
 		}
 		if len(out) > 0 {
 			w.Write(out)
@@ -3952,8 +3958,8 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 			n := int64(len(out))
 			stats.bytesForward.Add(n) // Live traffic (bytes), growing with each forwarded chunk
 			f.bytes.Add(n)            // Per-stream bytes, for the icon display (post-strip: what the client actually received)
-			if stripper != nil {
-				f.appendContentDown(out) // A stripped stream differs per side: the downstream side gets its own tee
+			if teeDown {
+				f.appendContentDown(out) // The client-bound bytes can differ from the upstream side (model written back and/or thinking stripped): the downstream side gets its own tee
 			}
 		}
 		responsesRaw := f.responsesRaw() // Computed once outside the loop: passthrough streams parse by Responses semantics
@@ -4349,7 +4355,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	n2lMode, _ := r.Context().Value(ctxKeyNone2Low).(int)
 	// Dual-link recording: the Responses translation port's downstream-side response (the bytes actually written proxy→client) is teed
 	// in full into contentDown via translatingWriter's tap; on the native port w is not a translatingWriter,
-	// so the type assertion skips naturally (native streams are identical on both sides; the upstream-side copy suffices).
+	// so the type assertion skips naturally (native streams tee their own downstream side inside forward when the two sides can differ:
+	// route model write-back and/or thinking strip; identical sides aren't stored twice).
 	if t, ok := w.(interface{ setDownTap(*flight) }); ok {
 		t.setDownTap(f)
 	}

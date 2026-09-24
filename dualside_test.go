@@ -271,6 +271,9 @@ func TestDualSideTranslatedFlow(t *testing.T) {
 	if !strings.Contains(string(ff.content), "message_start") {
 		t.Errorf("content 应为上游 Anthropic SSE: %.200s", ff.content)
 	}
+	if !strings.Contains(string(ff.content), `"model":"deepseek-v4-flash"`) {
+		t.Errorf("content 应保留上游原始模型名（未经写回）: %.200s", ff.content)
+	}
 }
 
 // TestDualSideDirectFlow end-to-end verifies the downstream-side recording rules of the native Anthropic port:
@@ -345,5 +348,76 @@ func TestDualSideDirectFlow(t *testing.T) {
 	}
 	if ff.reqDown == nil || !strings.Contains(string(ff.reqDown), `"claude-y1"`) {
 		t.Errorf("改写流 reqDown 应存客户端原文: %q", ff.reqDown)
+	}
+}
+
+// TestDualSideModelWriteBack verifies the response-side recordings of a native stream whose model was route-rewritten:
+// the upstream side must hold the upstream's exact raw bytes (its own model name intact, before write-back), and the
+// downstream side must hold what the client actually received (the model written back to the client's original) —
+// so the /__flight side=down endpoint serves a real downstream copy (X-Proxy429-Side: down) instead of falling back.
+func TestDualSideModelWriteBack(t *testing.T) {
+	resetStats()
+	ensureFlightsMap()
+	oldFinished := finished
+	defer func() { finished = oldFinished }()
+	finished = nil
+
+	// The upstream's SSE carries its own model name in message_start (testSSEAllBlocks: deepseek-v4-flash),
+	// which the proxy must write back to the client's original model because the route rewrote the request model.
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		io.WriteString(w, testSSEAllBlocks())
+	}))
+	defer mock.Close()
+
+	cfg.Store(&Config{
+		Upstream:       mock.URL,
+		MaxRetries:     0,
+		TotalBudgetSec: 10,
+		Routes:         []RouteRule{{Pattern: "claude-y*", URL: mock.URL, Model: "k3-256k"}},
+	})
+	defer cfg.Store(&Config{})
+
+	proxy := httptest.NewServer(http.HandlerFunc(handler))
+	defer proxy.Close()
+
+	body := `{"model":"claude-y1","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"stream":true}`
+	resp, err := http.Post(proxy.URL+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("状态=%d, want 200: %s", resp.StatusCode, got)
+	}
+	// The client must see its own model name written back, never the upstream's.
+	if !strings.Contains(string(got), `"model":"claude-y1"`) || strings.Contains(string(got), "deepseek-v4-flash") {
+		t.Errorf("客户端实收应写回 claude-y1 且不含上游模型名: %.200s", got)
+	}
+
+	if len(finished) != 1 {
+		t.Fatalf("归档流数=%d, want 1", len(finished))
+	}
+	ff := &finished[0]
+	// Upstream side: the exact bytes the upstream sent — its own model name intact, no written-back name anywhere.
+	if !strings.Contains(string(ff.content), `"model":"deepseek-v4-flash"`) {
+		t.Errorf("上游侧应保留上游原始模型名 deepseek-v4-flash: %.200s", ff.content)
+	}
+	if strings.Contains(string(ff.content), "claude-y1") {
+		t.Errorf("上游侧不应含写回后的客户端模型名: %.200s", ff.content)
+	}
+	// Downstream side: the bytes the client actually received — model written back, upstream name gone.
+	if len(ff.contentDown) == 0 {
+		t.Fatalf("模型写回流的下游侧应单独记录响应（contentDown 为空）")
+	}
+	if !strings.Contains(string(ff.contentDown), `"model":"claude-y1"`) || strings.Contains(string(ff.contentDown), "deepseek-v4-flash") {
+		t.Errorf("下游侧应为写回后的客户端实收: %.200s", ff.contentDown)
+	}
+	// The side endpoint must serve the downstream side truthfully (no silent fallback to up).
+	code, served, sbody := serveFlightSide(t, ff.id, "down", false)
+	if code != 200 || served != "down" || !strings.Contains(string(sbody), `"model":"claude-y1"`) {
+		t.Errorf("side=down: code=%d side=%q, want 200/down（含写回模型名）body=%.120s", code, served, sbody)
 	}
 }

@@ -49,6 +49,8 @@ func main() {
 		} else {
 			log.Printf("[MOCK] 收到 %s %s mode=%s (body=%d字节)", r.Method, r.URL.Path, mode, len(body))
 		}
+		// Echo the request's model into message_start so model-routing proxies exercise the response-model write-back path.
+		reqModel, _ := p["model"].(string)
 
 		switch mode {
 		case "bodyerr":
@@ -61,8 +63,12 @@ func main() {
 			w.WriteHeader(200)
 			flusher, _ := w.(http.Flusher)
 			// message_start carries usage: initial input/cache_read/cache_creation/output values,
-			// so the proxy's live status row shows cache hits/writes.
-			w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":5,\"cache_creation_input_tokens\":3,\"output_tokens\":1}}}\n\n"))
+			// so the proxy's live status row shows cache hits/writes. The request's model is echoed back like a real upstream.
+			msgStart := `{"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":5,"cache_creation_input_tokens":3,"output_tokens":1}}}`
+			if reqModel != "" {
+				msgStart = fmt.Sprintf(`{"type":"message_start","message":{"model":%q,"usage":{"input_tokens":10,"cache_read_input_tokens":5,"cache_creation_input_tokens":3,"output_tokens":1}}}`, reqModel)
+			}
+			w.Write([]byte("event: message_start\ndata: " + msgStart + "\n\n"))
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -90,7 +96,11 @@ func main() {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(200)
 			flusher, _ := w.(http.Flusher)
-			w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n"))
+			msgStart := `{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}`
+			if reqModel != "" {
+				msgStart = fmt.Sprintf(`{"type":"message_start","message":{"model":%q,"usage":{"input_tokens":10,"output_tokens":1}}}`, reqModel)
+			}
+			w.Write([]byte("event: message_start\ndata: " + msgStart + "\n\n"))
 			w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n"))
 			w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"let me think\"}}\n\n"))
 			w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig123\"}}\n\n"))
