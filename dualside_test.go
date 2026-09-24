@@ -334,6 +334,9 @@ func TestDualSideDirectFlow(t *testing.T) {
 		t.Errorf("同文流不应双存 contentDown（%d 字节）", len(ff.contentDown))
 	}
 
+	if ff.contentDown != nil {
+		t.Errorf("同文流 contentDown 应为 nil（空非 nil 切片会让 respDown 旗标说谎）: %#v", ff.contentDown)
+	}
 	// Route-rewritten model: the body changed; the downstream side stores the client's original, the upstream side the rewritten body.
 	cfg.Store(&Config{
 		Upstream:       mock.URL,

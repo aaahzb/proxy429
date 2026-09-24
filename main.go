@@ -1180,10 +1180,13 @@ func (f *flight) appendContentDown(data []byte) {
 	}
 }
 
-// snapshotContentDown returns a copy of the downstream-side content buffer (empty if not recorded), for the web endpoints.
+// snapshotContentDown returns a copy of the downstream-side content buffer (nil if not recorded), for the web endpoints.
 func (f *flight) snapshotContentDown() []byte {
 	f.contentMu.Lock()
 	defer f.contentMu.Unlock()
+	if len(f.contentDown) == 0 {
+		return nil // nil = not recorded (the finishedFlight field contract, same as snapshotReqDown); a non-nil empty slice would falsely read as recorded
+	}
 	out := make([]byte, len(f.contentDown))
 	copy(out, f.contentDown)
 	return out
