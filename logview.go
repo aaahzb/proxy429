@@ -2421,19 +2421,21 @@ async function renderFlightTree(){
     if(!text) err = '（该流暂无输出内容可交互查看）';
   }
   if(err){ fv.textContent = err; return; }
-  // 先按整个 JSON 解析；失败按状态分流：非流式视图把 SSE 事件流组装成最终对象（便于按结构看树），其余按事件数组解析；都不行则提示。
-  var val, ok = false;
-  try{ val = JSON.parse(text); ok = true; }
-  catch(e){
+  // 先按整个 JSON 解析；失败按状态分流：非流式视图把 SSE 事件流组装成最终对象（便于按结构看树），其余按事件数组解析。
+  // 完整副本整理不出（如储存开关中途才开、副本缺头）时退回手头浏览内容再试一次——能显示在屏上的内容就能交互看。
+  var tryTreeVal = function(t){
+    if(!t) return null;
+    try{ return JSON.parse(t); }catch(e){}
     if(flightViewWhat==='asm'){
-      var ar = assembleSSEToObject(text);
-      if(ar){ val = ar.obj; ok = true; }
-    } else {
-      var arr = sseToJSONArray(text);
-      if(arr.length){ val = arr; ok = true; }
+      var ar = assembleSSEToObject(t);
+      return ar ? ar.obj : null;
     }
-  }
-  if(!ok){ fv.textContent = '（内容不是 JSON 也不是 SSE 事件流，无法交互查看）'; return; }
+    var arr = sseToJSONArray(t);
+    return arr.length ? arr : null;
+  };
+  var val = tryTreeVal(text);
+  if(val === null && flightViewWhat !== 'req' && text !== lastRaw) val = tryTreeVal(lastRaw);
+  if(val === null){ fv.textContent = '（内容不是 JSON 也不是 SSE 事件流，无法交互查看）'; return; }
   fv.innerHTML = '';
   fv.appendChild(jsonTreeRoot(val));
 }

@@ -230,3 +230,73 @@ func TestSetStageColorDuration(t *testing.T) {
 		t.Errorf("黄→绿后 stageMs=%d, want ≈0（灯色变化应重置计时）", ms)
 	}
 }
+
+// TestFullStoreMidStreamToggleNotFull verifies a full output copy is only claimed when recording covered the
+// stream from its first byte: opening the 储存完整结构体 toggle mid-stream (or flapping it, leaving a gap) must not
+// produce a "full" copy — otherwise the download button and the interactive tree's full=1 preference would serve
+// a head-less tail as the complete output (the viewer tooltip/404 already call this case "started before the switch was on").
+func TestFullStoreMidStreamToggleNotFull(t *testing.T) {
+	defer fullStore.Store(false)
+
+	flights.mu.Lock()
+	if flights.m == nil {
+		flights.m = make(map[uint64]*flight)
+	}
+	flights.mu.Unlock()
+
+	// Mid-stream toggle-on: the head flowed with the switch off → no full copy on either side.
+	postFullStore(t, false)
+	f := &flight{id: flights.nextID.Add(1), start: time.Now()}
+	f.appendContent([]byte("event: message_start\ndata: {}\n\n"))
+	f.appendContentDown([]byte("event: message_start\ndata: {}\n\n"))
+	postFullStore(t, true) // the user opens the switch only now
+	f.appendContent([]byte("event: content_block_delta\ndata: {}\n\n"))
+	f.appendContentDown([]byte("event: content_block_delta\ndata: {}\n\n"))
+	if f.hasFullContent() {
+		t.Errorf("中途开启后 hasFullContent 应为 false（缺头的半截副本不能算完整输出）")
+	}
+	if f.hasFullContentDown() {
+		t.Errorf("中途开启后 hasFullContentDown 应为 false（缺头的半截副本不能算完整输出）")
+	}
+	if got := f.snapshotFullContent(); got != nil {
+		t.Errorf("中途开启后 snapshotFullContent 应为 nil, got %d 字节", len(got))
+	}
+	if got := f.snapshotFullContentDown(); got != nil {
+		t.Errorf("中途开启后 snapshotFullContentDown 应为 nil, got %d 字节", len(got))
+	}
+	// The capped on-screen copies are unaffected — the viewer keeps the complete 256KB copy to view and interact with.
+	if !bytes.Contains(f.snapshotContent(), []byte("message_start")) {
+		t.Errorf("截断副本应仍含头部 message_start: %q", f.snapshotContent())
+	}
+	if !bytes.Contains(f.snapshotContentDown(), []byte("message_start")) {
+		t.Errorf("下游侧截断副本应仍含头部 message_start: %q", f.snapshotContentDown())
+	}
+	// The download endpoint must answer 404 for such a stream, not serve the tail as "full".
+	flights.register(f)
+	code, dl := serveFlightFull(t, f.id)
+	if code != http.StatusNotFound {
+		t.Errorf("中途开启流的 full=1 应为 404, got %d（body=%q）", code, dl)
+	}
+	flights.unregister(f.id)
+
+	// Off-and-on flapping leaves a gap mid-copy → likewise not a full copy.
+	postFullStore(t, true)
+	g := &flight{id: flights.nextID.Add(1), start: time.Now()}
+	g.appendContent([]byte("event: message_start\ndata: {}\n\n"))
+	postFullStore(t, false)
+	g.appendContent([]byte("event: content_block_delta\ndata: {}\n\n"))
+	postFullStore(t, true)
+	g.appendContent([]byte("event: message_stop\ndata: {}\n\n"))
+	if g.hasFullContent() {
+		t.Errorf("关-开拨动留下缺口后 hasFullContent 应为 false（有缺口的副本不能算完整输出）")
+	}
+
+	// Control: the switch on before the stream's first byte still records a complete full copy.
+	postFullStore(t, true)
+	h := &flight{id: flights.nextID.Add(1), start: time.Now()}
+	h.appendContent([]byte("event: message_start\ndata: {}\n\n"))
+	h.appendContent([]byte("event: message_stop\ndata: {}\n\n"))
+	if !h.hasFullContent() {
+		t.Errorf("开关先于流开启时 hasFullContent 应为 true（正常路径不受标志位影响）")
+	}
+}

@@ -66,7 +66,7 @@ exactly that.
 
 Naturally, the proxy itself is built with the same AI agents: I define the
 problems and judge the results as a heavy daily user; the agents write the
-code. I'm a quant fund manager, not a Go developer — a tool for AI agents,
+code. I'm not a Go developer — this is vibe coding: a tool for AI agents,
 built by AI agents, directed by someone who depends on them all day.
 
 ### Screenshots
@@ -159,7 +159,7 @@ observability. Also: [Usage guide](docs/usage.md) ·
 立刻就能恢复：失败是暂时的，只是缺个有耐心重试的东西。于是有了这个代理。
 
 这个代理本身也是用同样的 AI agent 造的：我定义问题、作为重度用户验收，
-agent 写代码。我是量化基金经理，不是 Go 开发者——为 AI agent 造的工具，
+agent 写代码。我不是 Go 开发者，纯 vibe coding——为 AI agent 造的工具，
 由 AI agent 造，由天天靠它们干活的人指挥。
 
 ### 截图

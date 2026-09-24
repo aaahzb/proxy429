@@ -364,3 +364,12 @@ func TestProgramSettingsRoundTrip(t *testing.T) {
 		t.Errorf("readProgramSetting(other)=%q, want 1", got)
 	}
 }
+
+// TestLogViewerTreeFallsBackToOnscreen pins the interactive JSON tree's data-source contract: when the fetched
+// full copy cannot be parsed/assembled (e.g. only a tail was recorded because the toggle was opened mid-stream),
+// the tree must retry with the on-screen content before giving up — anything on screen stays interactively viewable.
+func TestLogViewerTreeFallsBackToOnscreen(t *testing.T) {
+	if !strings.Contains(logViewerHTML, "tryTreeVal(lastRaw)") {
+		t.Errorf("交互树缺少「完整副本整理不出时退回屏上内容再试」的回退（tryTreeVal(lastRaw)）")
+	}
+}

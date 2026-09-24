@@ -863,6 +863,7 @@ type flight struct {
 	content       []byte // Last flightContentCap bytes of pass-through content (raw SSE), for the web in-flight stream viewer
 	reqBody       []byte // Raw downstream request body (guarded by contentMu; with the 储存完整结构体 toggle off it's capped at flightContentCap keeping the head, on = untruncated), so the web can show "which request caused this stream"; translation-port streams store the body AFTER translation to Anthropic
 	fullContent   []byte // Full pass-through content (guarded by contentMu, recorded only with the 储存完整结构体 toggle on, no cap), for downloading the raw output
+	fullPartial   bool   // Content bytes flowed while the 储存完整结构体 toggle was off (opened mid-stream or flapped off-on), so no complete full copy exists for this stream: the partial copy is dropped and hasFull*/full=1 report "not recorded" (guarded by contentMu)
 	reqTruncated  bool   // Whether the request body was truncated to just the head (guarded by contentMu): over cap at record time with full-store off, or truncated by purge when the toggle was switched off; the web greys out the download button accordingly
 
 	// Downstream side of dual-link recording (proxy↔client): stored only when it differs from the upstream side
@@ -874,6 +875,7 @@ type flight struct {
 	reqDownTruncated bool             // Whether reqDown was truncated to just the head
 	contentDown      []byte           // Proxy→downstream response content (capped at flightContentCap, keeps the tail)
 	fullContentDown  []byte           // Proxy→downstream full response (recorded only with the 储存完整结构体 toggle on)
+	fullPartialDown  bool             // Downstream-side mirror of fullPartial: down bytes that flowed with the toggle off mean no complete down full copy (guarded by contentMu)
 	searchDebug      bool             // Search-summary mode: while forwarding, append the main model's response SSE to cfg.SearchDebugDir
 	inTokens         int64            // This stream's cumulative input_tokens (stored from lastInput when forward ends)
 	cacheRead        int64            // This stream's cumulative cache_read
@@ -1073,7 +1075,14 @@ func (f *flight) appendContent(data []byte) {
 	f.contentMu.Lock()
 	defer f.contentMu.Unlock()
 	if fullStore.Load() {
-		f.fullContent = append(f.fullContent, data...) // Full copy: uncapped, for download
+		if !f.fullPartial {
+			f.fullContent = append(f.fullContent, data...) // Full copy: uncapped, for download
+		}
+	} else if !f.fullPartial {
+		// Bytes flowed while the toggle was off (opened mid-stream / flapped off-on): no complete full copy can
+		// exist for this stream, so drop any partial copy and stop full recording — hasFull*/full=1 report "not recorded".
+		f.fullPartial = true
+		f.fullContent = nil
 	}
 	f.content = append(f.content, data...)
 	if len(f.content) > flightContentCap {
@@ -1168,7 +1177,13 @@ func (f *flight) appendContentDown(data []byte) {
 	f.contentMu.Lock()
 	defer f.contentMu.Unlock()
 	if fullStore.Load() {
-		f.fullContentDown = append(f.fullContentDown, data...)
+		if !f.fullPartialDown {
+			f.fullContentDown = append(f.fullContentDown, data...)
+		}
+	} else if !f.fullPartialDown {
+		// Same as appendContent: down bytes flowed with the toggle off → drop the partial down full copy, stop full recording.
+		f.fullPartialDown = true
+		f.fullContentDown = nil
 	}
 	f.contentDown = append(f.contentDown, data...)
 	if len(f.contentDown) > flightContentCap {
