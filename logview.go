@@ -168,7 +168,7 @@ type flightInfo struct {
 	RespDown     bool   `json:"respDown,omitempty"`     // Downstream-side (proxy→downstream) response content recorded (always present for translation streams and rebuilt-JSON streams)
 	ReqDownTrunc bool   `json:"reqDownTrunc,omitempty"` // Downstream-side request body truncated to just the head 256KB (download greyed out after switching to the downstream side)
 	HasFullDown  bool   `json:"hasFullDown,omitempty"`  // Downstream-side full output copy still held (the downstream side's download output; interactive JSON prefers it when present)
-	Last         uint64 `json:"last,omitempty"`         // Lineage parent flight id (same-session message-hash prefix chain); omitted when none — the # column shows 「#N[Last #M]」 when present
+	Last         uint64 `json:"last,omitempty"`         // Lineage parent flight id (same-session message-hash prefix chain); omitted when none — the # column shows 「#N<-M」 when present
 }
 
 // logData is the JSON returned by /__logs/data: recent logs + full status counters + the in-flight stream list.
@@ -1251,7 +1251,7 @@ window.addEventListener('scroll', () => {
   stick = (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 30);
 });
 
-function lastTag(f){ return (f && f.last) ? '[Last #'+f.last+']' : ''; }
+function lastTag(f){ return (f && f.last) ? '<span title="Last #'+f.last+'">&lt;-'+f.last+'</span>' : ''; }
 function fmtBytes(n){
   if(n<1024) return n+'B';
   if(n<1048576) return (n/1024).toFixed(1)+'KB';
@@ -1753,7 +1753,7 @@ function selectFlight(id){
   fv.style.wordBreak = 'break-all';
   fv.textContent = '加载中…';
   document.getElementById('flightViewWrap').style.display = 'block';
-  document.getElementById('flightViewId').textContent = id + (flightFlags[id]&&flightFlags[id].lst?'[Last #'+flightFlags[id].lst+']':'');
+  document.getElementById('flightViewId').textContent = id + (flightFlags[id]&&flightFlags[id].lst?'<-'+flightFlags[id].lst:'');
   updateFlightViewChrome();
 }
 function flightStatus(f){
@@ -1819,7 +1819,7 @@ async function poll(){
     if(selectedFlight){
       // 手选单流模式（点表格行触发，优先于自动跟踪；autoTrack 勾选状态保持）
       wrap.style.display = 'block';
-      document.getElementById('flightViewId').textContent = selectedFlight + (flightFlags[selectedFlight]&&flightFlags[selectedFlight].lst?'[Last #'+flightFlags[selectedFlight].lst+']':'');
+      document.getElementById('flightViewId').textContent = selectedFlight + (flightFlags[selectedFlight]&&flightFlags[selectedFlight].lst?'<-'+flightFlags[selectedFlight].lst:'');
       fv.style.display = 'block';
       fv.style.gridTemplateColumns = '';
       fv.style.whiteSpace = 'pre-wrap';

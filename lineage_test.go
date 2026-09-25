@@ -1,6 +1,6 @@
 package main
 
-// lineage_test.go pins the conversation-lineage feature (the web 「#N[Last #M]」 parent tag): a request's parent
+// lineage_test.go pins the conversation-lineage feature (the web 「#N<-M」 parent tag): a request's parent
 // is the earlier same-session flight scoring best on (leading byte-identical elements, then tail-element common
 // byte prefix, then full containment, then newest id). Element identity ignores cache_control markers (clients
 // migrate breakpoints between turns); interior tail growth is bridged by the tail byte-prefix score.
@@ -185,9 +185,10 @@ func TestFlightInfoLastJSON(t *testing.T) {
 }
 
 func TestLogViewerLineageLastTag(t *testing.T) {
-	// The web # column renders the parent tag and the JS reads the last field from both flight lists.
-	if !strings.Contains(logViewerHTML, "[Last #") {
-		t.Error("页面缺少 [Last # 渲染")
+	// The web # column renders the parent tag compactly as #N<-M (HTML-escaped as &lt;- in innerHTML
+	// contexts) and the JS reads the last field from both flight lists.
+	if !strings.Contains(logViewerHTML, "&lt;-") {
+		t.Error("页面缺少 <- 父流标记渲染")
 	}
 	if !strings.Contains(logViewerHTML, "f.last") {
 		t.Error("页面 JS 未读取 last 字段")

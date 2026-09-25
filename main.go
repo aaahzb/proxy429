@@ -900,7 +900,7 @@ type flight struct {
 	// for the status page's 「API」 column thinking value — which API family the vocabulary belongs to is carried by the column color, not the text. Empty = the request body carried no thinking field (column shows -).
 	think string
 
-	// Conversation lineage (the web 「#N[Last #M]」 parent tag): msgHashes holds one fnv64a hash per normalized
+	// Conversation lineage (the web 「#N<-M」 parent tag): msgHashes holds one fnv64a hash per normalized
 	// element of this request's messages/input array (capped at lineageHashCap); msgTail is a copy of the chain's
 	// last normalized element (capped at lineageTailCap) for the tail-growth byte-prefix score; lastFlight is the
 	// resolved parent flight id (0 = none / no session).
@@ -1330,7 +1330,7 @@ type finishedFlight struct {
 	upstreamKey string // Upstream grouping key (post-routing url|model): the 「缓存命中」 popup's observed table groups by it
 	think       string // Shortest form of the thinking config actually sent upstream (status page 「API」 column thinking value); empty = request body carried no thinking field
 
-	// Lineage fields: kept after archival so the finished ring still answers parent lookups and shows the 「Last #」 tag.
+	// Lineage fields: kept after archival so the finished ring still answers parent lookups and shows the 「#N<-M」 tag.
 	convID     string   // Session identifier (copied from the flight; finishedFlight otherwise only carries convKey)
 	msgHashes  []uint64 // Per-element content hashes of the request's normalized message array (see flight.msgHashes)
 	msgTail    []byte   // Normalized last chain element, capped (see flight.msgTail)
@@ -4639,7 +4639,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		f.convID = extractConvID(body)
 	}
 	// Conversation lineage: hash this request's message array and link the flight to its parent
-	// (same session, longest fully-contained prefix), powering the web 「#N[Last #M]」 tag.
+	// (same session, longest fully-contained prefix), powering the web 「#N<-M」 tag.
 	computeLineage(f, body)
 
 	if c.LogRequestDetail {
