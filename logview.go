@@ -168,6 +168,7 @@ type flightInfo struct {
 	RespDown     bool   `json:"respDown,omitempty"`     // Downstream-side (proxy→downstream) response content recorded (always present for translation streams and rebuilt-JSON streams)
 	ReqDownTrunc bool   `json:"reqDownTrunc,omitempty"` // Downstream-side request body truncated to just the head 256KB (download greyed out after switching to the downstream side)
 	HasFullDown  bool   `json:"hasFullDown,omitempty"`  // Downstream-side full output copy still held (the downstream side's download output; interactive JSON prefers it when present)
+	Last         uint64 `json:"last,omitempty"`         // Lineage parent flight id (same-session message-hash prefix chain); omitted when none — the # column shows 「#N[Last #M]」 when present
 }
 
 // logData is the JSON returned by /__logs/data: recent logs + full status counters + the in-flight stream list.
@@ -251,6 +252,7 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 			HasFullDown:  f.hasFullContentDown(),
 			StageMs:      f.stageMs(),
 			Think:        f.think,
+			Last:         f.lastFlight,
 		})
 	}
 	if d.Flights == nil {
@@ -888,6 +890,7 @@ func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 			"translated":    ff.translated,
 			"countTokens":   ff.countTokens,
 			"think":         ff.think,
+			"last":          ff.lastFlight,
 			"status":        ff.status,
 			"gaveUp":        ff.gaveUp,
 			"attempts":      ff.attempts,
@@ -1248,6 +1251,7 @@ window.addEventListener('scroll', () => {
   stick = (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 30);
 });
 
+function lastTag(f){ return (f && f.last) ? '[Last #'+f.last+']' : ''; }
 function fmtBytes(n){
   if(n<1024) return n+'B';
   if(n<1048576) return (n/1024).toFixed(1)+'KB';
@@ -1749,7 +1753,7 @@ function selectFlight(id){
   fv.style.wordBreak = 'break-all';
   fv.textContent = '加载中…';
   document.getElementById('flightViewWrap').style.display = 'block';
-  document.getElementById('flightViewId').textContent = id;
+  document.getElementById('flightViewId').textContent = id + (flightFlags[id]&&flightFlags[id].lst?'[Last #'+flightFlags[id].lst+']':'');
   updateFlightViewChrome();
 }
 function flightStatus(f){
@@ -1805,9 +1809,9 @@ async function poll(){
     if(document.getElementById('clsModal').style.display !== 'none') refreshClsModal();
     // 在途流
     const fs = d.flights || [];
-    fs.forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull, rd:!!f.reqDown, sd:!!f.respDown, rdt:!!f.reqDownTrunc, hfd:!!f.hasFullDown}; });
+    fs.forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull, rd:!!f.reqDown, sd:!!f.respDown, rdt:!!f.reqDownTrunc, hfd:!!f.hasFullDown, lst:f.last||0}; });
     flightsBody.innerHTML = fs.map(f =>
-      '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>'+flightDot(f)+attemptTag(f)+' '+fmtStageDur(f.stageMs)+'</td><td>#'+f.id+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools,f.stripped)+apiCell(f.translated,f.think)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+flightStatus(f)+'</td></tr>'
+      '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>'+flightDot(f)+attemptTag(f)+' '+fmtStageDur(f.stageMs)+'</td><td>#'+f.id+lastTag(f)+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools,f.stripped)+apiCell(f.translated,f.think)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+flightStatus(f)+'</td></tr>'
     ).join('');
     // 在途流输出查看：手选单流优先，否则自动跟踪 grid，否则隐藏
     var fv = document.getElementById('flightView');
@@ -1815,7 +1819,7 @@ async function poll(){
     if(selectedFlight){
       // 手选单流模式（点表格行触发，优先于自动跟踪；autoTrack 勾选状态保持）
       wrap.style.display = 'block';
-      document.getElementById('flightViewId').textContent = selectedFlight;
+      document.getElementById('flightViewId').textContent = selectedFlight + (flightFlags[selectedFlight]&&flightFlags[selectedFlight].lst?'[Last #'+flightFlags[selectedFlight].lst+']':'');
       fv.style.display = 'block';
       fv.style.gridTemplateColumns = '';
       fv.style.whiteSpace = 'pre-wrap';
@@ -1873,7 +1877,7 @@ async function poll(){
           if(!fv.querySelector('[data-id="'+f.id+'"]')){
             var cell = document.createElement('div');
             cell.dataset.id = f.id;
-            cell.innerHTML = '<div style="color:#9a9a9a;margin-bottom:2px">流 #'+f.id+' '+(f.model||'')+'</div><pre class="cellPre" style="max-height:240px;overflow:auto;background:#1a1a1a;border:1px solid #333;padding:6px;white-space:pre-wrap;word-break:break-all;margin:0;font:inherit">加载中…</pre>';
+            cell.innerHTML = '<div style="color:#9a9a9a;margin-bottom:2px">流 #'+f.id+lastTag(f)+' '+(f.model||'')+'</div><pre class="cellPre" style="max-height:240px;overflow:auto;background:#1a1a1a;border:1px solid #333;padding:6px;white-space:pre-wrap;word-break:break-all;margin:0;font:inherit">加载中…</pre>';
             fv.appendChild(cell);
             var np = cell.querySelector('.cellPre');
             np.dataset.stick = '1'; // 默认跟踪底部；用户手动上滚后才停止跟随
@@ -1908,9 +1912,9 @@ async function poll(){
       const rf = await fetch('/__recentflights',{cache:'no-store'});
       if(rf.ok){
         const rfd = await rf.json();
-        (rfd.list||[]).forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull, rd:!!f.reqDown, sd:!!f.respDown, rdt:!!f.reqDownTrunc, hfd:!!f.hasFullDown}; });
+        (rfd.list||[]).forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull, rd:!!f.reqDown, sd:!!f.respDown, rdt:!!f.reqDownTrunc, hfd:!!f.hasFullDown, lst:f.last||0}; });
         document.querySelector('#finishedFlights tbody').innerHTML = (rfd.list||[]).map(function(f){
-          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools)+apiCell(f.translated,f.think)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+(f.total||'-')+'</td><td>'+(f.gaveUp?'[重试尽]':(f.status?(f.status===200?'200':'['+f.status+']'):'-'))+(f.attempts>1?'<span style="color:#d7ba7d">[重试'+(f.attempts-1)+'次]</span>':'')+'</td><td>'+(f.hitRate||'-')+(f.stripped>0?'<span style="color:#f48771">[剥'+f.stripped+']</span>':'')+'</td><td>'+(f.cacheAge||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
+          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+lastTag(f)+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools)+apiCell(f.translated,f.think)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+(f.total||'-')+'</td><td>'+(f.gaveUp?'[重试尽]':(f.status?(f.status===200?'200':'['+f.status+']'):'-'))+(f.attempts>1?'<span style="color:#d7ba7d">[重试'+(f.attempts-1)+'次]</span>':'')+'</td><td>'+(f.hitRate||'-')+(f.stripped>0?'<span style="color:#f48771">[剥'+f.stripped+']</span>':'')+'</td><td>'+(f.cacheAge||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
         }).join('');
       }
     }catch(e){}

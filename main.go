@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"math"
@@ -899,6 +900,11 @@ type flight struct {
 	// for the status page's 「API」 column thinking value — which API family the vocabulary belongs to is carried by the column color, not the text. Empty = the request body carried no thinking field (column shows -).
 	think string
 
+	// Conversation lineage (the web 「#N[Last #M]」 parent tag): msgHashes holds one fnv64a hash per element of this
+	// request's messages/input array (capped at lineageHashCap); lastFlight is the resolved parent flight id (0 = none / no session).
+	msgHashes  []uint64
+	lastFlight uint64
+
 	toolMu    sync.Mutex
 	toolNames []string       // Names of tool calls in the response stream (in first-appearance order; guarded by toolMu)
 	toolCalls map[string]int // Call count per tool (guarded by toolMu)
@@ -1320,6 +1326,11 @@ type finishedFlight struct {
 	obsKey      string // Observed cache-lifetime pairing key (convID|upstreamKey); empty = no observation (yellow-light 499 / no session / no grouping key)
 	upstreamKey string // Upstream grouping key (post-routing url|model): the 「缓存命中」 popup's observed table groups by it
 	think       string // Shortest form of the thinking config actually sent upstream (status page 「API」 column thinking value); empty = request body carried no thinking field
+
+	// Lineage fields: kept after archival so the finished ring still answers parent lookups and shows the 「Last #」 tag.
+	convID     string   // Session identifier (copied from the flight; finishedFlight otherwise only carries convKey)
+	msgHashes  []uint64 // Per-element content hashes of the request's message array (see flight.msgHashes)
+	lastFlight uint64   // Resolved lineage parent flight id (0 = none)
 }
 
 var (
@@ -1428,6 +1439,9 @@ func addFinished(f *flight) {
 		obsKey:           obsKey,
 		upstreamKey:      f.upstreamKey,
 		think:            f.think,
+		convID:           f.convID,
+		msgHashes:        f.msgHashes,
+		lastFlight:       f.lastFlight,
 	}
 	finishedMu.Lock()
 	// Observed cache-lifetime measurement: pair with the previous finished stream of the same session + same upstream (finished is ascending; scan backwards for the latest same-key entry).
@@ -2873,6 +2887,91 @@ func extractConvID(body []byte) string {
 		return md.UserID
 	}
 	return ""
+}
+
+// lineageHashCap bounds one flight's stored message hashes (a memory guard for pathological histories);
+// beyond the cap the chain simply stops lengthening (prefix matching up to the cap still works).
+const lineageHashCap = 4096
+
+// hashLineage hashes each element of the request's message array (Anthropic "messages" or Responses "input")
+// into the flight's lineage chain. Elements are hashed as raw bytes (fnv64a): the target clients (Claude Code /
+// Codex) replay history byte-identically, so raw bytes are a stable element identity; the body is never fully decoded.
+// Returns nil for non-JSON bodies or bodies without a message array.
+func hashLineage(body []byte) []uint64 {
+	spans, ok := locateTopFields(body)
+	if !ok {
+		return nil
+	}
+	for _, s := range spans {
+		if s.name != "messages" && s.name != "input" {
+			continue
+		}
+		var elems []json.RawMessage
+		if json.Unmarshal(body[s.valStart:s.valEnd], &elems) != nil || len(elems) == 0 {
+			return nil
+		}
+		out := make([]uint64, 0, min(len(elems), lineageHashCap))
+		for i, e := range elems {
+			if i >= lineageHashCap {
+				break
+			}
+			h := fnv.New64a()
+			_, _ = h.Write(e)
+			out = append(out, h.Sum64())
+		}
+		return out
+	}
+	return nil
+}
+
+// lineageContained reports whether cand is a full prefix of hashes (an empty cand never counts).
+func lineageContained(cand, hashes []uint64) bool {
+	if len(cand) == 0 || len(cand) > len(hashes) {
+		return false
+	}
+	for i, h := range cand {
+		if h != hashes[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// findLineageParent resolves a request's parent flight: among the earlier flights of the same session (active
+// registry + finished ring), the one whose message-hash chain is the longest full prefix of this request's chain;
+// ties (identical re-sent bodies) break to the newest id. 0 = no parent. Requiring full containment (not mere
+// prefix overlap) is what keeps sub-agent branches and rewinds honest: they share the session id, not the chain.
+func findLineageParent(convID string, id uint64, hashes []uint64) uint64 {
+	var best uint64
+	bestLen := 0
+	consider := func(cid string, fid uint64, cand []uint64) {
+		if cid != convID || fid >= id || !lineageContained(cand, hashes) {
+			return
+		}
+		if len(cand) > bestLen || (len(cand) == bestLen && fid > best) {
+			best, bestLen = fid, len(cand)
+		}
+	}
+	for _, f := range flights.snapshot() {
+		consider(f.convID, f.id, f.msgHashes)
+	}
+	finishedMu.Lock()
+	for i := range finished {
+		consider(finished[i].convID, finished[i].id, finished[i].msgHashes)
+	}
+	finishedMu.Unlock()
+	return best
+}
+
+// computeLineage fills a flight's message-hash chain and parent link at request receipt (the handler calls it
+// right after convID is settled, on the body the lineage should reflect). Requests without a session identifier
+// or a message array stay parentless; the web then shows a bare #N.
+func computeLineage(f *flight, body []byte) {
+	f.msgHashes = hashLineage(body)
+	if f.convID == "" || len(f.msgHashes) == 0 {
+		return
+	}
+	f.lastFlight = findLineageParent(f.convID, f.id, f.msgHashes)
 }
 
 // extractThinkMode extracts the thinking config of an Anthropic-format request body, so the status page's 「API」 column thinking value shows
@@ -4425,6 +4524,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if f.convID == "" {
 		f.convID = extractConvID(body)
 	}
+	// Conversation lineage: hash this request's message array and link the flight to its parent
+	// (same session, longest fully-contained prefix), powering the web 「#N[Last #M]」 tag.
+	computeLineage(f, body)
 
 	if c.LogRequestDetail {
 		logRequestDetail(r, body)
