@@ -1,8 +1,9 @@
 package main
 
-// lineage_test.go pins the conversation-lineage feature (the web 「#N[Last #M]」 parent tag):
-// a request's parent is the earlier same-session flight whose whole message array is contained as a prefix
-// of this request's message array (longest containment wins, ties break to the newest id).
+// lineage_test.go pins the conversation-lineage feature (the web 「#N[Last #M]」 parent tag): a request's parent
+// is the earlier same-session flight scoring best on (leading byte-identical elements, then tail-element common
+// byte prefix, then full containment, then newest id). Element identity ignores cache_control markers (clients
+// migrate breakpoints between turns); interior tail growth is bridged by the tail byte-prefix score.
 // The session id (convID) only partitions; the message-hash chain resolves lineage within the partition —
 // that split is what makes sub-agent branches and rewinds visible instead of faking one sticky timeline.
 
@@ -190,5 +191,77 @@ func TestLogViewerLineageLastTag(t *testing.T) {
 	}
 	if !strings.Contains(logViewerHTML, "f.last") {
 		t.Error("页面 JS 未读取 last 字段")
+	}
+}
+
+// anthRawBody builds an Anthropic-shaped body from raw message JSON literals (for tests that
+// need block-array content, cache_control markers, etc. — things anthLineageBody can't express).
+func anthRawBody(msgs ...string) []byte {
+	return []byte(`{"model":"m","messages":[` + strings.Join(msgs, ",") + `]}`)
+}
+
+func TestLineageCacheControlMigration(t *testing.T) {
+	// Claude Code migrates ephemeral cache breakpoints between turns: the same logical element
+	// arrives carrying the marker in one request and bare in the next. Hashing must ignore markers,
+	// or every such turn breaks the chain (this is what killed lineage in production).
+	setupLineageTest(t)
+	regLineageFlight(t, 1, "s", anthRawBody(`{"role":"user","content":[{"type":"text","text":"A","cache_control":{"type":"ephemeral"}}]}`))
+	f2 := regLineageFlight(t, 2, "s", anthRawBody(
+		`{"role":"user","content":[{"type":"text","text":"A"}]}`,
+		`{"role":"assistant","content":[{"type":"text","text":"a1"}]}`,
+	))
+	if f2.lastFlight != 1 {
+		t.Errorf("断点迁移不应断链：#2 last=%d 应=1", f2.lastFlight)
+	}
+	// Marker in first position and carrying a ttl member — same normalization must apply.
+	regLineageFlight(t, 3, "s", anthRawBody(`{"role":"user","content":[{"cache_control":{"type":"ephemeral","ttl":"1h"},"type":"text","text":"B"}]}`))
+	f4 := regLineageFlight(t, 4, "s", anthRawBody(
+		`{"role":"user","content":[{"type":"text","text":"B"}]}`,
+		`{"role":"assistant","content":[{"type":"text","text":"b1"}]}`,
+	))
+	if f4.lastFlight != 3 {
+		t.Errorf("首键位置/ttl 标记不应断链：#4 last=%d 应=3", f4.lastFlight)
+	}
+}
+
+func TestLineageTailElementGrowth(t *testing.T) {
+	// Between turns the client grows the LAST message's content array interiorly (new blocks land
+	// before a trailing block, so the grown element is not even a byte prefix extension). The grown
+	// parent must outrank a shorter fully-contained ancestor via the tail element's common byte prefix.
+	setupLineageTest(t)
+	regLineageFlight(t, 1, "s", anthRawBody(`{"role":"user","content":[{"type":"text","text":"root"}]}`))
+	regLineageFlight(t, 2, "s", anthRawBody(
+		`{"role":"user","content":[{"type":"text","text":"root"}]}`,
+		`{"role":"user","content":[{"type":"text","text":"X"},{"type":"text","text":"TAILBLOCK"}]}`,
+	))
+	f3 := regLineageFlight(t, 3, "s", anthRawBody(
+		`{"role":"user","content":[{"type":"text","text":"root"}]}`,
+		`{"role":"user","content":[{"type":"text","text":"X"},{"type":"text","text":"NEWBLOCK"},{"type":"text","text":"TAILBLOCK"}]}`,
+	))
+	if f3.lastFlight != 2 {
+		t.Errorf("尾元素内部生长应链向生长父：#3 last=%d 应=2", f3.lastFlight)
+	}
+}
+
+func TestLineageRewindPrefersContainedAncestor(t *testing.T) {
+	// Rewind (fork off an earlier point): the child shares a 2-element prefix with both the branch
+	// tip [A,B,C,D] and the forked-from state [A,B]; equal scores must prefer the fully contained one.
+	setupLineageTest(t)
+	regLineageFlight(t, 1, "s", anthLineageBody("A", "B", "C", "D"))
+	regLineageFlight(t, 2, "s", anthLineageBody("A", "B"))
+	f3 := regLineageFlight(t, 3, "s", anthLineageBody("A", "B", "X"))
+	if f3.lastFlight != 2 {
+		t.Errorf("回溯分叉应链向被完整包含的祖先：#3 last=%d 应=2", f3.lastFlight)
+	}
+}
+
+func TestLineageShapePrefixNotEnough(t *testing.T) {
+	// Two unrelated same-session openings share the JSON shape's leading bytes but no whole element:
+	// zero full elements must never link, no matter how long the tail byte prefix looks.
+	setupLineageTest(t)
+	regLineageFlight(t, 1, "s", anthLineageBody("A"))
+	f2 := regLineageFlight(t, 2, "s", anthLineageBody("B"))
+	if f2.lastFlight != 0 {
+		t.Errorf("仅有 JSON 外壳字节相同不应定父：#2 last=%d 应=0", f2.lastFlight)
 	}
 }
