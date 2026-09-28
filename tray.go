@@ -45,12 +45,13 @@ func setupTray() {
 // onReady is the tray-ready callback: sets the initial icon/tooltip, builds the menu, starts status polling.
 func onReady() {
 	problem := len(getConfigWarnings()) > 0 // Startup may already carry removed-key warnings (main loads config before the tray)
+	hijack := proxyHijackRisk()             // Or the loopback-hijack trap (system proxy on, NO_PROXY missing)
 	initial := 0
-	if problem {
-		initial = 3 // Red: config problem
+	if problem || hijack {
+		initial = 3 // Red: config problem / hijack risk
 	}
-	systray.SetIcon(makeStatusIcon(initial)) // Initial light (grey, or red when the config has removed keys)
-	systray.SetTooltip(trayTip(0, 0, problem))
+	systray.SetIcon(makeStatusIcon(initial)) // Initial light (grey, or red when something needs attention)
+	systray.SetTooltip(trayTip(0, 0, problem, hijack))
 
 	// 「查看日志」: opens the local console page in the default browser (status/logs/config; closing the tab just hides it, the proxy is unaffected).
 	// Config editing and reload have moved into that web page, so the tray menu keeps only 「查看日志」 and 「退出」, consistent cross-platform.
@@ -132,7 +133,7 @@ func onExit() {
 }
 
 // pollTrayColor checks state every 200ms, updating the icon color and tooltip when state/active/waiting change.
-// A config problem (removed keys present) paints the icon red, overriding the traffic-light colors.
+// A config problem (removed keys present) or the loopback-hijack trap paints the icon red, overriding the traffic-light colors.
 func pollTrayColor() {
 	prevState, prevActive, prevWaiting := -1, -1, -1 // Sentinel: ensures one set at startup
 	for {
@@ -142,15 +143,17 @@ func pollTrayColor() {
 		case <-time.After(200 * time.Millisecond):
 		}
 		state, active, waiting := trayInfo()
-		if len(getConfigWarnings()) > 0 {
-			state = 3 // Red: config contains removed keys (the console Logs tab names them; the Docs describe the migration)
+		cfgWarn := len(getConfigWarnings()) > 0 // Red: config contains removed keys (the console Logs tab names them; the Docs describe the migration)
+		hijack := proxyHijackRisk()             // Red: system proxy would hijack loopback clients (banner on the console Status tab)
+		if cfgWarn || hijack {
+			state = 3
 		}
 		if state == prevState && active == prevActive && waiting == prevWaiting {
 			continue
 		}
 		prevState, prevActive, prevWaiting = state, active, waiting
 		systray.SetIcon(makeStatusIcon(state))
-		systray.SetTooltip(trayTip(active, waiting, state == 3))
+		systray.SetTooltip(trayTip(active, waiting, cfgWarn, hijack))
 	}
 }
 
@@ -199,12 +202,16 @@ func trayState() int {
 	return state
 }
 
-// trayTip builds a multi-line tooltip from active/waiting counts, plus a config-problem line when the config has removed
-// keys. When both counts coexist they're shown on separate lines, avoiding an over-long line.
-func trayTip(active, waiting int, problem bool) string {
+// trayTip builds a multi-line tooltip from active/waiting counts, plus one line per active problem
+// (removed config keys; loopback-hijack trap). When both counts coexist they're shown on separate lines,
+// avoiding an over-long line.
+func trayTip(active, waiting int, cfgProblem, hijack bool) string {
 	lines := []string{"Proxy429"}
-	if problem {
+	if cfgProblem {
 		lines = append(lines, trayText("⚠ 配置含已删除的键，详见控制台文档", "⚠ Removed config keys - see console docs"))
+	}
+	if hijack {
+		lines = append(lines, trayText("⚠ 系统代理将劫走回环请求（NO_PROXY 未排除），详见控制台状态页", "⚠ System proxy would hijack loopback requests (NO_PROXY unset) - see console Status tab"))
 	}
 	if active == 0 && waiting == 0 {
 		lines = append(lines, "idle")
@@ -229,8 +236,8 @@ func trayText(zh, en string) string {
 
 // ---- Status-light icon generation (cross-platform, pure Go, no cgo/no GDI) ----
 
-// makeStatusIcon generates tray-icon bytes per state: 3=red (config problem: removed keys present), 2=green (streaming),
-// 1=yellow (sent, awaiting reply), 0=grey (idle).
+// makeStatusIcon generates tray-icon bytes per state: 3=red (needs attention: removed config keys /
+// loopback-hijack trap), 2=green (streaming), 1=yellow (sent, awaiting reply), 0=grey (idle).
 // PNG for macOS/Linux; BMP-entry ICO for Windows (LoadImageW certainly supports it; PNG-entry is flaky).
 // Draws a 32x32 anti-aliased solid circle light, replacing the old GDI 16x16 flat square.
 func makeStatusIcon(state int) []byte {

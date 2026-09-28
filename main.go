@@ -5265,6 +5265,9 @@ func main() {
 	// Optional: the OpenAI Responses API listener (translates into Anthropic and feeds the main pipeline), independent of the main port.
 	// On config reload/switch, reconcileResponsesServer starts/stops it per the new config — no process restart needed.
 	reconcileResponsesServer(c.ResponsesListen)
+	// Loopback-hijack watchdog (read-only): system proxy on + NO_PROXY missing -> red tray light + console banner,
+	// so a silently-vanished codex NO_PROXY fix is noticed before Codex 503s, not after.
+	go watchProxyHijack()
 	// Ctrl+C -> graceful tray exit: systray.Quit triggers onExit to stop status polling; once Run returns, main exits.
 	go func() {
 		sigCh := make(chan os.Signal, 1)

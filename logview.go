@@ -190,9 +190,10 @@ type logData struct {
 	AvgFirstByte  float64           `json:"avgFirstByte"` // ms
 	Tps           float64           `json:"tps"`          // tok/s
 	Flights       []flightInfo      `json:"flights"`
-	CurrentCfg    string            `json:"currentCfg"`  // Currently active config file name
-	FinishedCap   int32             `json:"finishedCap"` // How many finished streams to keep, N (adjustable on the status page)
-	FullStore     bool              `json:"fullStore"`   // The 储存完整结构体 toggle (switchable on the status page, default off)
+	CurrentCfg    string            `json:"currentCfg"`           // Currently active config file name
+	FinishedCap   int32             `json:"finishedCap"`          // How many finished streams to keep, N (adjustable on the status page)
+	FullStore     bool              `json:"fullStore"`            // The 储存完整结构体 toggle (switchable on the status page, default off)
+	HijackRisk    bool              `json:"hijackRisk,omitempty"` // Loopback-hijack trap armed (system proxy on, NO_PROXY missing) -> status-tab red banner
 
 	// ClassifierNoThink is the thinking-off rewrite count: +1 only when a body is actually rewritten to disable thinking.
 	// (Classifiers is the count of requests matching the classifier signature: tallied whether or not rerouted/de-thought.)
@@ -205,7 +206,7 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
-	d := logData{Lines: logBuf.window(0, maxLogBuf), Version: Version, CurrentCfg: filepath.Base(currentConfigPath()), FinishedCap: finishedCap.Load(), FullStore: fullStore.Load()}
+	d := logData{Lines: logBuf.window(0, maxLogBuf), Version: Version, CurrentCfg: filepath.Base(currentConfigPath()), FinishedCap: finishedCap.Load(), FullStore: fullStore.Load(), HijackRisk: proxyHijackRisk()}
 	stats.mu.Lock()
 	d.Active = stats.active
 	d.Waiting = stats.waiting
@@ -1099,6 +1100,7 @@ const logViewerHTML = `<!DOCTYPE html>
     <span id="finishedCapMsg"></span>
     <label style="margin-left:12px;color:#9a9a9a;font-weight:normal" title="开启后新开始的请求记录完整请求体与输出（不设 256KB 上限），流查看器出现「下载请求体/下载输出」按钮；关闭立即清空已存的完整副本，仅能浏览截断内容"><input type="checkbox" id="fullStoreChk"> 储存完整结构体</label>
   </div>
+  <div id="hijackWarn" style="display:none;background:#3d1414;border:1px solid #c0392b;border-radius:4px;padding:8px 10px;margin-bottom:8px;color:#f0b9b0">⚠ 检测到系统代理已开启，但 NO_PROXY 环境变量未排除回环地址——遵循系统代理的客户端（如 Codex）会把发往 127.0.0.1 的请求交给代理服务器，表现为 503 且本代理收不到任何请求。修复：到「配置」页底部重跑一次 Codex 一键命令（脚本会自动修好），然后重启 Codex。</div>
   <div class="cards" id="cards"></div>
   <div>在途流 <label style="margin-left:8px;color:#9a9a9a;font-weight:normal"><input type="checkbox" id="autoTrackChk" checked>自动跟踪最新</label> <label style="color:#9a9a9a;font-weight:normal">最多显示 <input type="number" id="maxFlightsInput" min="1" max="20" value="3" style="width:40px;background:#1e1e1e;color:#d4d4d4;border:1px solid #333;border-radius:3px;padding:2px 4px;font:inherit"> 个</label></div>
   <table id="flights"><thead><tr><th></th><th>#</th><th>model</th><th>API<span class="thq" title="协议来源：橙 [Anthropic] = Anthropic 口原生流量、紫 [translate] = Responses 口翻译成 Anthropic。名后 [值] = 实际发给上游的思考配置最短形态，其颜色 = 词汇口径（思考是针对上游的：上游收到的都是 Anthropic 格式）——橙 = Anthropic thinking（直连原样或翻译映射后）。值：关 = thinking 关或 effort none/off；开 N = enabled+budget_tokens N；adaptive = 自适应无档；low/high/max 等档位词 = adaptive 的 effort；无 [值] = 请求体未带思考字段">?</span></th><th>字节</th><th>状态</th></tr></thead><tbody></tbody></table>
@@ -1787,6 +1789,7 @@ async function poll(){
     // 状态灯
     stEl.className = 'st ' + (d.active>0?'active':d.waiting>0?'wait':'idle');
     stEl.textContent = d.active>0?'🟢 流式中':d.waiting>0?'🟡 等待首字节':'⚪ 空闲';
+    document.getElementById('hijackWarn').style.display = d.hijackRisk ? '' : 'none';
     document.getElementById('curCfg').textContent = d.currentCfg ? ('配置: '+d.currentCfg) : '';
     // 统计卡片
     cardsEl.innerHTML =
@@ -2911,6 +2914,7 @@ var enHTMLRepl = [][2]string{
 	{`>文档</button>`, `>Docs</button>`},
 	{`>语言`, `>Language`},
 	{`⚪ 连接中`, `⚪ Connecting`},
+	{`⚠ 检测到系统代理已开启，但 NO_PROXY 环境变量未排除回环地址——遵循系统代理的客户端（如 Codex）会把发往 127.0.0.1 的请求交给代理服务器，表现为 503 且本代理收不到任何请求。修复：到「配置」页底部重跑一次 Codex 一键命令（脚本会自动修好），然后重启 Codex。`, `⚠ A system proxy is enabled, but the NO_PROXY environment variable does not exclude loopback — proxy-following clients (e.g. Codex) will hand requests for 127.0.0.1 to the proxy server (you get a 503 and this proxy sees nothing). Fix: re-run the Codex one-line setup command at the bottom of the Config tab (the script repairs it automatically), then restart Codex.`},
 	{`>清空统计</button>`, `>Clear stats</button>`},
 	{`保留完成流: `, `Keep finished: `},
 	{`>设置</button>`, `>Set</button>`},

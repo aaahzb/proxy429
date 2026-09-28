@@ -31,27 +31,29 @@ func TestTrayState(t *testing.T) {
 	}
 }
 
-// TestTrayTip verifies the multi-line tooltip: idle / single state / both states coexisting, plus the config-problem line
-// (removed keys present) prepended before the activity lines.
+// TestTrayTip verifies the multi-line tooltip: idle / single state / both states coexisting, plus the per-problem
+// lines (removed config keys; loopback-hijack trap) prepended before the activity lines.
 func TestTrayTip(t *testing.T) {
 	prev := currentUILang()
 	applyUILang("zh") // Pin the language so the problem-line assertion is deterministic
 	defer applyUILang(prev)
 	cases := []struct {
 		active, waiting int
-		problem         bool
+		problem, hijack bool
 		want            string
 	}{
-		{0, 0, false, "Proxy429\nidle"},
-		{2, 0, false, "Proxy429\nactive 2"},
-		{0, 3, false, "Proxy429\nwaiting 3"},
-		{2, 3, false, "Proxy429\nactive 2\nwaiting 3"},
-		{0, 0, true, "Proxy429\n⚠ 配置含已删除的键，详见控制台文档\nidle"},
-		{2, 0, true, "Proxy429\n⚠ 配置含已删除的键，详见控制台文档\nactive 2"},
+		{0, 0, false, false, "Proxy429\nidle"},
+		{2, 0, false, false, "Proxy429\nactive 2"},
+		{0, 3, false, false, "Proxy429\nwaiting 3"},
+		{2, 3, false, false, "Proxy429\nactive 2\nwaiting 3"},
+		{0, 0, true, false, "Proxy429\n⚠ 配置含已删除的键，详见控制台文档\nidle"},
+		{2, 0, true, false, "Proxy429\n⚠ 配置含已删除的键，详见控制台文档\nactive 2"},
+		{0, 0, false, true, "Proxy429\n⚠ 系统代理将劫走回环请求（NO_PROXY 未排除），详见控制台状态页\nidle"},
+		{1, 0, true, true, "Proxy429\n⚠ 配置含已删除的键，详见控制台文档\n⚠ 系统代理将劫走回环请求（NO_PROXY 未排除），详见控制台状态页\nactive 1"},
 	}
 	for _, c := range cases {
-		if got := trayTip(c.active, c.waiting, c.problem); got != c.want {
-			t.Errorf("trayTip(%d,%d,%v)=%q want %q", c.active, c.waiting, c.problem, got, c.want)
+		if got := trayTip(c.active, c.waiting, c.problem, c.hijack); got != c.want {
+			t.Errorf("trayTip(%d,%d,%v,%v)=%q want %q", c.active, c.waiting, c.problem, c.hijack, got, c.want)
 		}
 	}
 }
