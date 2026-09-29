@@ -98,7 +98,7 @@ type ClassifierRoute struct {
 	URL                string `json:"url"`                           // Target upstream base URL
 	API                string `json:"api"`                           // Target API key; empty = pass through the client's token
 	Model              string `json:"model"`                         // Target model name to rewrite to; empty = leave the model field unchanged
-	ClassifierThinking string `json:"classifier_thinking,omitempty"` // Classifier thinking policy: ""/unset = leave the request's thinking untouched; "off" = rewrite the body to thinking-off so classification returns fast
+	ClassifierThinking string `json:"classifier_thinking,omitempty"` // Classifier thinking policy: ""/unset = leave the request's thinking untouched; "off" = rewrite the body to thinking-off so classification returns fast; "low" = lower adaptive thinking to effort low (non-adaptive shapes pass through untouched)
 }
 
 // FastRoute defines the dedicated route for fast-mode requests: non-classifier requests carrying "speed":"fast" go to the specified upstream.
@@ -273,9 +273,9 @@ func parseConfig(data []byte) (*Config, []string, error) {
 func validateConfigEnums(c *Config) error {
 	if cr := c.ClassifierRoute; cr != nil {
 		switch cr.ClassifierThinking {
-		case "", "off":
+		case "", "off", "low":
 		default:
-			return fmt.Errorf("classifier_route has invalid classifier_thinking value %q: only \"off\" is supported (unset = leave the request's thinking untouched)", cr.ClassifierThinking)
+			return fmt.Errorf("classifier_route has invalid classifier_thinking value %q: only \"off\" and \"low\" are supported (unset = leave the request's thinking untouched)", cr.ClassifierThinking)
 		}
 	}
 	checkOff2Low := func(owner, v string) error {
@@ -342,6 +342,10 @@ const activeConfigStateFile = "active-config.txt"
 // classifierSystemPrefix is the fixed system-field prefix of Claude Code classifier (safety check) requests.
 // The proxy uses it to recognize classifier requests, route them to a cheap model, and disable thinking. Hardcoded: a client implementation detail that users shouldn't configure.
 const classifierSystemPrefix = "You are a security monitor"
+
+// codexGuardianSystemPrefix is the fixed system-field prefix of Codex's guardian (approval-assessment) requests.
+// Codex sends it as the Responses API's "instructions" field; the Responses->Anthropic translation maps it to system, so the same prefix-match mechanism recognizes it. Hardcoded: a client implementation detail that users shouldn't configure.
+const codexGuardianSystemPrefix = "You are judging one planned coding-agent action."
 
 // readActiveConfigState reads the state file in the config directory and returns the full path of the last selected config it records.
 // Returns an empty string when the state file is missing, empty, or points to a file that no longer exists; the caller falls back to the default config.json.
@@ -526,6 +530,10 @@ func clearStats(c *Config) {
 	stats.statusRetries.Store(0)
 	stats.classifierRewrites.Store(0)
 	stats.classifierHits.Store(0)
+	stats.classifierHitsCC.Store(0)
+	stats.classifierHitsCodex.Store(0)
+	stats.classifierRewritesCC.Store(0)
+	stats.classifierRewritesCodex.Store(0)
 	stats.resetSampleCap(c.RecentSampleWindow)
 	finishedMu.Lock()
 	finished = nil
@@ -544,8 +552,8 @@ func reloadConfig() error {
 	cfg.Store(c)
 	setConfigWarnings(warns)
 	reconcileResponsesServer(c.ResponsesListen) // Responses port starts/stops dynamically with config reload
-	log.Printf("[reload] config reloaded: http://%s -> %s (max retries %d, classifier thinking-off=%v, removed-key warnings=%d)",
-		c.Listen, c.Upstream, c.MaxRetries, classifierThinkingOff(c), len(warns))
+	log.Printf("[reload] config reloaded: http://%s -> %s (max retries %d, classifier thinking=%q, removed-key warnings=%d)",
+		c.Listen, c.Upstream, c.MaxRetries, classifierThinkingMode(c), len(warns))
 	return nil
 }
 
@@ -610,8 +618,14 @@ type liveStats struct {
 	modelStats         map[string]*modelUsage // Token usage aggregated by real upstream model name
 	bytesForward       atomic.Int64           // Cumulative forwarded bytes, growing live during streams (ARK doesn't send tokens mid-stream; this shows live progress)
 	statusRetries      atomic.Int64           // Retries since startup (status codes/timeouts/network errors/in-body errors, +1 per retry)
-	classifierRewrites atomic.Int64           // Classifier hits with thinking disabled since startup
-	classifierHits     atomic.Int64           // Requests matching the classifier (safety-check) signature since startup: counted whether or not rerouted/de-thought
+	classifierRewrites atomic.Int64           // Classifier hits with thinking rewritten (off or low) since startup
+	classifierHits     atomic.Int64           // Requests matching a classifier signature since startup: counted whether or not rerouted/rewritten
+
+	// Per-source split of the two classifier counters above (Claude Code security monitor vs Codex guardian).
+	classifierHitsCC        atomic.Int64 // Claude Code (security-monitor prefix) hits
+	classifierHitsCodex     atomic.Int64 // Codex guardian (approval-assessment prefix) hits
+	classifierRewritesCC    atomic.Int64 // Claude Code thinking rewrites (off or low)
+	classifierRewritesCodex atomic.Int64 // Codex guardian thinking rewrites (off or low)
 
 	sampleMu  sync.Mutex         // Guards the sliding windows below (separate from mu, so long streams don't hold the lock)
 	fbSamples []int64            // First-token latency ring buffer (pushed on first byte; the status row's "first token" updates live)
@@ -870,7 +884,7 @@ type flight struct {
 	// Downstream side of dual-link recording (proxy↔client): stored only when it differs from the upstream side
 	// (content/reqBody/fullContent above) — Responses translation streams always store (the two protocols necessarily differ),
 	// convertAlltoStream-rebuilt JSON streams store contentDown, native streams store reqDown only when rewritten
-	// (classifier thinking-off / routed model etc.); all empty means both sides identical, and endpoints fall back
+	// (classifier thinking rewrite / routed model etc.); all empty means both sides identical, and endpoints fall back
 	// to the other side, reporting the actual side via the X-Proxy429-Side header. Guarded by contentMu.
 	reqDown          []byte           // Raw downstream→proxy request body (truncation/full rules same as reqBody)
 	reqDownTruncated bool             // Whether reqDown was truncated to just the head
@@ -2400,14 +2414,15 @@ func lastCloseBrace(body []byte) int {
 }
 
 // applyClassifierEdits performs text replacements/deletions/appends on the original body, touching only the target fields and preserving every other byte.
-// thinking->{"type":"disabled"}, reasoning_effort->"none", reasoning->deleted;
-// fields absent from the original are appended before the top-level closing }. Edits are spliced by ascending start, all based on the original body, without interfering with each other.
-func applyClassifierEdits(body []byte, spans []fieldSpan) []byte {
+// Off mode: thinking->{"type":"disabled"}, reasoning_effort->"none", reasoning->deleted.
+// Low mode (adaptive thinking kept): output_config->{"effort":"low"}, reasoning_effort->"low", reasoning->deleted; the thinking field itself is left untouched.
+// Fields absent from the original are appended before the top-level closing }. Edits are spliced by ascending start, all based on the original body, without interfering with each other.
+func applyClassifierEdits(body []byte, spans []fieldSpan, lowMode bool) []byte {
 	have := map[string]*fieldSpan{}
 	for i := range spans {
 		s := &spans[i]
 		switch s.name {
-		case "thinking", "reasoning_effort", "reasoning", "max_tokens":
+		case "thinking", "reasoning_effort", "reasoning", "output_config", "max_tokens":
 			have[s.name] = s
 		}
 	}
@@ -2418,28 +2433,49 @@ func applyClassifierEdits(body []byte, spans []fieldSpan) []byte {
 	}
 	var edits []edit
 
-	// Replace/delete existing target fields
+	// Replace/delete existing target fields (reasoning is deleted in both modes)
 	if r, ok := have["reasoning"]; ok {
 		ds, de := fieldDeleteRange(body, r)
 		edits = append(edits, edit{ds, de, nil})
 	}
-	if t, ok := have["thinking"]; ok {
-		edits = append(edits, edit{t.valStart, t.valEnd, []byte(`{"type":"disabled"}`)})
-	}
-	if re, ok := have["reasoning_effort"]; ok {
-		edits = append(edits, edit{re.valStart, re.valEnd, []byte(`"none"`)})
+	if lowMode {
+		if oc, ok := have["output_config"]; ok {
+			edits = append(edits, edit{oc.valStart, oc.valEnd, []byte(`{"effort":"low"}`)})
+		}
+		if re, ok := have["reasoning_effort"]; ok {
+			edits = append(edits, edit{re.valStart, re.valEnd, []byte(`"low"`)})
+		}
+	} else {
+		if t, ok := have["thinking"]; ok {
+			edits = append(edits, edit{t.valStart, t.valEnd, []byte(`{"type":"disabled"}`)})
+		}
+		if re, ok := have["reasoning_effort"]; ok {
+			edits = append(edits, edit{re.valStart, re.valEnd, []byte(`"none"`)})
+		}
 	}
 
 	// Append fields absent from the original body: inserted before the top-level closing } (original field order preserved, new fields at the end)
 	var appendFields []byte
-	if _, ok := have["thinking"]; !ok {
-		appendFields = append(appendFields, []byte(`"thinking":{"type":"disabled"}`)...)
-	}
-	if _, ok := have["reasoning_effort"]; !ok {
-		if len(appendFields) > 0 {
-			appendFields = append(appendFields, ',')
+	if lowMode {
+		if _, ok := have["output_config"]; !ok {
+			appendFields = append(appendFields, []byte(`"output_config":{"effort":"low"}`)...)
 		}
-		appendFields = append(appendFields, []byte(`"reasoning_effort":"none"`)...)
+		if _, ok := have["reasoning_effort"]; !ok {
+			if len(appendFields) > 0 {
+				appendFields = append(appendFields, ',')
+			}
+			appendFields = append(appendFields, []byte(`"reasoning_effort":"low"`)...)
+		}
+	} else {
+		if _, ok := have["thinking"]; !ok {
+			appendFields = append(appendFields, []byte(`"thinking":{"type":"disabled"}`)...)
+		}
+		if _, ok := have["reasoning_effort"]; !ok {
+			if len(appendFields) > 0 {
+				appendFields = append(appendFields, ',')
+			}
+			appendFields = append(appendFields, []byte(`"reasoning_effort":"none"`)...)
+		}
 	}
 	if len(appendFields) > 0 {
 		braceOff := bytes.IndexByte(body, '{')
@@ -2728,51 +2764,102 @@ func disableThinkingInBody(body []byte) ([]byte, bool) {
 	return setTopLevelJSONValue(nb, "output_config", nil)
 }
 
-// isClassifierRequest reports whether body is a classifier request (system field prefix match).
-// Shares the same check with maybeRewriteClassifier but only checks, never rewrites; used for routing decisions.
-// Independent of classifier_thinking: classifier routing works even when no thinking policy is configured.
-func isClassifierRequest(c *Config, body []byte) bool {
-	if !bytes.Contains(body, []byte(classifierSystemPrefix)) {
-		return false
+// classifierSource identifies which client's classifier signature a request matched.
+type classifierSource int
+
+const (
+	classifierNone  classifierSource = iota // No classifier signature
+	classifierCC                            // Claude Code safety check ("You are a security monitor")
+	classifierCodex                         // Codex guardian approval assessment ("You are judging one planned coding-agent action.")
+)
+
+// detectClassifier reports which classifier signature the body's system field matches (prefix at the very start of the system text).
+// A bytes.Contains pre-filter keeps normal requests (without either prefix substring) away from JSON parsing — near-zero cost.
+// Codex's guardian prefix arrives via the Responses port's instructions->system mapping, so this one check covers both ports.
+func detectClassifier(body []byte) classifierSource {
+	hasCC := bytes.Contains(body, []byte(classifierSystemPrefix))
+	hasCodex := bytes.Contains(body, []byte(codexGuardianSystemPrefix))
+	if !hasCC && !hasCodex {
+		return classifierNone
 	}
 	spans, ok := locateTopFields(body)
 	if !ok {
-		return false
+		return classifierNone
 	}
-	return classifierSystemMatches(body, spans, classifierSystemPrefix)
+	if hasCC && classifierSystemMatches(body, spans, classifierSystemPrefix) {
+		return classifierCC
+	}
+	if hasCodex && classifierSystemMatches(body, spans, codexGuardianSystemPrefix) {
+		return classifierCodex
+	}
+	return classifierNone
 }
 
-// classifierThinkingOff reports whether classifier requests get their thinking rewritten off
-// (classifier_route.classifier_thinking == "off"; unset or no classifier_route = the request's thinking goes through untouched).
-func classifierThinkingOff(c *Config) bool {
-	return c.ClassifierRoute != nil && c.ClassifierRoute.ClassifierThinking == "off"
+// classifierThinkingMode reports the thinking rewrite policy for classifier requests
+// (classifier_route.classifier_thinking: "off"/"low"; unset or no classifier_route = the request's thinking goes through untouched).
+func classifierThinkingMode(c *Config) string {
+	if c.ClassifierRoute == nil {
+		return ""
+	}
+	return c.ClassifierRoute.ClassifierThinking
 }
 
-// maybeRewriteClassifier turns thinking off when a classifier request matches, so classification returns fast.
-// A bytes.Contains pre-filter keeps normal requests (without the prefix substring) away from JSON parsing — near-zero cost.
+// classifierThinkingAdaptive reports whether the body carries adaptive thinking, the only shape the "low" policy rewrites.
+// It checks the located thinking field's raw value text, so JSON whitespace variations don't matter.
+func classifierThinkingAdaptive(body []byte, spans []fieldSpan) bool {
+	for i := range spans {
+		if spans[i].name == "thinking" {
+			return bytes.Contains(body[spans[i].valStart:spans[i].valEnd], []byte(`"adaptive"`))
+		}
+	}
+	return false
+}
+
+// classifierTag returns the per-source log tag fragment ("(codex)" for Codex guardian hits, "" for Claude Code).
+func classifierTag(kind classifierSource) string {
+	if kind == classifierCodex {
+		return "(codex)"
+	}
+	return ""
+}
+
+// maybeRewriteClassifier applies the configured thinking policy when a classifier request matches, so classification returns fast.
+// "off" disables thinking; "low" keeps adaptive thinking but lowers effort to low (non-adaptive shapes pass through untouched).
+// A bytes.Contains pre-filter keeps normal requests away from JSON parsing — near-zero cost.
 // On a match, json.Decoder streaming-locates the target fields' byte positions, then text replacement — no wholesale re-serialization;
 // untouched fields keep their exact bytes (key order and formatting included), preserving upstream cache hits.
 func maybeRewriteClassifier(body []byte) []byte {
-	c := cfg.Load()
-	if !classifierThinkingOff(c) {
+	mode := classifierThinkingMode(cfg.Load())
+	if mode == "" {
 		return body
 	}
-	if !bytes.Contains(body, []byte(classifierSystemPrefix)) {
+	kind := detectClassifier(body)
+	if kind == classifierNone {
 		return body
 	}
 	spans, ok := locateTopFields(body)
 	if !ok {
 		return body
 	}
-	if !classifierSystemMatches(body, spans, classifierSystemPrefix) {
-		return body
+	lowMode := mode == "low"
+	if lowMode && !classifierThinkingAdaptive(body, spans) {
+		return body // "low" rewrites adaptive thinking only; every other shape passes through untouched
 	}
-	newBody := applyClassifierEdits(body, spans)
+	newBody := applyClassifierEdits(body, spans, lowMode)
 	if len(newBody) == len(body) && bytes.Equal(newBody, body) {
 		return body
 	}
-	log.Printf("[rewrite] classifier signature hit; thinking disabled (body %d->%d bytes)", len(body), len(newBody))
-	stats.classifierRewrites.Add(1) // Live status row count: classifier thinking-off count
+	if lowMode {
+		log.Printf("[rewrite] classifier%s signature hit; thinking lowered to adaptive low (body %d->%d bytes)", classifierTag(kind), len(body), len(newBody))
+	} else {
+		log.Printf("[rewrite] classifier%s signature hit; thinking disabled (body %d->%d bytes)", classifierTag(kind), len(body), len(newBody))
+	}
+	stats.classifierRewrites.Add(1) // Live status row count: classifier thinking rewrites (off or low)
+	if kind == classifierCodex {
+		stats.classifierRewritesCodex.Add(1)
+	} else {
+		stats.classifierRewritesCC.Add(1)
+	}
 	return newBody
 }
 
@@ -4658,11 +4745,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[request] #%d %s %s%s (body=%d bytes) from %s", f.id, r.Method, r.URL.Path, modelPart, len(body), r.RemoteAddr)
 
-	// 1.5 Turn off thinking on classifier hits, so classification returns fast.
-	// isClassifier also feeds the routing decision: classifier routing takes priority over model routing.
-	isClassifier := isClassifierRequest(c, body)
-	if isClassifier {
-		stats.classifierHits.Add(1) // Count on match: tallied whether or not rerouted/de-thought (observing Claude Code's safety-check request volume)
+	// 1.5 Apply the thinking policy on classifier hits, so classification returns fast.
+	// The classifier source also feeds the routing decision: classifier routing takes priority over model routing.
+	clsKind := detectClassifier(body)
+	if clsKind != classifierNone {
+		stats.classifierHits.Add(1) // Count on match: tallied whether or not rerouted/rewritten (observing safety-check request volume)
+		if clsKind == classifierCodex {
+			stats.classifierHitsCodex.Add(1)
+		} else {
+			stats.classifierHitsCC.Add(1)
+		}
 	}
 	body = maybeRewriteClassifier(body)
 
@@ -4691,7 +4783,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	searchSummaryMode := false // Search-summary mode: step1+step2 self-built response, bypassing the main upstream.
 	convFlag := ""             // The effective route's convertOff2Low value, captured where routing settles ("" = feature off)
 	var summarySF *SearchRoute // Built from the matched RouteRule when enhance-search triggers; otherwise c.SearchFallback is used
-	if isClassifier && c.ClassifierRoute != nil && c.ClassifierRoute.URL != "" {
+	if clsKind != classifierNone && c.ClassifierRoute != nil && c.ClassifierRoute.URL != "" {
 		// Classifier route: shunt safety-check requests to the designated upstream, saving main-model quota.
 		// (url empty = no reroute: a bare {"classifier_thinking":"off"} configures the thinking rewrite only.)
 		cr := c.ClassifierRoute
@@ -4701,7 +4793,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			body = replaceModelValue(body, cr.Model)
 			targetModel = cr.Model
 		}
-		log.Printf("[route] #%d classifier %s -> %s (model %s -> %s)", f.id, origModel, cr.URL, origModel, cr.Model)
+		log.Printf("[route] #%d classifier%s %s -> %s (model %s -> %s)", f.id, classifierTag(clsKind), origModel, cr.URL, origModel, cr.Model)
 		f.routeReason.Store(routeClassifier)
 		f.convAnchor = "classifier"
 	} else if c.FastRoute != nil && isFastRequest(body, r) {
@@ -4880,7 +4972,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// convertOff2Low="all" native-port upgrade: an explicit downstream thinking-off is quietly sent upstream as low thinking,
 	// with thinking blocks stripped from the response (the client stays unaware). The classifier's thinking is governed by
 	// classifier_thinking exclusively, and Responses-port requests already carry their own upgrade decision via ctx — both excluded.
-	if convFlag == "all" && !isClassifier && f.translated == "" && r.URL.Path == "/v1/messages" {
+	if convFlag == "all" && clsKind == classifierNone && f.translated == "" && r.URL.Path == "/v1/messages" {
 		effModel := targetModel
 		if effModel == "" {
 			effModel = origModel
@@ -5256,8 +5348,8 @@ func main() {
 		log.Printf("[config] WARNING: %s (the key is inert; the proxy runs without its old behavior)", removedKeyWarningEN(k))
 	}
 
-	log.Printf("proxy started v%s: listening http://%s -> forwarding to %s (max retries %d, classifier thinking-off=%v)",
-		Version, c.Listen, c.Upstream, c.MaxRetries, classifierThinkingOff(c))
+	log.Printf("proxy started v%s: listening http://%s -> forwarding to %s (max retries %d, classifier thinking=%q)",
+		Version, c.Listen, c.Upstream, c.MaxRetries, classifierThinkingMode(c))
 
 	// The HTTP server runs in a goroutine: the tray event loop (systray.Run) must occupy the main thread (macOS requires UI on the main thread),
 	// so the main thread's blocking spot belongs to the tray and HTTP runs in the background.

@@ -30,6 +30,11 @@ func resetStats() {
 	stats.bytesForward.Store(0)
 	stats.statusRetries.Store(0)
 	stats.classifierRewrites.Store(0)
+	stats.classifierHits.Store(0)
+	stats.classifierHitsCC.Store(0)
+	stats.classifierHitsCodex.Store(0)
+	stats.classifierRewritesCC.Store(0)
+	stats.classifierRewritesCodex.Store(0)
 	stats.resetSampleCap(0) // Clear the "recent N" latency/throughput samples
 	stats.mu.Unlock()
 
@@ -245,10 +250,10 @@ func TestCacheHitRate(t *testing.T) {
 		cr, in, cc int64
 		want       string
 	}{
-		{50, 40, 10, "50.0%"},  // 50/(40+50+10)=50%
-		{5, 10, 3, "27.8%"},    // 5/18≈27.78%
-		{0, 0, 0, "-"},         // No usage data
-		{0, 0, 7, "0.0%"},      // Writes without any hits
+		{50, 40, 10, "50.0%"},     // 50/(40+50+10)=50%
+		{5, 10, 3, "27.8%"},       // 5/18≈27.78%
+		{0, 0, 0, "-"},            // No usage data
+		{0, 0, 7, "0.0%"},         // Writes without any hits
 		{9000, 45814, 0, "16.4%"}, // Kimi field-measured magnitude: 9000/54814
 	}
 	for _, c := range cases {
@@ -840,8 +845,109 @@ func TestMaybeRewriteClassifierPreservesOrder(t *testing.T) {
 	}
 }
 
-// TestClassifierHitCounting end-to-end verifies the classifier dual-count semantics: classifierHits counts on match
-// (whether or not rerouted/de-thought); classifierRewrites only +1 when the body is actually rewritten to disable thinking.
+// TestDetectClassifierSource locks the per-source fingerprint split: Claude Code's safety classifier
+// (system prefix "You are a security monitor") and Codex's guardian approval assessment (system prefix
+// "You are judging one planned coding-agent action.") are recognized as different sources; ordinary
+// requests match neither. The guardian prefix arrives via the Responses port's instructions->system mapping.
+func TestDetectClassifierSource(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want classifierSource
+	}{
+		{"cc string system", `{"system":"You are a security monitor. Check this.","messages":[]}`, classifierCC},
+		{"cc array system", `{"system":[{"type":"text","text":"You are a security monitor."}],"messages":[]}`, classifierCC},
+		{"codex guardian", `{"system":"You are judging one planned coding-agent action.\nAssess the exact action.","messages":[]}`, classifierCodex},
+		{"codex guardian array", `{"system":[{"type":"text","text":"You are judging one planned coding-agent action."}],"messages":[]}`, classifierCodex},
+		{"prefix not at start", `{"system":"Note: You are a security monitor.","messages":[]}`, classifierNone},
+		{"ordinary system", `{"system":"You are a helpful assistant.","messages":[]}`, classifierNone},
+		{"no system field", `{"messages":[]}`, classifierNone},
+	}
+	for _, tc := range tests {
+		if got := detectClassifier([]byte(tc.body)); got != tc.want {
+			t.Errorf("%s: detectClassifier=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestMaybeRewriteClassifierLow verifies the "low" policy: only requests already in adaptive-thinking shape
+// are rewritten (thinking stays adaptive, output_config drops to effort low, reasoning_effort -> "low",
+// reasoning deleted); non-adaptive shapes (enabled budget / disabled / no thinking field) pass through untouched.
+func TestMaybeRewriteClassifierLow(t *testing.T) {
+	setLow := func() { cfg.Store(&Config{ClassifierRoute: &ClassifierRoute{ClassifierThinking: "low"}}) }
+
+	t.Run("adaptive with high effort lowered", func(t *testing.T) {
+		resetStats()
+		setLow()
+		body := []byte(`{"model":"x","system":"You are a security monitor.","thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"reasoning":{"effort":"high"},"reasoning_effort":"high","max_tokens":2048,"messages":[]}`)
+		out := maybeRewriteClassifier(body)
+		p := parseBody(t, out)
+		if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "adaptive" {
+			t.Errorf("thinking=%v want adaptive (kept)", p["thinking"])
+		}
+		if oc, _ := p["output_config"].(map[string]interface{}); oc["effort"] != "low" {
+			t.Errorf("output_config=%v want effort low", p["output_config"])
+		}
+		if p["reasoning_effort"] != "low" {
+			t.Errorf("reasoning_effort=%v want low", p["reasoning_effort"])
+		}
+		if _, ok := p["reasoning"]; ok {
+			t.Errorf("reasoning should be deleted, got %v", p["reasoning"])
+		}
+		if mt, _ := p["max_tokens"].(float64); mt != 2048 {
+			t.Errorf("max_tokens=%v want 2048 (untouched)", p["max_tokens"])
+		}
+		if rw := stats.classifierRewrites.Load(); rw != 1 {
+			t.Errorf("rewrites=%d want 1", rw)
+		}
+		if rwCC := stats.classifierRewritesCC.Load(); rwCC != 1 {
+			t.Errorf("rewritesCC=%d want 1", rwCC)
+		}
+	})
+
+	t.Run("codex adaptive without output_config gets fields appended", func(t *testing.T) {
+		resetStats()
+		setLow()
+		body := []byte(`{"system":"You are judging one planned coding-agent action.","thinking":{"type":"adaptive"},"messages":[]}`)
+		out := maybeRewriteClassifier(body)
+		p := parseBody(t, out)
+		if oc, _ := p["output_config"].(map[string]interface{}); oc["effort"] != "low" {
+			t.Errorf("output_config=%v want effort low (appended)", p["output_config"])
+		}
+		if p["reasoning_effort"] != "low" {
+			t.Errorf("reasoning_effort=%v want low (appended)", p["reasoning_effort"])
+		}
+		want := []string{"system", "thinking", "messages", "output_config", "reasoning_effort"}
+		if keys := topLevelKeys(t, out); !reflect.DeepEqual(keys, want) {
+			t.Errorf("key order:\n got %v\nwant %v", keys, want)
+		}
+		if rwCodex := stats.classifierRewritesCodex.Load(); rwCodex != 1 {
+			t.Errorf("rewritesCodex=%d want 1", rwCodex)
+		}
+	})
+
+	t.Run("non-adaptive shapes untouched", func(t *testing.T) {
+		resetStats()
+		setLow()
+		for _, body := range []string{
+			`{"system":"You are a security monitor.","thinking":{"type":"enabled","budget_tokens":2048},"messages":[]}`,
+			`{"system":"You are a security monitor.","thinking":{"type":"disabled"},"messages":[]}`,
+			`{"system":"You are a security monitor.","messages":[]}`,
+			`{"system":"You are judging one planned coding-agent action.","thinking":{"type":"enabled","budget_tokens":2048},"messages":[]}`,
+		} {
+			if out := maybeRewriteClassifier([]byte(body)); !bytes.Equal(out, []byte(body)) {
+				t.Errorf("non-adaptive shape should pass through untouched: %s", body)
+			}
+		}
+		if rw := stats.classifierRewrites.Load(); rw != 0 {
+			t.Errorf("rewrites=%d want 0 (no adaptive shape seen)", rw)
+		}
+	})
+}
+
+// TestClassifierHitCounting end-to-end verifies the classifier dual-count semantics, split by source:
+// hits count on match (whether or not rerouted/rewritten); rewrites only +1 when the body is actually
+// rewritten; Claude Code (security-monitor prefix) and Codex (guardian prefix) tally separately.
 func TestClassifierHitCounting(t *testing.T) {
 	resetStats()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -855,30 +961,77 @@ func TestClassifierHitCounting(t *testing.T) {
 	post := func(body string) {
 		resp, err := http.Post(proxy.URL+"/v1/messages", "application/json", strings.NewReader(body))
 		if err != nil {
-			t.Fatalf("请求失败: %v", err)
+			t.Fatalf("post failed: %v", err)
 		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}
-	// A classifier request with thinking: with the thinking-off toggle on, a real rewrite is guaranteed (only byte changes count as rewrites).
-	cls := `{"model":"x","system":"You are a security monitor.","thinking":{"type":"enabled"},"max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+	// ccCls: Claude Code classifier with budget-shaped thinking. codexCls: Codex guardian with adaptive thinking.
+	ccCls := `{"model":"x","system":"You are a security monitor.","thinking":{"type":"enabled"},"max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+	codexCls := `{"model":"x","system":"You are judging one planned coding-agent action.","thinking":{"type":"adaptive"},"max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
 
+	check := func(h, rw, hCC, rwCC, hCX, rwCX int64, note string) {
+		t.Helper()
+		got := []int64{stats.classifierHits.Load(), stats.classifierRewrites.Load(), stats.classifierHitsCC.Load(), stats.classifierRewritesCC.Load(), stats.classifierHitsCodex.Load(), stats.classifierRewritesCodex.Load()}
+		want := []int64{h, rw, hCC, rwCC, hCX, rwCX}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: counters (hits,rewrites,hitsCC,rewritesCC,hitsCodex,rewritesCodex)=%v, want %v", note, got, want)
+		}
+	}
+
+	// No classifier route: hits tally per source, no rewrites.
 	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
-	post(cls)
-	post(cls)
-	if h, rw := stats.classifierHits.Load(), stats.classifierRewrites.Load(); h != 2 || rw != 0 {
-		t.Errorf("关思考关闭时：hits=%d want 2, rewrites=%d want 0", h, rw)
-	}
+	post(ccCls)
+	post(codexCls)
+	check(2, 0, 1, 0, 1, 0, "no rewrite policy")
 
+	// "off": both sources get thinking disabled (the guardian's adaptive shape included).
 	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10, ClassifierRoute: &ClassifierRoute{URL: mock.URL, ClassifierThinking: "off"}})
-	post(cls)
-	if h, rw := stats.classifierHits.Load(), stats.classifierRewrites.Load(); h != 3 || rw != 1 {
-		t.Errorf("关思考开启后：hits=%d want 3, rewrites=%d want 1", h, rw)
-	}
+	post(ccCls)
+	post(codexCls)
+	check(4, 2, 2, 1, 2, 1, "off rewrites both sources")
 
-	post(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`) // Non-classifier request: neither counter rises
-	if h, rw := stats.classifierHits.Load(), stats.classifierRewrites.Load(); h != 3 || rw != 1 {
-		t.Errorf("普通请求后：hits=%d want 3, rewrites=%d want 1", h, rw)
+	// "low": only the adaptive guardian body is lowered; the budget-shaped CC body passes through.
+	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10, ClassifierRoute: &ClassifierRoute{URL: mock.URL, ClassifierThinking: "low"}})
+	post(ccCls)
+	post(codexCls)
+	check(6, 3, 3, 1, 3, 2, "low rewrites adaptive only")
+
+	// Non-classifier request: no counter rises.
+	post(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
+	check(6, 3, 3, 1, 3, 2, "ordinary request")
+}
+
+// TestLogDataClassifierSplit verifies /__logs/data exposes the per-source classifier counters
+// (the status card's hover tooltip / click modal read them for the per-source breakdown).
+func TestLogDataClassifierSplit(t *testing.T) {
+	resetStats()
+	stats.classifierHits.Store(5)
+	stats.classifierRewrites.Store(3)
+	stats.classifierHitsCC.Store(3)
+	stats.classifierRewritesCC.Store(1)
+	stats.classifierHitsCodex.Store(2)
+	stats.classifierRewritesCodex.Store(2)
+
+	req := httptest.NewRequest("GET", "/__logs/data", nil)
+	req.RemoteAddr = "127.0.0.1:1234" // isLocalRequest gate
+	rec := httptest.NewRecorder()
+	logDataHandler(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+	var d map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&d); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for k, want := range map[string]float64{
+		"classifiers": 5, "classifierNoThink": 3,
+		"classifiersCC": 3, "classifierRewritesCC": 1,
+		"classifiersCodex": 2, "classifierRewritesCodex": 2,
+	} {
+		if got, ok := d[k].(float64); !ok || got != want {
+			t.Errorf("%s=%v, want %v", k, d[k], want)
+		}
 	}
 }
 
@@ -1009,7 +1162,7 @@ func TestLoadConfigRemovedKeys(t *testing.T) {
 	}
 }
 
-// TestLoadConfigEnumValidation locks the new enums: classifier_route.classifier_thinking accepts only ""/"off",
+// TestLoadConfigEnumValidation locks the new enums: classifier_route.classifier_thinking accepts only ""/"off"/"low",
 // and convertOff2Low on all four route kinds (routes[]/fast_route/multimodal_fallback/search_fallback) accepts
 // only ""/"translate"/"all" — anything else fails at load instead of silently degrading to off.
 func TestLoadConfigEnumValidation(t *testing.T) {
@@ -1020,12 +1173,15 @@ func TestLoadConfigEnumValidation(t *testing.T) {
 		}
 		return p
 	}
-	// classifier_thinking: only off is legal.
+	// classifier_thinking: "off" and "low" are legal; anything else is rejected.
 	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"off"}}`)); err != nil {
-		t.Errorf("classifier_thinking=off 应合法: %v", err)
+		t.Errorf("classifier_thinking=off should be legal: %v", err)
 	}
-	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"low"}}`)); err == nil {
-		t.Errorf("classifier_thinking=low 应报错（只有 off）")
+	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"low"}}`)); err != nil {
+		t.Errorf("classifier_thinking=low should be legal: %v", err)
+	}
+	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"medium"}}`)); err == nil {
+		t.Errorf("classifier_thinking=medium should be rejected (only off/low)")
 	}
 	// convertOff2Low: translate/all legal on all four kinds...
 	good := []string{
