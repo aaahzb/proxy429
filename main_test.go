@@ -876,20 +876,19 @@ func TestDetectClassifierSource(t *testing.T) {
 func TestMaybeRewriteClassifierLow(t *testing.T) {
 	setLow := func() { cfg.Store(&Config{ClassifierRoute: &ClassifierRoute{ClassifierThinking: "low"}}) }
 
-	t.Run("adaptive with high effort lowered", func(t *testing.T) {
+	// "low" = first normalize to thinking-off (the same edit as "off"), then the post-route quiet upgrade
+	// raises it to low upstream. maybeRewriteClassifier only performs the off phase.
+	t.Run("adaptive with high effort normalized to off", func(t *testing.T) {
 		resetStats()
 		setLow()
 		body := []byte(`{"model":"x","system":"You are a security monitor.","thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"reasoning":{"effort":"high"},"reasoning_effort":"high","max_tokens":2048,"messages":[]}`)
 		out := maybeRewriteClassifier(body)
 		p := parseBody(t, out)
-		if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "adaptive" {
-			t.Errorf("thinking=%v want adaptive (kept)", p["thinking"])
+		if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "disabled" {
+			t.Errorf("thinking=%v want disabled (off phase)", p["thinking"])
 		}
-		if oc, _ := p["output_config"].(map[string]interface{}); oc["effort"] != "low" {
-			t.Errorf("output_config=%v want effort low", p["output_config"])
-		}
-		if p["reasoning_effort"] != "low" {
-			t.Errorf("reasoning_effort=%v want low", p["reasoning_effort"])
+		if p["reasoning_effort"] != "none" {
+			t.Errorf("reasoning_effort=%v want none", p["reasoning_effort"])
 		}
 		if _, ok := p["reasoning"]; ok {
 			t.Errorf("reasoning should be deleted, got %v", p["reasoning"])
@@ -905,19 +904,19 @@ func TestMaybeRewriteClassifierLow(t *testing.T) {
 		}
 	})
 
-	t.Run("codex adaptive without output_config gets fields appended", func(t *testing.T) {
+	t.Run("codex adaptive gets off fields appended", func(t *testing.T) {
 		resetStats()
 		setLow()
 		body := []byte(`{"system":"You are judging one planned coding-agent action.","thinking":{"type":"adaptive"},"messages":[]}`)
 		out := maybeRewriteClassifier(body)
 		p := parseBody(t, out)
-		if oc, _ := p["output_config"].(map[string]interface{}); oc["effort"] != "low" {
-			t.Errorf("output_config=%v want effort low (appended)", p["output_config"])
+		if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "disabled" {
+			t.Errorf("thinking=%v want disabled", p["thinking"])
 		}
-		if p["reasoning_effort"] != "low" {
-			t.Errorf("reasoning_effort=%v want low (appended)", p["reasoning_effort"])
+		if p["reasoning_effort"] != "none" {
+			t.Errorf("reasoning_effort=%v want none (appended)", p["reasoning_effort"])
 		}
-		want := []string{"system", "thinking", "messages", "output_config", "reasoning_effort"}
+		want := []string{"system", "thinking", "messages", "reasoning_effort"}
 		if keys := topLevelKeys(t, out); !reflect.DeepEqual(keys, want) {
 			t.Errorf("key order:\n got %v\nwant %v", keys, want)
 		}
@@ -926,7 +925,7 @@ func TestMaybeRewriteClassifierLow(t *testing.T) {
 		}
 	})
 
-	t.Run("non-adaptive shapes untouched", func(t *testing.T) {
+	t.Run("all shapes normalized to off", func(t *testing.T) {
 		resetStats()
 		setLow()
 		for _, body := range []string{
@@ -935,12 +934,17 @@ func TestMaybeRewriteClassifierLow(t *testing.T) {
 			`{"system":"You are a security monitor.","messages":[]}`,
 			`{"system":"You are judging one planned coding-agent action.","thinking":{"type":"enabled","budget_tokens":2048},"messages":[]}`,
 		} {
-			if out := maybeRewriteClassifier([]byte(body)); !bytes.Equal(out, []byte(body)) {
-				t.Errorf("non-adaptive shape should pass through untouched: %s", body)
+			out := maybeRewriteClassifier([]byte(body))
+			p := parseBody(t, out)
+			if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "disabled" {
+				t.Errorf("thinking=%v want disabled: %s", p["thinking"], body)
+			}
+			if p["reasoning_effort"] != "none" {
+				t.Errorf("reasoning_effort=%v want none: %s", p["reasoning_effort"], body)
 			}
 		}
-		if rw := stats.classifierRewrites.Load(); rw != 0 {
-			t.Errorf("rewrites=%d want 0 (no adaptive shape seen)", rw)
+		if rw := stats.classifierRewrites.Load(); rw != 4 {
+			t.Errorf("rewrites=%d want 4 (every shape off-normalized)", rw)
 		}
 	})
 }
@@ -991,15 +995,15 @@ func TestClassifierHitCounting(t *testing.T) {
 	post(codexCls)
 	check(4, 2, 2, 1, 2, 1, "off rewrites both sources")
 
-	// "low": only the adaptive guardian body is lowered; the budget-shaped CC body passes through.
+	// "low": both sources are off-normalized (the post-route upgrade then abandons at the 1024 floor: max_tokens 100).
 	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10, ClassifierRoute: &ClassifierRoute{URL: mock.URL, ClassifierThinking: "low"}})
 	post(ccCls)
 	post(codexCls)
-	check(6, 3, 3, 1, 3, 2, "low rewrites adaptive only")
+	check(6, 4, 3, 2, 3, 2, "low off-normalizes both sources")
 
 	// Non-classifier request: no counter rises.
 	post(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`)
-	check(6, 3, 3, 1, 3, 2, "ordinary request")
+	check(6, 4, 3, 2, 3, 2, "ordinary request")
 }
 
 // TestLogDataClassifierSplit verifies /__logs/data exposes the per-source classifier counters
@@ -2978,8 +2982,9 @@ func TestClassifierThinkingPerSource(t *testing.T) {
 		}
 		out = maybeRewriteClassifier(codexAdaptive)
 		p = parseBody(t, out)
-		if oc, _ := p["output_config"].(map[string]interface{}); oc["effort"] != "low" {
-			t.Errorf("codex falls back to shared low: output_config=%v want effort low", p["output_config"])
+		// Shared "low" fallback: the off phase runs here; the low upgrade happens post-routing in the handler.
+		if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "disabled" {
+			t.Errorf("codex falls back to shared low: thinking=%v want disabled (off phase)", p["thinking"])
 		}
 		if rwCC, rwCX := stats.classifierRewritesCC.Load(), stats.classifierRewritesCodex.Load(); rwCC != 1 || rwCX != 1 {
 			t.Errorf("rewrites CC/Codex = %d/%d, want 1/1", rwCC, rwCX)
@@ -2994,8 +2999,11 @@ func TestClassifierThinkingPerSource(t *testing.T) {
 		}
 		out := maybeRewriteClassifier(codexAdaptive)
 		p := parseBody(t, out)
-		if oc, _ := p["output_config"].(map[string]interface{}); oc["effort"] != "low" {
-			t.Errorf("codex override low: output_config=%v want effort low (appended)", p["output_config"])
+		if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "disabled" {
+			t.Errorf("codex override low: thinking=%v want disabled (off phase)", p["thinking"])
+		}
+		if p["reasoning_effort"] != "none" {
+			t.Errorf("codex override low: reasoning_effort=%v want none (appended)", p["reasoning_effort"])
 		}
 	})
 
@@ -3006,6 +3014,99 @@ func TestClassifierThinkingPerSource(t *testing.T) {
 		p := parseBody(t, out)
 		if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "disabled" {
 			t.Errorf("cc falls back to shared off: thinking=%v want disabled", p["thinking"])
+		}
+	})
+}
+
+// TestClassifierLowOffThenUpgrade locks the redefined classifier "low" policy end-to-end: any thinking shape is
+// first normalized to off, then the post-routing quiet upgrade sends low thinking upstream (adaptive-class model:
+// adaptive + effort low; budget-class: enabled + 2048 with the 1024 floor) while thinking blocks are stripped from
+// the response — the client sees a thinking-off reply. An abandoned upgrade (budget floor) leaves the request off.
+func TestClassifierLowOffThenUpgrade(t *testing.T) {
+	const thinkSSE = "event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"x\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"hmm\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"...\"}}\n\n" +
+		"event: content_block_stop\n" +
+		"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n" +
+		"event: content_block_stop\n" +
+		"data: {\"type\":\"content_block_stop\",\"index\":1}\n\n" +
+		"event: message_delta\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n" +
+		"event: message_stop\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+
+	run := func(t *testing.T, body string) (map[string]interface{}, []byte) {
+		t.Helper()
+		resetStats()
+		var upBody map[string]interface{}
+		mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &upBody)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(200)
+			io.WriteString(w, thinkSSE)
+		}))
+		defer mock.Close()
+		cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10,
+			ClassifierRoute: &ClassifierRoute{URL: mock.URL, ClassifierThinking: "low"}})
+		defer cfg.Store(&Config{})
+		proxy := httptest.NewServer(http.HandlerFunc(handler))
+		defer proxy.Close()
+		resp, err := http.Post(proxy.URL+"/v1/messages", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("post failed: %v", err)
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return upBody, respBody
+	}
+
+	t.Run("adaptive model: upgraded to adaptive low and stripped", func(t *testing.T) {
+		up, respBody := run(t, `{"model":"claude-fable-5","system":"You are a security monitor.","thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"max_tokens":4096,"messages":[{"role":"user","content":"hi"}]}`)
+		th := asObj(up["thinking"])
+		if objStr(th, "type") != "adaptive" {
+			t.Errorf("upstream thinking type=%v want adaptive", up["thinking"])
+		}
+		if objStr(asObj(up["output_config"]), "effort") != "low" {
+			t.Errorf("upstream output_config=%v want effort low", up["output_config"])
+		}
+		if up["reasoning_effort"] != "low" {
+			t.Errorf("upstream reasoning_effort=%v want low", up["reasoning_effort"])
+		}
+		if bytes.Contains(respBody, []byte("thinking_delta")) {
+			t.Errorf("response should be stripped of thinking blocks, got: %s", respBody)
+		}
+		if !bytes.Contains(respBody, []byte("text_delta")) {
+			t.Errorf("response should keep the text block, got: %s", respBody)
+		}
+	})
+
+	t.Run("budget model: upgraded to enabled 2048 and stripped", func(t *testing.T) {
+		up, respBody := run(t, `{"model":"x","system":"You are a security monitor.","thinking":{"type":"enabled","budget_tokens":8192},"max_tokens":4096,"messages":[{"role":"user","content":"hi"}]}`)
+		th := asObj(up["thinking"])
+		if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
+			t.Errorf("upstream thinking=%v want enabled/2048", up["thinking"])
+		}
+		if bytes.Contains(respBody, []byte("thinking_delta")) {
+			t.Errorf("response should be stripped of thinking blocks, got: %s", respBody)
+		}
+	})
+
+	t.Run("budget floor: upgrade abandoned, stays off unstripped", func(t *testing.T) {
+		up, respBody := run(t, `{"model":"x","system":"You are a security monitor.","thinking":{"type":"enabled","budget_tokens":8192},"max_tokens":1000,"messages":[{"role":"user","content":"hi"}]}`)
+		th := asObj(up["thinking"])
+		if objStr(th, "type") != "disabled" {
+			t.Errorf("upstream thinking=%v want disabled (abandoned upgrade)", up["thinking"])
+		}
+		if !bytes.Contains(respBody, []byte("thinking_delta")) {
+			t.Errorf("abandoned upgrade must NOT strip (request genuinely went out thinking-off), got: %s", respBody)
 		}
 	})
 }

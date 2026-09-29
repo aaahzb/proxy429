@@ -2426,15 +2426,14 @@ func lastCloseBrace(body []byte) int {
 }
 
 // applyClassifierEdits performs text replacements/deletions/appends on the original body, touching only the target fields and preserving every other byte.
-// Off mode: thinking->{"type":"disabled"}, reasoning_effort->"none", reasoning->deleted.
-// Low mode (adaptive thinking kept): output_config->{"effort":"low"}, reasoning_effort->"low", reasoning->deleted; the thinking field itself is left untouched.
+// thinking->{"type":"disabled"}, reasoning_effort->"none", reasoning->deleted.
 // Fields absent from the original are appended before the top-level closing }. Edits are spliced by ascending start, all based on the original body, without interfering with each other.
-func applyClassifierEdits(body []byte, spans []fieldSpan, lowMode bool) []byte {
+func applyClassifierEdits(body []byte, spans []fieldSpan) []byte {
 	have := map[string]*fieldSpan{}
 	for i := range spans {
 		s := &spans[i]
 		switch s.name {
-		case "thinking", "reasoning_effort", "reasoning", "output_config", "max_tokens":
+		case "thinking", "reasoning_effort", "reasoning":
 			have[s.name] = s
 		}
 	}
@@ -2445,49 +2444,28 @@ func applyClassifierEdits(body []byte, spans []fieldSpan, lowMode bool) []byte {
 	}
 	var edits []edit
 
-	// Replace/delete existing target fields (reasoning is deleted in both modes)
+	// Replace/delete existing target fields
 	if r, ok := have["reasoning"]; ok {
 		ds, de := fieldDeleteRange(body, r)
 		edits = append(edits, edit{ds, de, nil})
 	}
-	if lowMode {
-		if oc, ok := have["output_config"]; ok {
-			edits = append(edits, edit{oc.valStart, oc.valEnd, []byte(`{"effort":"low"}`)})
-		}
-		if re, ok := have["reasoning_effort"]; ok {
-			edits = append(edits, edit{re.valStart, re.valEnd, []byte(`"low"`)})
-		}
-	} else {
-		if t, ok := have["thinking"]; ok {
-			edits = append(edits, edit{t.valStart, t.valEnd, []byte(`{"type":"disabled"}`)})
-		}
-		if re, ok := have["reasoning_effort"]; ok {
-			edits = append(edits, edit{re.valStart, re.valEnd, []byte(`"none"`)})
-		}
+	if t, ok := have["thinking"]; ok {
+		edits = append(edits, edit{t.valStart, t.valEnd, []byte(`{"type":"disabled"}`)})
+	}
+	if re, ok := have["reasoning_effort"]; ok {
+		edits = append(edits, edit{re.valStart, re.valEnd, []byte(`"none"`)})
 	}
 
 	// Append fields absent from the original body: inserted before the top-level closing } (original field order preserved, new fields at the end)
 	var appendFields []byte
-	if lowMode {
-		if _, ok := have["output_config"]; !ok {
-			appendFields = append(appendFields, []byte(`"output_config":{"effort":"low"}`)...)
+	if _, ok := have["thinking"]; !ok {
+		appendFields = append(appendFields, []byte(`"thinking":{"type":"disabled"}`)...)
+	}
+	if _, ok := have["reasoning_effort"]; !ok {
+		if len(appendFields) > 0 {
+			appendFields = append(appendFields, ',')
 		}
-		if _, ok := have["reasoning_effort"]; !ok {
-			if len(appendFields) > 0 {
-				appendFields = append(appendFields, ',')
-			}
-			appendFields = append(appendFields, []byte(`"reasoning_effort":"low"`)...)
-		}
-	} else {
-		if _, ok := have["thinking"]; !ok {
-			appendFields = append(appendFields, []byte(`"thinking":{"type":"disabled"}`)...)
-		}
-		if _, ok := have["reasoning_effort"]; !ok {
-			if len(appendFields) > 0 {
-				appendFields = append(appendFields, ',')
-			}
-			appendFields = append(appendFields, []byte(`"reasoning_effort":"none"`)...)
-		}
+		appendFields = append(appendFields, []byte(`"reasoning_effort":"none"`)...)
 	}
 	if len(appendFields) > 0 {
 		braceOff := bytes.IndexByte(body, '{')
@@ -2823,17 +2801,6 @@ func classifierThinkingModeFor(c *Config, kind classifierSource) string {
 	return c.ClassifierRoute.ClassifierThinking
 }
 
-// classifierThinkingAdaptive reports whether the body carries adaptive thinking, the only shape the "low" policy rewrites.
-// It checks the located thinking field's raw value text, so JSON whitespace variations don't matter.
-func classifierThinkingAdaptive(body []byte, spans []fieldSpan) bool {
-	for i := range spans {
-		if spans[i].name == "thinking" {
-			return bytes.Contains(body[spans[i].valStart:spans[i].valEnd], []byte(`"adaptive"`))
-		}
-	}
-	return false
-}
-
 // classifierTag returns the per-source log tag fragment ("(codex)" for Codex guardian hits, "" for Claude Code).
 func classifierTag(kind classifierSource) string {
 	if kind == classifierCodex {
@@ -2843,7 +2810,8 @@ func classifierTag(kind classifierSource) string {
 }
 
 // maybeRewriteClassifier applies the configured thinking policy when a classifier request matches, so classification returns fast.
-// "off" disables thinking; "low" keeps adaptive thinking but lowers effort to low (non-adaptive shapes pass through untouched).
+// Both policies first normalize thinking to off; under "low" the post-routing upgrade point then quietly raises it to low
+// upstream (that step needs the final model, which routing settles later) and thinking blocks are stripped from the response.
 // A bytes.Contains pre-filter keeps normal requests away from JSON parsing — near-zero cost.
 // On a match, json.Decoder streaming-locates the target fields' byte positions, then text replacement — no wholesale re-serialization;
 // untouched fields keep their exact bytes (key order and formatting included), preserving upstream cache hits.
@@ -2860,20 +2828,12 @@ func maybeRewriteClassifier(body []byte) []byte {
 	if !ok {
 		return body
 	}
-	lowMode := mode == "low"
-	if lowMode && !classifierThinkingAdaptive(body, spans) {
-		return body // "low" rewrites adaptive thinking only; every other shape passes through untouched
-	}
-	newBody := applyClassifierEdits(body, spans, lowMode)
+	newBody := applyClassifierEdits(body, spans)
 	if len(newBody) == len(body) && bytes.Equal(newBody, body) {
 		return body
 	}
-	if lowMode {
-		log.Printf("[rewrite] classifier%s signature hit; thinking lowered to adaptive low (body %d->%d bytes)", classifierTag(kind), len(body), len(newBody))
-	} else {
-		log.Printf("[rewrite] classifier%s signature hit; thinking disabled (body %d->%d bytes)", classifierTag(kind), len(body), len(newBody))
-	}
-	stats.classifierRewrites.Add(1) // Live status row count: classifier thinking rewrites (off or low)
+	log.Printf("[rewrite] classifier%s signature hit; thinking disabled (body %d->%d bytes)", classifierTag(kind), len(body), len(newBody))
+	stats.classifierRewrites.Add(1) // Live status row count: classifier thinking rewrites (off, or the off phase of low)
 	if kind == classifierCodex {
 		stats.classifierRewritesCodex.Add(1)
 	} else {
@@ -4989,21 +4949,31 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// convertOff2Low="all" native-port upgrade: an explicit downstream thinking-off is quietly sent upstream as low thinking,
-	// with thinking blocks stripped from the response (the client stays unaware). The classifier's thinking is governed by
-	// classifier_thinking exclusively, and Responses-port requests already carry their own upgrade decision via ctx — both excluded.
-	if convFlag == "all" && clsKind == classifierNone && f.translated == "" && r.URL.Path == "/v1/messages" {
+	// with thinking blocks stripped from the response (the client stays unaware). Other Responses-port requests already carry
+	// their own upgrade decision via ctx. The classifier "low" policy composes the same machinery (clsLow): maybeRewriteClassifier
+	// already normalized thinking to off above, and the upgrade here raises it to low against the final post-routing model.
+	clsLow := clsKind != classifierNone && classifierThinkingModeFor(c, clsKind) == "low"
+	if clsLow || (convFlag == "all" && clsKind == classifierNone && f.translated == "" && r.URL.Path == "/v1/messages") {
 		effModel := targetModel
 		if effModel == "" {
 			effModel = origModel
 		}
 		if nb, upgraded, abandoned := maybeUpgradeOffToLow(body, effModel); upgraded {
-			log.Printf("[off->low] #%d explicit thinking-off quietly upgraded to low thinking (body %d->%d bytes); thinking blocks stripped on return", f.id, len(body), len(nb))
+			if clsLow {
+				log.Printf("[off->low] #%d classifier%s thinking-off quietly upgraded to low thinking (body %d->%d bytes); thinking blocks stripped on return", f.id, classifierTag(clsKind), len(body), len(nb))
+			} else {
+				log.Printf("[off->low] #%d explicit thinking-off quietly upgraded to low thinking (body %d->%d bytes); thinking blocks stripped on return", f.id, len(body), len(nb))
+			}
 			body = nb
 			n2lMode = n2lStealth // Reuses the one-shot 400 fallback below (retreat to thinking-off if the upstream rejects thinking)
 			f.think = "off->low"
 			f.stripThinking.Store(true)
 		} else if abandoned {
-			log.Printf("[off->low] #%d upgrade abandoned: max_tokens too small for the 1024-token budget floor; request stays thinking-off", f.id)
+			if clsLow {
+				log.Printf("[off->low] #%d classifier%s upgrade abandoned: max_tokens too small for the 1024-token budget floor; request stays thinking-off", f.id, classifierTag(clsKind))
+			} else {
+				log.Printf("[off->low] #%d upgrade abandoned: max_tokens too small for the 1024-token budget floor; request stays thinking-off", f.id)
+			}
 		}
 	}
 
