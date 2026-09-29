@@ -1183,6 +1183,16 @@ func TestLoadConfigEnumValidation(t *testing.T) {
 	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"medium"}}`)); err == nil {
 		t.Errorf("classifier_thinking=medium should be rejected (only off/low)")
 	}
+	// Per-source overrides accept ""/"off"/"low" as well; anything else is rejected.
+	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking_cc":"off","classifier_thinking_codex":"low"}}`)); err != nil {
+		t.Errorf("per-source overrides off/low should be legal: %v", err)
+	}
+	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking_codex":"medium"}}`)); err == nil {
+		t.Errorf("classifier_thinking_codex=medium should be rejected (only off/low)")
+	}
+	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking_cc":"medium"}}`)); err == nil {
+		t.Errorf("classifier_thinking_cc=medium should be rejected (only off/low)")
+	}
 	// convertOff2Low: translate/all legal on all four kinds...
 	good := []string{
 		`{"upstream":"http://x","routes":[{"pattern":"m*","url":"http://y","convertOff2Low":"translate"}]}`,
@@ -2949,4 +2959,53 @@ func TestWriteSSEErrorGaveUp(t *testing.T) {
 	if s := rec2.Body.String(); !strings.Contains(s, "response.failed") {
 		t.Errorf("responses-raw 兜底事件形态不对: %q", s)
 	}
+}
+
+// TestClassifierThinkingPerSource verifies the per-source overrides: classifier_thinking_cc / classifier_thinking_codex
+// win over the shared classifier_thinking for their own source; an unset override falls back to the shared value,
+// and with neither set the source's requests pass through with thinking untouched.
+func TestClassifierThinkingPerSource(t *testing.T) {
+	ccAdaptive := []byte(`{"system":"You are a security monitor.","thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"messages":[]}`)
+	codexAdaptive := []byte(`{"system":"You are judging one planned coding-agent action.","thinking":{"type":"adaptive"},"messages":[]}`)
+
+	t.Run("cc override off wins over shared low", func(t *testing.T) {
+		resetStats()
+		cfg.Store(&Config{ClassifierRoute: &ClassifierRoute{ClassifierThinking: "low", ClassifierThinkingCC: "off"}})
+		out := maybeRewriteClassifier(ccAdaptive)
+		p := parseBody(t, out)
+		if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "disabled" {
+			t.Errorf("cc override off should disable thinking, got %v", p["thinking"])
+		}
+		out = maybeRewriteClassifier(codexAdaptive)
+		p = parseBody(t, out)
+		if oc, _ := p["output_config"].(map[string]interface{}); oc["effort"] != "low" {
+			t.Errorf("codex falls back to shared low: output_config=%v want effort low", p["output_config"])
+		}
+		if rwCC, rwCX := stats.classifierRewritesCC.Load(), stats.classifierRewritesCodex.Load(); rwCC != 1 || rwCX != 1 {
+			t.Errorf("rewrites CC/Codex = %d/%d, want 1/1", rwCC, rwCX)
+		}
+	})
+
+	t.Run("codex-only policy leaves cc untouched", func(t *testing.T) {
+		resetStats()
+		cfg.Store(&Config{ClassifierRoute: &ClassifierRoute{ClassifierThinkingCodex: "low"}})
+		if out := maybeRewriteClassifier(ccAdaptive); !bytes.Equal(out, ccAdaptive) {
+			t.Errorf("cc has no effective policy (shared unset, cc override unset): should pass through untouched")
+		}
+		out := maybeRewriteClassifier(codexAdaptive)
+		p := parseBody(t, out)
+		if oc, _ := p["output_config"].(map[string]interface{}); oc["effort"] != "low" {
+			t.Errorf("codex override low: output_config=%v want effort low (appended)", p["output_config"])
+		}
+	})
+
+	t.Run("empty override falls back to shared, not to empty", func(t *testing.T) {
+		resetStats()
+		cfg.Store(&Config{ClassifierRoute: &ClassifierRoute{ClassifierThinking: "off", ClassifierThinkingCodex: "low"}})
+		out := maybeRewriteClassifier(ccAdaptive)
+		p := parseBody(t, out)
+		if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "disabled" {
+			t.Errorf("cc falls back to shared off: thinking=%v want disabled", p["thinking"])
+		}
+	})
 }

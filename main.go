@@ -95,10 +95,12 @@ type EnhanceSearchConfig struct {
 // ClassifierRoute defines the dedicated route for classifier requests: requests matching the classifier (safety check) signature
 // are routed to the specified upstream regardless of the original model. Used to push Claude Code's lightweight safety checks to a cheap model, saving main-model quota.
 type ClassifierRoute struct {
-	URL                string `json:"url"`                           // Target upstream base URL
-	API                string `json:"api"`                           // Target API key; empty = pass through the client's token
-	Model              string `json:"model"`                         // Target model name to rewrite to; empty = leave the model field unchanged
-	ClassifierThinking string `json:"classifier_thinking,omitempty"` // Classifier thinking policy: ""/unset = leave the request's thinking untouched; "off" = rewrite the body to thinking-off so classification returns fast; "low" = lower adaptive thinking to effort low (non-adaptive shapes pass through untouched)
+	URL                     string `json:"url"`                                 // Target upstream base URL
+	API                     string `json:"api"`                                 // Target API key; empty = pass through the client's token
+	Model                   string `json:"model"`                               // Target model name to rewrite to; empty = leave the model field unchanged
+	ClassifierThinking      string `json:"classifier_thinking,omitempty"`       // Shared classifier thinking policy: ""/unset = leave the request's thinking untouched; "off" = rewrite the body to thinking-off so classification returns fast; "low" = lower adaptive thinking to effort low (non-adaptive shapes pass through untouched)
+	ClassifierThinkingCC    string `json:"classifier_thinking_cc,omitempty"`    // Claude Code override of classifier_thinking; unset = fall back to the shared value
+	ClassifierThinkingCodex string `json:"classifier_thinking_codex,omitempty"` // Codex guardian override of classifier_thinking; unset = fall back to the shared value
 }
 
 // FastRoute defines the dedicated route for fast-mode requests: non-classifier requests carrying "speed":"fast" go to the specified upstream.
@@ -276,6 +278,16 @@ func validateConfigEnums(c *Config) error {
 		case "", "off", "low":
 		default:
 			return fmt.Errorf("classifier_route has invalid classifier_thinking value %q: only \"off\" and \"low\" are supported (unset = leave the request's thinking untouched)", cr.ClassifierThinking)
+		}
+		switch cr.ClassifierThinkingCC {
+		case "", "off", "low":
+		default:
+			return fmt.Errorf("classifier_route has invalid classifier_thinking_cc value %q: only \"off\" and \"low\" are supported (unset = fall back to classifier_thinking)", cr.ClassifierThinkingCC)
+		}
+		switch cr.ClassifierThinkingCodex {
+		case "", "off", "low":
+		default:
+			return fmt.Errorf("classifier_route has invalid classifier_thinking_codex value %q: only \"off\" and \"low\" are supported (unset = fall back to classifier_thinking)", cr.ClassifierThinkingCodex)
 		}
 	}
 	checkOff2Low := func(owner, v string) error {
@@ -552,8 +564,8 @@ func reloadConfig() error {
 	cfg.Store(c)
 	setConfigWarnings(warns)
 	reconcileResponsesServer(c.ResponsesListen) // Responses port starts/stops dynamically with config reload
-	log.Printf("[reload] config reloaded: http://%s -> %s (max retries %d, classifier thinking=%q, removed-key warnings=%d)",
-		c.Listen, c.Upstream, c.MaxRetries, classifierThinkingMode(c), len(warns))
+	log.Printf("[reload] config reloaded: http://%s -> %s (max retries %d, classifier thinking: cc=%q codex=%q, removed-key warnings=%d)",
+		c.Listen, c.Upstream, c.MaxRetries, classifierThinkingModeFor(c, classifierCC), classifierThinkingModeFor(c, classifierCodex), len(warns))
 	return nil
 }
 
@@ -2795,11 +2807,18 @@ func detectClassifier(body []byte) classifierSource {
 	return classifierNone
 }
 
-// classifierThinkingMode reports the thinking rewrite policy for classifier requests
-// (classifier_route.classifier_thinking: "off"/"low"; unset or no classifier_route = the request's thinking goes through untouched).
-func classifierThinkingMode(c *Config) string {
+// classifierThinkingModeFor resolves the effective thinking policy for a classifier source:
+// the per-source override (classifier_thinking_cc / classifier_thinking_codex) wins;
+// unset falls back to the shared classifier_thinking; "" = the request's thinking goes through untouched.
+func classifierThinkingModeFor(c *Config, kind classifierSource) string {
 	if c.ClassifierRoute == nil {
 		return ""
+	}
+	if kind == classifierCodex && c.ClassifierRoute.ClassifierThinkingCodex != "" {
+		return c.ClassifierRoute.ClassifierThinkingCodex
+	}
+	if kind == classifierCC && c.ClassifierRoute.ClassifierThinkingCC != "" {
+		return c.ClassifierRoute.ClassifierThinkingCC
 	}
 	return c.ClassifierRoute.ClassifierThinking
 }
@@ -2829,12 +2848,12 @@ func classifierTag(kind classifierSource) string {
 // On a match, json.Decoder streaming-locates the target fields' byte positions, then text replacement — no wholesale re-serialization;
 // untouched fields keep their exact bytes (key order and formatting included), preserving upstream cache hits.
 func maybeRewriteClassifier(body []byte) []byte {
-	mode := classifierThinkingMode(cfg.Load())
-	if mode == "" {
-		return body
-	}
 	kind := detectClassifier(body)
 	if kind == classifierNone {
+		return body
+	}
+	mode := classifierThinkingModeFor(cfg.Load(), kind)
+	if mode == "" {
 		return body
 	}
 	spans, ok := locateTopFields(body)
@@ -5348,8 +5367,8 @@ func main() {
 		log.Printf("[config] WARNING: %s (the key is inert; the proxy runs without its old behavior)", removedKeyWarningEN(k))
 	}
 
-	log.Printf("proxy started v%s: listening http://%s -> forwarding to %s (max retries %d, classifier thinking=%q)",
-		Version, c.Listen, c.Upstream, c.MaxRetries, classifierThinkingMode(c))
+	log.Printf("proxy started v%s: listening http://%s -> forwarding to %s (max retries %d, classifier thinking: cc=%q codex=%q)",
+		Version, c.Listen, c.Upstream, c.MaxRetries, classifierThinkingModeFor(c, classifierCC), classifierThinkingModeFor(c, classifierCodex))
 
 	// The HTTP server runs in a goroutine: the tray event loop (systray.Run) must occupy the main thread (macOS requires UI on the main thread),
 	// so the main thread's blocking spot belongs to the tray and HTTP runs in the background.

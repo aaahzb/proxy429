@@ -97,7 +97,7 @@ open release/Proxy429.app
 ./release/proxy429
 ```
 
-The startup log (containing `proxy started vc639d56-1606: listening http://127.0.0.1:8080 -> forwarding to https://ark.cn-beijing.volces.com/api/plan (max retries 5, classifier thinking="off")`, where `v` is followed by the version = git short hash + build HHMM) goes to the in-memory ring buffer and can be read on the web console's Logs tab; it's also written to `log_file` when that is non-empty.
+The startup log (containing `proxy started vc639d56-1606: listening http://127.0.0.1:8080 -> forwarding to https://ark.cn-beijing.volces.com/api/plan (max retries 5, classifier thinking: cc="off" codex="off")`, where `v` is followed by the version = git short hash + build HHMM) goes to the in-memory ring buffer and can be read on the web console's Logs tab; it's also written to `log_file` when that is non-empty.
 
 > By default `resolveConfigPath` resolves the config path as: `-config` flag > `./config.json` in the current directory (if present) > `os.UserConfigDir()/proxy429/config.json` (macOS `~/Library/Application Support/proxy429/`, Linux `~/.config/proxy429/`, Windows `%AppData%/proxy429/`). On first run without a config, one is generated from the embedded `config.example.json`. For local mock testing use `-config test/config_test.json` — see "Local testing" below.
 >
@@ -194,6 +194,7 @@ With `"classifier_thinking"` set on `classifier_route` (unset = the request's th
 - **Rewrite (policy `"off"`)**: sets `thinking:{type:"disabled"}` + `reasoning_effort:"none"` + deletes `reasoning` (three fields as belt-and-braces, covering both Anthropic and OpenAI formats). `max_tokens` is never touched.
 - **Rewrite (policy `"low"`)**: only when the request already carries `thinking:{type:"adaptive"}` — thinking stays adaptive, `output_config` becomes `{"effort":"low"}`, `reasoning_effort` becomes `"low"`, and `reasoning` is deleted; fields absent from the original body are appended. Non-adaptive shapes (enabled budget / disabled / no thinking field) pass through untouched.
 - **Key order preserved**: the rewrite uses `json.Decoder` streaming to locate the target fields' byte positions in the original body, then does textual replacement — only the target fields are touched; every other byte (key order, spacing, formatting) is preserved as-is, with no wholesale `Unmarshal`+`Marshal` (that would make Go reorder all keys alphabetically and could hurt upstream cache hits). Fields absent from the original body (like `reasoning_effort`) are appended before the closing `}`.
+- **Per-source override**: `classifier_thinking_cc` / `classifier_thinking_codex` override the shared policy for Claude Code / Codex guardian requests respectively (unset = fall back to the shared value) — e.g. Codex guardian kept at `"low"` while Claude Code stays `"off"`.
 - **Content-Length**: the rewritten body length differs, and the proxy recomputes the length from the new body (`copyHeaders` skips the original Content-Length) — no truncation.
 
 ### Confirming it works
@@ -260,7 +261,7 @@ Config (sibling of `routes`; an object, not an array):
 ```
 
 - **url / api / model**: same meanings as the like-named fields in `routes`. With `url` empty the classifier is **not** rerouted (it follows `routes`/the default upstream as if no classifier route existed) — handy for configuring `classifier_thinking` alone.
-- **classifier_thinking**: `"off"` = rewrite classifier requests to thinking-off; `"low"` = keep adaptive thinking but lower it to effort low (non-adaptive shapes pass through untouched); unset = the request's thinking passes through untouched (both are the feature in "Classifier requests: automatic thinking rewrite" above). Only `"off"` and `"low"` are supported; any other value fails config load with an error.
+- **classifier_thinking**: `"off"` = rewrite classifier requests to thinking-off; `"low"` = keep adaptive thinking but lower it to effort low (non-adaptive shapes pass through untouched); unset = the request's thinking passes through untouched (both are the feature in "Classifier requests: automatic thinking rewrite" above). Only `"off"` and `"low"` are supported; any other value fails config load with an error. The per-source keys `classifier_thinking_cc` (Claude Code) and `classifier_thinking_codex` (Codex guardian) override it for their own source — unset falls back to the shared value.
 - **Priority**: on a classifier hit with `classifier_route` configured, the original model is **ignored** — the classifier route is taken and `routes` is not consulted. On a classifier hit **without** `classifier_route`, it falls back to model-based `routes` matching (compatible with old behavior).
 - **Independence**: the rerouting (url/api/model) and the thinking rewrite (`classifier_thinking`) switch independently within the same object — either works without the other.
 - A hit logs `[route] #N classifier <original model> -> <url> (model <original> -> <target>)` — Codex guardian hits are tagged `classifier(codex)` — distinguishing it from ordinary model routes. Also hot-reloaded via the web console.
