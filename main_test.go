@@ -995,7 +995,8 @@ func TestClassifierHitCounting(t *testing.T) {
 	post(codexCls)
 	check(4, 2, 2, 1, 2, 1, "off rewrites both sources")
 
-	// "low": both sources are off-normalized (the post-route upgrade then abandons at the 1024 floor: max_tokens 100).
+	// "low": both sources are off-normalized, then quietly upgraded (max_tokens 100 is under the 2048 floor-fit
+	// threshold: the classifier path bumps max_tokens by 1024 instead of abandoning).
 	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10, ClassifierRoute: &ClassifierRoute{URL: mock.URL, ClassifierThinking: "low"}})
 	post(ccCls)
 	post(codexCls)
@@ -3021,7 +3022,8 @@ func TestClassifierThinkingPerSource(t *testing.T) {
 // TestClassifierLowOffThenUpgrade locks the redefined classifier "low" policy end-to-end: any thinking shape is
 // first normalized to off, then the post-routing quiet upgrade sends low thinking upstream (adaptive-class model:
 // adaptive + effort low; budget-class: enabled + 2048 with the 1024 floor) while thinking blocks are stripped from
-// the response — the client sees a thinking-off reply. An abandoned upgrade (budget floor) leaves the request off.
+// the response — the client sees a thinking-off reply. When the floor can't fit a tiny max_tokens, the classifier
+// path raises max_tokens by 1024 upstream-side (budget exactly 1024) instead of abandoning; the client never sees it.
 func TestClassifierLowOffThenUpgrade(t *testing.T) {
 	const thinkSSE = "event: message_start\n" +
 		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"x\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n" +
@@ -3099,14 +3101,17 @@ func TestClassifierLowOffThenUpgrade(t *testing.T) {
 		}
 	})
 
-	t.Run("budget floor: upgrade abandoned, stays off unstripped", func(t *testing.T) {
+	t.Run("budget floor: max_tokens bumped +1024, upgraded and stripped", func(t *testing.T) {
 		up, respBody := run(t, `{"model":"x","system":"You are a security monitor.","thinking":{"type":"enabled","budget_tokens":8192},"max_tokens":1000,"messages":[{"role":"user","content":"hi"}]}`)
 		th := asObj(up["thinking"])
-		if objStr(th, "type") != "disabled" {
-			t.Errorf("upstream thinking=%v want disabled (abandoned upgrade)", up["thinking"])
+		if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 1024 {
+			t.Errorf("upstream thinking=%v want enabled/1024 (floor bump)", up["thinking"])
 		}
-		if !bytes.Contains(respBody, []byte("thinking_delta")) {
-			t.Errorf("abandoned upgrade must NOT strip (request genuinely went out thinking-off), got: %s", respBody)
+		if toInt64(up["max_tokens"]) != 2024 {
+			t.Errorf("upstream max_tokens=%v want 2024 (1000+1024)", up["max_tokens"])
+		}
+		if bytes.Contains(respBody, []byte("thinking_delta")) {
+			t.Errorf("bumped upgrade must strip (request went out thinking-low), got: %s", respBody)
 		}
 	})
 }

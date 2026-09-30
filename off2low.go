@@ -13,10 +13,17 @@ import (
 	"strings"
 )
 
+// lowBudgetFloor is the Anthropic API's minimum budget_tokens; the budget counts inside max_tokens, so a budget
+// model needs max_tokens > 1024 to think at all. lowThinkingBudget refuses below it; the classifier-low path
+// (floorBump in maybeUpgradeOffToLow) instead raises max_tokens by exactly this much, the client's answer room
+// riding on top untouched.
+const lowBudgetFloor = 1024
+
 // lowThinkingBudget computes budget_tokens for a quiet low upgrade: 2048 capped at max_tokens/2;
-// ok=false when even the 1024 floor doesn't fit (the caller keeps thinking off). maxTokens<=0
-// (field absent or unparseable) means no ceiling. Shared by the translation port (upgradeNoneToLow)
-// and the native port (maybeUpgradeOffToLow) so both ports pick the same shape.
+// ok=false when even the 1024 floor doesn't fit (the caller keeps thinking off — or, on the classifier-low
+// path, raises max_tokens by the floor and upgrades anyway). maxTokens<=0 (field absent or unparseable)
+// means no ceiling. Shared by the translation port (upgradeNoneToLow) and the native port
+// (maybeUpgradeOffToLow) so both ports pick the same shape.
 func lowThinkingBudget(maxTokens int64) (budget int64, ok bool) {
 	b := effortToThinkingBudget("low")
 	if maxTokens > 0 {
@@ -24,7 +31,7 @@ func lowThinkingBudget(maxTokens int64) (budget int64, ok bool) {
 			b = ceiling
 		}
 	}
-	if b < 1024 {
+	if b < lowBudgetFloor {
 		return 0, false
 	}
 	return b, true
@@ -35,16 +42,20 @@ func lowThinkingBudget(maxTokens int64) (budget int64, ok bool) {
 // word (none/off/disabled). A request carrying no explicit off signal passes through untouched.
 // Shape: adaptive models (usesAdaptiveThinking) get thinking:{"type":"adaptive"}+output_config:{"effort":"low"};
 // budget models get thinking:{"type":"enabled","budget_tokens":N} from lowThinkingBudget — when the 1024 floor doesn't
-// fit, the upgrade is abandoned (abandoned=true, body untouched, the caller logs and stays off).
+// fit, the upgrade is abandoned (abandoned=true, body untouched, the caller logs and stays off), UNLESS floorBump is
+// on (the classifier-low path; convertOff2Low passes false): then max_tokens is raised by exactly lowBudgetFloor
+// upstream-side and the budget is the floor itself (the half-max cap would clamp below it, so it does not apply to a
+// bumped request; the client's answer room rides on top untouched and never sees the raised cap). Adaptive models get
+// the same raise under the same <2*floor size threshold so low thinking can't starve the answer. bumped reports the raise.
 // On upgrade: reasoning deleted, reasoning_effort set to "low" (set or appended — belt-and-braces for
 // OpenAI-vocabulary upstreams, mirroring the classifier rewrite's "none"), temperature/top_p deleted
 // (thinking-on forbids sampling knobs, same rule as the translation port). All edits go through
 // setTopLevelJSONValue: positional, every other field's bytes and order preserved.
-// Returns (newBody, upgraded, abandoned); newBody is the original body when upgraded=false.
-func maybeUpgradeOffToLow(body []byte, effModel string) (newBody []byte, upgraded, abandoned bool) {
+// Returns (newBody, upgraded, abandoned, bumped); newBody is the original body when upgraded=false.
+func maybeUpgradeOffToLow(body []byte, effModel string, floorBump bool) (newBody []byte, upgraded, abandoned, bumped bool) {
 	spans, ok := locateTopFields(body)
 	if !ok {
-		return body, false, false
+		return body, false, false, false
 	}
 	var thinkVal, effortVal []byte
 	var maxTokens int64
@@ -67,22 +78,37 @@ func maybeUpgradeOffToLow(body []byte, effModel string) (newBody []byte, upgrade
 		explicitOff = reasoningExplicitlyDisabled(strings.Trim(string(effortVal), `"`))
 	}
 	if !explicitOff {
-		return body, false, false
+		return body, false, false, false
 	}
 	var thinkingJSON, outputConfigJSON []byte
+	var raisedMaxTokens int64
 	if usesAdaptiveThinking(effModel) {
 		thinkingJSON = []byte(`{"type":"adaptive"}`)
 		outputConfigJSON = []byte(`{"effort":"low"}`)
+		// No budget floor on this shape, but a tiny max_tokens would let even low thinking starve the answer:
+		// the classifier-low path raises it by the floor, same size threshold as the budget branch.
+		if floorBump && maxTokens > 0 && maxTokens < 2*lowBudgetFloor {
+			raisedMaxTokens = maxTokens + lowBudgetFloor
+		}
 	} else {
 		b, ok := lowThinkingBudget(maxTokens)
 		if !ok {
-			return body, false, true
+			if !floorBump {
+				return body, false, true, false
+			}
+			// Classifier-low path (guardian requests arrive with max_tokens as small as 64): raise max_tokens
+			// by the floor instead of abandoning; budget = the floor itself, answer room untouched on top.
+			b = lowBudgetFloor
+			raisedMaxTokens = maxTokens + lowBudgetFloor
 		}
 		thinkingJSON = []byte(fmt.Sprintf(`{"type":"enabled","budget_tokens":%d}`, b))
 	}
 	nb, ok := setTopLevelJSONValue(body, "thinking", thinkingJSON)
 	if !ok {
-		return body, false, false
+		return body, false, false, false
+	}
+	if raisedMaxTokens > 0 {
+		nb, _ = setTopLevelJSONValue(nb, "max_tokens", []byte(strconv.FormatInt(raisedMaxTokens, 10)))
 	}
 	if outputConfigJSON != nil {
 		nb, _ = setTopLevelJSONValue(nb, "output_config", outputConfigJSON)
@@ -93,7 +119,7 @@ func maybeUpgradeOffToLow(body []byte, effModel string) (newBody []byte, upgrade
 	nb, _ = setTopLevelJSONValue(nb, "reasoning", nil)   // Responses-vocabulary field: gone
 	nb, _ = setTopLevelJSONValue(nb, "temperature", nil) // Thinking-on forbids sampling knobs upstream-side
 	nb, _ = setTopLevelJSONValue(nb, "top_p", nil)
-	return nb, true, false
+	return nb, true, false, raisedMaxTokens > 0
 }
 
 // thinkingStripper removes thinking/redacted_thinking blocks from an Anthropic response (the response half of a

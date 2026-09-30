@@ -30,7 +30,7 @@ func TestLowThinkingBudget(t *testing.T) {
 // max_tokens/2), adaptive models get adaptive+output_config.effort:"low".
 func TestUpgradeOffToLowShapes(t *testing.T) {
 	// Budget shape.
-	nb, up, ab := maybeUpgradeOffToLow([]byte(`{"model":"m","max_tokens":8192,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash")
+	nb, up, ab, _ := maybeUpgradeOffToLow([]byte(`{"model":"m","max_tokens":8192,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", false)
 	if !up || ab {
 		t.Fatalf("budget 模型应升级: up=%v ab=%v", up, ab)
 	}
@@ -50,7 +50,7 @@ func TestUpgradeOffToLowShapes(t *testing.T) {
 	}
 
 	// Budget cap: 3000/2=1500.
-	nb, up, _ = maybeUpgradeOffToLow([]byte(`{"max_tokens":3000,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash")
+	nb, up, _, _ = maybeUpgradeOffToLow([]byte(`{"max_tokens":3000,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", false)
 	if !up {
 		t.Fatal("应升级")
 	}
@@ -60,7 +60,7 @@ func TestUpgradeOffToLowShapes(t *testing.T) {
 	}
 
 	// Adaptive shape: output_config is replaced in place with effort:"low".
-	nb, up, _ = maybeUpgradeOffToLow([]byte(`{"max_tokens":8192,"thinking":{"type":"disabled"},"output_config":{"effort":"high"}}`), "claude-sonnet-5")
+	nb, up, _, _ = maybeUpgradeOffToLow([]byte(`{"max_tokens":8192,"thinking":{"type":"disabled"},"output_config":{"effort":"high"}}`), "claude-sonnet-5", false)
 	if !up {
 		t.Fatal("adaptive 模型应升级")
 	}
@@ -92,7 +92,7 @@ func TestUpgradeOffToLowDetection(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			nb, up, ab := maybeUpgradeOffToLow([]byte(tc.body), "deepseek-v4-flash")
+			nb, up, ab, _ := maybeUpgradeOffToLow([]byte(tc.body), "deepseek-v4-flash", false)
 			if up != tc.wantUp || ab {
 				t.Errorf("up=%v ab=%v, want up=%v ab=false", up, ab, tc.wantUp)
 			}
@@ -103,19 +103,117 @@ func TestUpgradeOffToLowDetection(t *testing.T) {
 	}
 }
 
-// TestUpgradeOffToLowGuard: the budget-floor guard abandons the upgrade (max_tokens too small), body byte-untouched.
+// TestUpgradeOffToLowGuard: with floorBump off (the convertOff2Low path), the budget-floor guard abandons the
+// upgrade (max_tokens too small), body byte-untouched.
 func TestUpgradeOffToLowGuard(t *testing.T) {
 	body := `{"max_tokens":1500,"thinking":{"type":"disabled"}}`
-	nb, up, ab := maybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash")
+	nb, up, ab, _ := maybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash", false)
 	if up || !ab || string(nb) != body {
 		t.Errorf("up=%v ab=%v body=%s; want up=false ab=true body 原样", up, ab, nb)
+	}
+}
+
+// TestUpgradeOffToLowFloorBump: with floorBump on (the classifier-low path), a max_tokens too small for the
+// 1024 budget floor no longer abandons the upgrade — max_tokens is raised by exactly 1024 upstream-side (the
+// client's answer room rides on top of the budget, untouched; the client never sees the raised cap) and the
+// budget is exactly the 1024 floor (the half-max cap would clamp below it, so it does not apply to the bump).
+// Adaptive models get the same +1024 raise so low thinking can't starve the answer. max_tokens >= 2048 or
+// absent is never touched, and floorBump off keeps the abandon.
+func TestUpgradeOffToLowFloorBump(t *testing.T) {
+	mustObj := func(b []byte) map[string]interface{} {
+		var m map[string]interface{}
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("升级后非法 JSON: %v (%s)", err, b)
+		}
+		return m
+	}
+
+	// Budget class: 64 -> 1088, budget exactly 1024.
+	nb, up, ab, bp := maybeUpgradeOffToLow([]byte(`{"model":"m","max_tokens":64,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
+	if !up || ab || !bp {
+		t.Fatalf("应升级并托底: up=%v ab=%v bp=%v", up, ab, bp)
+	}
+	p := mustObj(nb)
+	if p["max_tokens"].(float64) != 1088 {
+		t.Errorf("max_tokens=%v, want 1088 (64+1024)", p["max_tokens"])
+	}
+	if th := p["thinking"].(map[string]interface{}); th["type"] != "enabled" || th["budget_tokens"].(float64) != 1024 {
+		t.Errorf("thinking=%v, want enabled/1024", th)
+	}
+
+	// 1500 -> 2524, budget still exactly 1024 (not the half-cap 1262).
+	nb, _, _, bp = maybeUpgradeOffToLow([]byte(`{"max_tokens":1500,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
+	p = mustObj(nb)
+	if !bp || p["max_tokens"].(float64) != 2524 {
+		t.Errorf("max_tokens=%v bp=%v, want 2524/true", p["max_tokens"], bp)
+	}
+	if th := p["thinking"].(map[string]interface{}); th["budget_tokens"].(float64) != 1024 {
+		t.Errorf("thinking=%v, want budget 1024", th)
+	}
+
+	// 2048 fits the floor under the half rule: upgrade without bumping.
+	nb, up, ab, bp = maybeUpgradeOffToLow([]byte(`{"max_tokens":2048,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
+	if !up || ab || bp {
+		t.Fatalf("2048 恰好踩线应直接升级不托底: up=%v ab=%v bp=%v", up, ab, bp)
+	}
+	p = mustObj(nb)
+	if p["max_tokens"].(float64) != 2048 {
+		t.Errorf("max_tokens=%v, want 2048 不动", p["max_tokens"])
+	}
+	if th := p["thinking"].(map[string]interface{}); th["budget_tokens"].(float64) != 1024 {
+		t.Errorf("thinking=%v, want budget 1024", th)
+	}
+
+	// No max_tokens: no ceiling, no bump, no field invented.
+	nb, up, _, bp = maybeUpgradeOffToLow([]byte(`{"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
+	if !up || bp {
+		t.Fatalf("无 max_tokens 应升级不托底: up=%v bp=%v", up, bp)
+	}
+	p = mustObj(nb)
+	if _, ok := p["max_tokens"]; ok {
+		t.Errorf("不应补出 max_tokens 字段: %v", p["max_tokens"])
+	}
+
+	// Adaptive class: same +1024 raise, shape untouched (adaptive + effort low, no budget).
+	nb, up, _, bp = maybeUpgradeOffToLow([]byte(`{"max_tokens":64,"thinking":{"type":"disabled"}}`), "claude-sonnet-5", true)
+	if !up || !bp {
+		t.Fatalf("adaptive 应升级并托底: up=%v bp=%v", up, bp)
+	}
+	p = mustObj(nb)
+	if p["max_tokens"].(float64) != 1088 {
+		t.Errorf("adaptive max_tokens=%v, want 1088", p["max_tokens"])
+	}
+	if th := p["thinking"].(map[string]interface{}); th["type"] != "adaptive" {
+		t.Errorf("adaptive thinking=%v", th)
+	}
+	if oc := p["output_config"].(map[string]interface{}); oc["effort"] != "low" {
+		t.Errorf("output_config=%v, want effort low", oc)
+	}
+
+	// Adaptive with a roomy max_tokens: untouched.
+	_, up, _, bp = maybeUpgradeOffToLow([]byte(`{"max_tokens":8192,"thinking":{"type":"disabled"}}`), "claude-sonnet-5", true)
+	if !up || bp {
+		t.Errorf("adaptive 8192 不应托底: up=%v bp=%v", up, bp)
+	}
+
+	// The bump is a positional edit: max_tokens keeps its slot, reasoning_effort still appended at the end.
+	nb, _, _, _ = maybeUpgradeOffToLow([]byte(`{"model":"m","max_tokens":64,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
+	if got, want := strings.Join(topLevelKeys(t, nb), ","), "model,max_tokens,thinking,reasoning_effort"; got != want {
+		t.Errorf("key 序 %q, want %q", got, want)
+	}
+
+	// floorBump off (convertOff2Low path): the abandon behavior is unchanged.
+	body := `{"max_tokens":64,"thinking":{"type":"disabled"}}`
+	nb, up, ab, _ = maybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash", false)
+	if up || !ab || string(nb) != body {
+		t.Errorf("不开托底应维持放弃: up=%v ab=%v body=%s", up, ab, nb)
 	}
 }
 
 // TestUpgradeOffToLowKeyOrder: positional edits — original key order kept, deletions clean, appended keys land at the end.
 func TestUpgradeOffToLowKeyOrder(t *testing.T) {
 	body := `{"model":"m","max_tokens":8192,"thinking":{"type":"disabled"},"temperature":0.7,"top_p":0.9,"reasoning":{"effort":"none"}}`
-	nb, up, _ := maybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash")
+	nb, up, _, _ := maybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash", false)
 	if !up {
 		t.Fatal("应升级")
 	}
@@ -134,7 +232,7 @@ func TestUpgradeOffToLowKeyOrder(t *testing.T) {
 // TestUpgradeOffToLowEffortOnlyOff: detection via reasoning_effort with no thinking field — thinking gets appended at the end.
 func TestUpgradeOffToLowEffortOnlyOff(t *testing.T) {
 	body := `{"model":"gpt-5-codex","max_tokens":8192,"reasoning_effort":"none"}`
-	nb, up, _ := maybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash")
+	nb, up, _, _ := maybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash", false)
 	if !up {
 		t.Fatal("应升级")
 	}

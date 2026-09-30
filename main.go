@@ -4952,14 +4952,18 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// with thinking blocks stripped from the response (the client stays unaware). Other Responses-port requests already carry
 	// their own upgrade decision via ctx. The classifier "low" policy composes the same machinery (clsLow): maybeRewriteClassifier
 	// already normalized thinking to off above, and the upgrade here raises it to low against the final post-routing model.
+	// Only the classifier path passes floorBump: a max_tokens too small for the 1024 budget floor is raised by 1024
+	// upstream-side instead of abandoning the upgrade (guardian requests arrive with max_tokens as small as 64).
 	clsLow := clsKind != classifierNone && classifierThinkingModeFor(c, clsKind) == "low"
 	if clsLow || (convFlag == "all" && clsKind == classifierNone && f.translated == "" && r.URL.Path == "/v1/messages") {
 		effModel := targetModel
 		if effModel == "" {
 			effModel = origModel
 		}
-		if nb, upgraded, abandoned := maybeUpgradeOffToLow(body, effModel); upgraded {
-			if clsLow {
+		if nb, upgraded, abandoned, bumped := maybeUpgradeOffToLow(body, effModel, clsLow); upgraded {
+			if clsLow && bumped {
+				log.Printf("[off->low] #%d classifier%s thinking-off quietly upgraded to low thinking (max_tokens raised by 1024 to fit the 1024-token budget floor; body %d->%d bytes); thinking blocks stripped on return", f.id, classifierTag(clsKind), len(body), len(nb))
+			} else if clsLow {
 				log.Printf("[off->low] #%d classifier%s thinking-off quietly upgraded to low thinking (body %d->%d bytes); thinking blocks stripped on return", f.id, classifierTag(clsKind), len(body), len(nb))
 			} else {
 				log.Printf("[off->low] #%d explicit thinking-off quietly upgraded to low thinking (body %d->%d bytes); thinking blocks stripped on return", f.id, len(body), len(nb))
@@ -4969,11 +4973,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			f.think = "off->low"
 			f.stripThinking.Store(true)
 		} else if abandoned {
-			if clsLow {
-				log.Printf("[off->low] #%d classifier%s upgrade abandoned: max_tokens too small for the 1024-token budget floor; request stays thinking-off", f.id, classifierTag(clsKind))
-			} else {
-				log.Printf("[off->low] #%d upgrade abandoned: max_tokens too small for the 1024-token budget floor; request stays thinking-off", f.id)
-			}
+			// Reachable only with floorBump off (convertOff2Low): the classifier path raises max_tokens instead.
+			log.Printf("[off->low] #%d upgrade abandoned: max_tokens too small for the 1024-token budget floor; request stays thinking-off", f.id)
 		}
 	}
 
