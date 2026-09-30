@@ -61,7 +61,8 @@
     "url": "https://api.deepseek.com",
     "api": "sk-deepseek-replace-with-your-key",
     "model": "deepseek-v4-flash",
-    "classifier_thinking": "off"
+    "classifier_thinking_cc": "low",
+    "classifier_thinking_codex": "off"
   },
   "fast_route": {
     "url": "https://api.deepseek.com",
