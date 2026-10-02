@@ -2809,28 +2809,108 @@ func classifierTag(kind classifierSource) string {
 	return ""
 }
 
+// effortWordOf extracts the lowercase effort word from a raw output_config object value ("" when absent or unparseable).
+func effortWordOf(v []byte) string {
+	var r struct {
+		Effort string `json:"effort"`
+	}
+	if err := json.Unmarshal(v, &r); err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(r.Effort))
+}
+
+// classifierThinkingShape reads the request's thinking mode from the Anthropic-native thinking knobs alone (the
+// thinking field, plus output_config's effort word for adaptive models): "off" (explicitly disabled), "low"
+// (adaptive at low/minimal effort, or an enabled budget at/below the low default), or "" (anything else, including
+// thinking absent — adaptive models think by default, and an effort word alone does not enforce a mode upstream).
+// The belt-and-braces fields the proxy itself would add when forcing a mode (reasoning_effort, reasoning) are never
+// read here: their presence or absence doesn't change what the request's thinking mode already is.
+func classifierThinkingShape(body []byte, spans []fieldSpan) string {
+	var thinkVal, ocVal []byte
+	for i := range spans {
+		s := &spans[i]
+		switch s.name {
+		case "thinking":
+			thinkVal = body[s.valStart:s.valEnd]
+		case "output_config":
+			ocVal = body[s.valStart:s.valEnd]
+		}
+	}
+	if len(thinkVal) == 0 {
+		return ""
+	}
+	if bytes.Contains(thinkVal, []byte(`"disabled"`)) {
+		return "off"
+	}
+	effort := ""
+	if len(ocVal) > 0 {
+		effort = effortWordOf(ocVal)
+	}
+	if bytes.Contains(thinkVal, []byte(`"adaptive"`)) {
+		if effort == "low" || effort == "minimal" {
+			return "low"
+		}
+		return "" // Adaptive at default or higher effort is not low
+	}
+	if bytes.Contains(thinkVal, []byte(`"enabled"`)) {
+		if effort != "" && effort != "low" && effort != "minimal" {
+			return "" // A contradicting native effort word means not clearly low
+		}
+		var th struct {
+			BudgetTokens int64 `json:"budget_tokens"`
+		}
+		if json.Unmarshal(thinkVal, &th) != nil || th.BudgetTokens <= 0 || th.BudgetTokens > effortToThinkingBudget("low") {
+			return ""
+		}
+		return "low"
+	}
+	return ""
+}
+
 // maybeRewriteClassifier applies the configured thinking policy when a classifier request matches, so classification returns fast.
 // Both policies first normalize thinking to off; under "low" the post-routing upgrade point then quietly raises it to low
 // upstream (that step needs the final model, which routing settles later) and thinking blocks are stripped from the response.
+// Idempotence, judged by the Anthropic-native thinking knobs alone (the thinking field, plus output_config's
+// effort for adaptive models): a request already thinking-off (explicit thinking:"disabled") passes through
+// byte-identical and uncounted — the mode is already enforced (under "low" the upgrade point then performs and
+// counts the one real rewrite); under "low" a request already thinking-low (adaptive at low/minimal effort, or
+// an enabled budget at/below the low default) also passes through untouched and uncounted. The belt-and-braces
+// fields the proxy itself would add when forcing a mode (reasoning_effort, reasoning) are never judgment
+// criteria: their presence or absence doesn't change what the request's thinking mode already is.
+// thinking absent is neither off nor low (adaptive models think by default), so bare bodies still normalize.
 // A bytes.Contains pre-filter keeps normal requests away from JSON parsing — near-zero cost.
-// On a match, json.Decoder streaming-locates the target fields' byte positions, then text replacement — no wholesale re-serialization;
+// On a rewrite, json.Decoder streaming-locates the target fields' byte positions, then text replacement — no wholesale re-serialization;
 // untouched fields keep their exact bytes (key order and formatting included), preserving upstream cache hits.
-func maybeRewriteClassifier(body []byte) []byte {
+// rewritten reports whether a real rewrite happened (and was counted); false covers non-hits, pass-throughs, and no-op edits.
+func maybeRewriteClassifier(body []byte) (newBody []byte, rewritten bool) {
 	kind := detectClassifier(body)
 	if kind == classifierNone {
-		return body
+		return body, false
 	}
 	mode := classifierThinkingModeFor(cfg.Load(), kind)
 	if mode == "" {
-		return body
+		return body, false
 	}
 	spans, ok := locateTopFields(body)
 	if !ok {
-		return body
+		return body, false
 	}
-	newBody := applyClassifierEdits(body, spans)
+	switch classifierThinkingShape(body, spans) {
+	case "off":
+		// Already thinking-off: pass through byte-identical and uncounted (under "low" the post-route
+		// upgrade performs and counts the one real rewrite).
+		return body, false
+	case "low":
+		if mode == "low" {
+			// Already thinking-low under the low policy: pass through untouched and uncounted — no off
+			// detour, and the response keeps its thinking blocks (the client asked for them).
+			return body, false
+		}
+	}
+	newBody = applyClassifierEdits(body, spans)
 	if len(newBody) == len(body) && bytes.Equal(newBody, body) {
-		return body
+		return body, false
 	}
 	log.Printf("[rewrite] classifier%s signature hit; thinking disabled (body %d->%d bytes)", classifierTag(kind), len(body), len(newBody))
 	stats.classifierRewrites.Add(1) // Live status row count: classifier thinking rewrites (off, or the off phase of low)
@@ -2839,7 +2919,7 @@ func maybeRewriteClassifier(body []byte) []byte {
 	} else {
 		stats.classifierRewritesCC.Add(1)
 	}
-	return newBody
+	return newBody, true
 }
 
 // logRequestDetail parses the request body and prints the stream/tools/system prefixes, for diagnosing classifier fingerprints.
@@ -4735,7 +4815,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			stats.classifierHitsCC.Add(1)
 		}
 	}
-	body = maybeRewriteClassifier(body)
+	body, clsRewrote := maybeRewriteClassifier(body)
 
 	// The status page's 「API」 column thinking value = the thinking config actually sent upstream: extracted after the classifier rewrite, so the translation port's
 	// mapped thinking is what shows (e.g. Codex effort high → on 16384), not what the client originally sent.
@@ -4951,7 +5031,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// convertOff2Low="all" native-port upgrade: an explicit downstream thinking-off is quietly sent upstream as low thinking,
 	// with thinking blocks stripped from the response (the client stays unaware). Other Responses-port requests already carry
 	// their own upgrade decision via ctx. The classifier "low" policy composes the same machinery (clsLow): maybeRewriteClassifier
-	// already normalized thinking to off above, and the upgrade here raises it to low against the final post-routing model.
+	// already normalized thinking to off above (or passed the body through untouched when it already carried the target effect —
+	// for an already-off request the upgrade below is the one real rewrite, so it is counted here rather than in the off phase).
 	// Only the classifier path passes floorBump: a max_tokens too small for the 1024 budget floor is raised by 1024
 	// upstream-side instead of abandoning the upgrade (guardian requests arrive with max_tokens as small as 64).
 	clsLow := clsKind != classifierNone && classifierThinkingModeFor(c, clsKind) == "low"
@@ -4961,6 +5042,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			effModel = origModel
 		}
 		if nb, upgraded, abandoned, bumped := maybeUpgradeOffToLow(body, effModel, clsLow); upgraded {
+			if clsLow && !clsRewrote {
+				// The off phase passed this already-off request through untouched: the upgrade here is the one real rewrite, so it counts here.
+				stats.classifierRewrites.Add(1)
+				if clsKind == classifierCodex {
+					stats.classifierRewritesCodex.Add(1)
+				} else {
+					stats.classifierRewritesCC.Add(1)
+				}
+			}
 			if clsLow && bumped {
 				log.Printf("[off->low] #%d classifier%s thinking-off quietly upgraded to low thinking (max_tokens raised by 1024 to fit the 1024-token budget floor; body %d->%d bytes); thinking blocks stripped on return", f.id, classifierTag(clsKind), len(body), len(nb))
 			} else if clsLow {
