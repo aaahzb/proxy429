@@ -373,3 +373,13 @@ func TestLogViewerTreeFallsBackToOnscreen(t *testing.T) {
 		t.Errorf("交互树缺少「完整副本整理不出时退回屏上内容再试」的回退（tryTreeVal(lastRaw)）")
 	}
 }
+
+// TestLogViewerTreeExpandsFirstLevel pins the tree default-expansion contract: jsonTreeRoot triggers the
+// root head click right after building, so the first level renders expanded while child containers stay
+// collapsed summaries (deeper levels still build lazily on click). This is what the two JSON-format view
+// states (request body, assembled non-stream output) land on by default.
+func TestLogViewerTreeExpandsFirstLevel(t *testing.T) {
+	if !strings.Contains(logViewerHTML, "if(head) head.onclick(); // 第一层默认展开") {
+		t.Errorf("jsonTreeRoot 缺少「第一层默认展开」（构建后触发根头点击，子容器仍折叠懒展开）")
+	}
+}
