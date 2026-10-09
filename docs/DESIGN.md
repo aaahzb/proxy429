@@ -473,7 +473,7 @@ The proxy's **only UI** is a browser-based web console, identical across platfor
 
 ```
 Status cards (example; actually rendered as a web page):
-v c639d56-1606  active 3 | waiting 1 | bytesForward 2.3KB | rate 12KB/s
+v c639d56-1606  active/waiting 3 / 1 | to-upstream 1.2KB | from-upstream 2.3KB
 cacheRead 0 | input 24 | output 80 | retries 0 | classifiers 0
 avgFirstByte 1.23s | tps 45.6
 

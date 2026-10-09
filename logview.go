@@ -1776,7 +1776,7 @@ async function poll(){
     document.getElementById('curCfg').textContent = d.currentCfg ? ('配置: '+d.currentCfg) : '';
     // 统计卡片
     cardsEl.innerHTML =
-      card('活跃', d.active) + card('等待', d.waiting) +
+      card('活跃/等待', d.active + ' / ' + d.waiting) +
       card('发给上游', fmtBytes(d.bytesUp)) + card('上游返回', fmtBytes(d.bytesDown)) +
       '<div class="card" id="cacheCard" style="cursor:pointer"><div class="k">缓存命中</div><div class="v">'+cacheHitPct(d.cacheRead, d.inputTokens, d.cacheCreation)+'</div></div>' + card('输入', fmtNum(d.inputTokens)) +
       card('输出', fmtNum(d.outputTokens)) + '<div class="card" id="retryCard" style="cursor:pointer"><div class="k">重试</div><div class="v">'+d.retries+'</div></div>' +
@@ -3017,8 +3017,7 @@ var enHTMLRepl = [][2]string{
 	{`'⚪ 空闲'`, `'⚪ Idle'`},
 	{`'🔴 已断开（代理可能已退出）'`, `'🔴 Disconnected (the proxy may have exited)'`},
 	{`('配置: '+d.currentCfg)`, `('Config: '+d.currentCfg)`},
-	{`card('活跃', d.active)`, `card('Active', d.active)`},
-	{`card('等待', d.waiting)`, `card('Waiting', d.waiting)`},
+	{`card('活跃/等待', d.active + ' / ' + d.waiting)`, `card('Active / Waiting', d.active + ' / ' + d.waiting)`},
 	{`card('发给上游', fmtBytes(d.bytesUp))`, `card('To upstream', fmtBytes(d.bytesUp))`},
 	{`card('上游返回', fmtBytes(d.bytesDown))`, `card('From upstream', fmtBytes(d.bytesDown))`},
 	{`<div class="k">缓存命中</div>`, `<div class="k">Cache hit</div>`},

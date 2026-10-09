@@ -402,3 +402,17 @@ func TestLogViewerUpstreamByteCards(t *testing.T) {
 		}
 	}
 }
+
+// TestLogViewerInflightCardMerged pins the merged in-flight card: active and waiting share one card
+// (title 活跃/等待, value "active / waiting") instead of two separate cards, to save card-row space.
+func TestLogViewerInflightCardMerged(t *testing.T) {
+	want := `card('活跃/等待', d.active + ' / ' + d.waiting)`
+	if !strings.Contains(logViewerHTML, want) {
+		t.Errorf("状态卡片缺少合并卡 %q", want)
+	}
+	for _, gone := range []string{`card('活跃', d.active)`, `card('等待', d.waiting)`} {
+		if strings.Contains(logViewerHTML, gone) {
+			t.Errorf("旧的分开卡片应已移除: %q", gone)
+		}
+	}
+}
