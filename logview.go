@@ -1238,6 +1238,7 @@ let flightViewSide = 'up'; // 查看链路侧：'up'=代理↔上游（默认观
 let fullStoreOn = false; // 「储存完整结构体」开关（以服务端为准）：开=可下载完整请求体/输出
 let flightFlags = {}; // 流 id -> {rt: 请求体被截断, hf: 仍持有完整输出}，poll 时在途/完成两表下发，用于置灰下载按钮
 let flightViewTree = false; // 单流交互式 JSON 树视图：true=查看区显示可折叠树（点击时的静态快照，poll 不刷新）
+let flightViewTreeManual = false; // 用户本次选择内手动点过「交互式JSON/退出交互」：钉住其选择，自动成树不再介入（重选流时复位）
 let lastRaw = ''; // 单流模式：最后一次拉到的 raw SSE（模式切换重渲染 + 流结束后保留）
 let autoRaws = {}; // 自动跟踪多流模式：每个在途流 id -> 最近 raw（模式切换重渲染用）
 
@@ -1756,6 +1757,7 @@ function selectFlight(id){
   lastReqRaw = '';
   flightViewSide = 'up'; // 双链路默认 代理↔上游 侧；点「链路」按钮切 下游↔代理 侧
   flightViewTree = false;
+  flightViewTreeManual = false;
   document.getElementById('flightViewSideNote').textContent = '';
   var fv = document.getElementById('flightView');
   fv.innerHTML = '';
@@ -2315,6 +2317,7 @@ document.getElementById('flightViewClose').onclick = () => {
   lastReqRaw = '';
   flightViewSide = 'up';
   flightViewTree = false;
+  flightViewTreeManual = false;
   var fv = document.getElementById('flightView');
   fv.innerHTML = '';
   fv.style.gridTemplateColumns = '';
@@ -2332,6 +2335,7 @@ document.getElementById('autoTrackChk').onchange = function(){
     lastReqRaw = '';
     flightViewSide = 'up';
     flightViewTree = false;
+    flightViewTreeManual = false;
   }
   updateFlightViewChrome();
 };
@@ -2362,7 +2366,7 @@ document.getElementById('flightViewRawBtn').onclick = () => {
 // ---- 查看内容四态切换（请求体 → 输出[渲染] → 输出[流式原始] → 输出[非流式] 循环；仅手选单流；请求体拉一次即静态，下载用同一缓存）----
 document.getElementById('flightViewWhatBtn').onclick = async () => {
   if(!selectedFlight) return;
-  flightViewTree = false;
+  var keepTree = flightViewTree; // 树开着则跟随内容重成树：新内容能成树就不退出交互
   if(flightViewWhat === 'asm'){
     // 输出[非流式] → 请求体：拉一次静态请求体
     flightViewWhat = 'req';
@@ -2375,6 +2379,10 @@ document.getElementById('flightViewWhatBtn').onclick = async () => {
     updateFlightViewChrome();
     renderRespFromLastRaw();
   }
+  // 树跟随/默认成树只覆盖 JSON 格式状态（见 jsonViewState）；切入 渲染/流式原始 文本视图时正常退出树
+  if(jsonViewState()){
+    if(keepTree || !flightViewTreeManual) await autoFlightTree();
+  } else if(keepTree){ flightViewTree = false; updateFlightViewChrome(); }
 };
 // fetchFlightViewSide 按当前 请求体/输出 + 链路侧 拉一次查看区内容（看请求体/切链路侧共用）；
 // 服务端缺侧回退时经 X-Proxy429-Side 头告知实际侧，回退提示显示在链路按钮旁。
@@ -2416,12 +2424,14 @@ document.getElementById('flightViewSideBtn').onclick = async () => {
   document.getElementById('flightViewSideNote').textContent = '';
   updateFlightViewChrome();
   await fetchFlightViewSide();
-  if(flightViewTree) await renderFlightTree(); // 交互树开着时跟随切侧重取：否则常规渲染把树顶掉、状态却还停在树模式（按钮误显「退出交互」）
+  // 树开着则跟随切侧重成树；树没开但当前是 JSON 格式状态且未被手动钉住时默认成树；不能成树由 autoFlightTree 退回常规渲染并关状态
+  if(flightViewTree || (!flightViewTreeManual && jsonViewState())) await autoFlightTree();
 };
 // ---- 交互式 JSON 树查看（按钮恒可用，不要求「储存完整结构体」；默认全部折叠，点键展开）----
 // 数据源：请求体视图用已拉取的 lastReqRaw（开关开启时即完整体）；输出视图该侧有完整副本时优先拉 full=1 完整版，
 // 取不到（开关关闭/缺侧/已清空/拉取失败）就对手头浏览内容 lastRaw（前 256KB，截断尾事件按原文挂入）成树——
-// 能显示在屏上的内容就能交互看。切链路侧时由 sideBtn 在刷新后重调本函数，树跟随切侧。
+// 能显示在屏上的内容就能交互看。切链路侧/切「看…」状态时由 autoFlightTree 重调本函数，树跟随内容。
+// 返回 true=已成树；false=内容不可成树（已把提示文案写进查看区，调用方据此退回常规渲染）。
 async function renderFlightTree(){
   var fv = document.getElementById('flightView');
   var fl = flightFlags[selectedFlight] || {};
@@ -2441,7 +2451,7 @@ async function renderFlightTree(){
     if(!text) text = lastRaw; // 无完整副本可用时退回手头浏览内容（截断版也能成树，覆盖已到部分）
     if(!text) err = '（该流暂无输出内容可交互查看）';
   }
-  if(err){ fv.textContent = err; return; }
+  if(err){ fv.textContent = err; return false; }
   // 先按整个 JSON 解析；失败按状态分流：非流式视图把 SSE 事件流组装成最终对象（便于按结构看树），其余按事件数组解析。
   // 完整副本整理不出（如储存开关中途才开、副本缺头）时退回手头浏览内容再试一次——能显示在屏上的内容就能交互看。
   var tryTreeVal = function(t){
@@ -2456,12 +2466,24 @@ async function renderFlightTree(){
   };
   var val = tryTreeVal(text);
   if(val === null && flightViewWhat !== 'req' && text !== lastRaw) val = tryTreeVal(lastRaw);
-  if(val === null){ fv.textContent = '（内容不是 JSON 也不是 SSE 事件流，无法交互查看）'; return; }
+  if(val === null){ fv.textContent = '（内容不是 JSON 也不是 SSE 事件流，无法交互查看）'; return false; }
   fv.innerHTML = '';
   fv.appendChild(jsonTreeRoot(val));
+  return true;
+}
+// jsonViewState 判定当前查看状态的内容是否天然是 JSON：请求体（恒为 JSON 文本）；输出[非流式]（事件流组装出的最终
+// JSON，仅流结束后默认成树——在途时保持实况文本）。输出[渲染]=可读文本、[流式原始]=逐字原文，是文本视图，不算 JSON 格式。
+function jsonViewState(){ return flightViewWhat==='req' || (flightViewWhat==='asm' && flightEnded); }
+// autoFlightTree 自动/跟随成树：内容能成树就交互看（树状态开），不能成树则退回当前 请求体/输出 的常规渲染并关掉树状态。
+// 用于两处：「看…」四态切换、链路侧切换；手动点过「退出交互」的选择由 flightViewTreeManual 钉住，不走本函数。
+async function autoFlightTree(){
+  if(await renderFlightTree()){ flightViewTree = true; }
+  else { flightViewTree = false; if(flightViewWhat==='req'){ renderReqBody(); } else renderRespFromLastRaw(); }
+  updateFlightViewChrome();
 }
 document.getElementById('flightViewTreeBtn').onclick = async () => {
   if(!selectedFlight) return;
+  flightViewTreeManual = true; // 手动钉住：本次选择内自动成树不再介入（重选流复位）
   if(flightViewTree){
     // 退出交互：回到当前 请求体/输出 的常规渲染
     flightViewTree = false;
