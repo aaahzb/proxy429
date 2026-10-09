@@ -383,3 +383,22 @@ func TestLogViewerTreeExpandsFirstLevel(t *testing.T) {
 		t.Errorf("jsonTreeRoot 缺少「第一层默认展开」（构建后触发根头点击，子容器仍折叠懒展开）")
 	}
 }
+
+// TestLogViewerUpstreamByteCards pins the status-card contract: the old bytes-out/rate pair is replaced
+// by upstream-direction byte counters — bytes sent upstream (bytesUp) and bytes returned from upstream
+// (bytesDown), both counted at the shared client's transport layer.
+func TestLogViewerUpstreamByteCards(t *testing.T) {
+	for _, want := range []string{
+		`card('发给上游', fmtBytes(d.bytesUp))`,
+		`card('上游返回', fmtBytes(d.bytesDown))`,
+	} {
+		if !strings.Contains(logViewerHTML, want) {
+			t.Errorf("状态卡片缺少 %q", want)
+		}
+	}
+	for _, gone := range []string{`card('流出'`, `card('速率'`} {
+		if strings.Contains(logViewerHTML, gone) {
+			t.Errorf("旧卡片应已移除: %q", gone)
+		}
+	}
+}

@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -50,38 +49,6 @@ func isLocalRequest(r *http.Request) bool {
 		return false
 	}
 	return host == "127.0.0.1" || host == "::1" || host == "localhost" || strings.HasPrefix(host, "127.")
-}
-
-// ---- Live rate (bytes/sec) ----
-// The console polls /__logs/data every 500ms and computes the rate from the bytesForward delta between polls.
-// State lives in package-level variables, persisting across requests.
-
-var (
-	rateMu        sync.Mutex
-	prevRateBytes int64
-	prevRateT     time.Time
-	lastRate      int64
-)
-
-// computeRate computes bytes/s from cumulative bytes b and the last sample, updating the baseline.
-func computeRate(b int64) int64 {
-	rateMu.Lock()
-	defer rateMu.Unlock()
-	now := time.Now()
-	if prevRateT.IsZero() {
-		prevRateBytes, prevRateT = b, now
-		return lastRate
-	}
-	dt := now.Sub(prevRateT).Seconds()
-	if dt > 0.05 {
-		delta := b - prevRateBytes
-		if delta < 0 {
-			delta = 0 // After 「清空统计」 the cumulative bytes reset to zero; a negative delta counts as 0 (otherwise the rate card shows a negative value)
-		}
-		lastRate = int64(float64(delta) / dt)
-		prevRateBytes, prevRateT = b, now
-	}
-	return lastRate
 }
 
 // logViewerHandler returns the console HTML page (status/logs/config tabs).
@@ -182,9 +149,9 @@ type logData struct {
 	InputTokens   int64             `json:"inputTokens"`
 	OutputTokens  int64             `json:"outputTokens"`
 	ModelStats    []modelUsageEntry `json:"modelStats"`
-	CacheObs      []cacheObsRow     `json:"cacheObs"` // Observed cache lifetimes (by upstream URL+model); the cache-hit popup's second table
-	BytesForward  int64             `json:"bytesForward"`
-	Rate          int64             `json:"rate"` // bytes/s
+	CacheObs      []cacheObsRow     `json:"cacheObs"`  // Observed cache lifetimes (by upstream URL+model); the cache-hit popup's second table
+	BytesUp       int64             `json:"bytesUp"`   // Bytes sent upstream (request bodies; each retry attempt counted)
+	BytesDown     int64             `json:"bytesDown"` // Bytes returned from upstream (response bodies, counted as read)
 	Retries       int64             `json:"retries"`
 	Classifiers   int64             `json:"classifiers"`
 	AvgFirstByte  float64           `json:"avgFirstByte"` // ms
@@ -223,8 +190,8 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 	stats.mu.Unlock()
 	d.ModelStats = stats.snapshotModelStats()
 	d.CacheObs = snapshotCacheObs()
-	d.BytesForward = stats.bytesForward.Load()
-	d.Rate = computeRate(d.BytesForward)
+	d.BytesUp = stats.bytesUp.Load()
+	d.BytesDown = stats.bytesDown.Load()
 	d.Retries = stats.statusRetries.Load()
 	d.Classifiers = stats.classifierHits.Load()
 	d.ClassifierNoThink = stats.classifierRewrites.Load()
@@ -1810,7 +1777,7 @@ async function poll(){
     // 统计卡片
     cardsEl.innerHTML =
       card('活跃', d.active) + card('等待', d.waiting) +
-      card('流出', fmtBytes(d.bytesForward)) + card('速率', fmtBytes(d.rate)+'/s') +
+      card('发给上游', fmtBytes(d.bytesUp)) + card('上游返回', fmtBytes(d.bytesDown)) +
       '<div class="card" id="cacheCard" style="cursor:pointer"><div class="k">缓存命中</div><div class="v">'+cacheHitPct(d.cacheRead, d.inputTokens, d.cacheCreation)+'</div></div>' + card('输入', fmtNum(d.inputTokens)) +
       card('输出', fmtNum(d.outputTokens)) + '<div class="card" id="retryCard" style="cursor:pointer"><div class="k">重试</div><div class="v">'+d.retries+'</div></div>' +
       '<div class="card" id="clsCard" style="cursor:pointer"><div class="k">分类器</div><div class="v">'+d.classifiers+'</div></div>' + card('首字', (d.avgFirstByte/1000).toFixed(2)+'s') +
@@ -3052,8 +3019,8 @@ var enHTMLRepl = [][2]string{
 	{`('配置: '+d.currentCfg)`, `('Config: '+d.currentCfg)`},
 	{`card('活跃', d.active)`, `card('Active', d.active)`},
 	{`card('等待', d.waiting)`, `card('Waiting', d.waiting)`},
-	{`card('流出', fmtBytes(d.bytesForward))`, `card('Sent', fmtBytes(d.bytesForward))`},
-	{`card('速率', fmtBytes(d.rate)+'/s')`, `card('Rate', fmtBytes(d.rate)+'/s')`},
+	{`card('发给上游', fmtBytes(d.bytesUp))`, `card('To upstream', fmtBytes(d.bytesUp))`},
+	{`card('上游返回', fmtBytes(d.bytesDown))`, `card('From upstream', fmtBytes(d.bytesDown))`},
 	{`<div class="k">缓存命中</div>`, `<div class="k">Cache hit</div>`},
 	{`card('输入', fmtNum(d.inputTokens))`, `card('Input', fmtNum(d.inputTokens))`},
 	{`card('输出', fmtNum(d.outputTokens))`, `card('Output', fmtNum(d.outputTokens))`},

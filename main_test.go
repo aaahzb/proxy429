@@ -18,6 +18,32 @@ import (
 	"time"
 )
 
+// TestTrafficRTCountsUpstreamBytes: the shared client's transport wrapper counts request body bytes sent
+// upstream (bytesUp) and response body bytes returned from upstream (bytesDown), whatever the path.
+func TestTrafficRTCountsUpstreamBytes(t *testing.T) {
+	resetStats()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("0123456789"))
+	}))
+	defer up.Close()
+	c := &http.Client{Transport: trafficRT{base: http.DefaultTransport}}
+	body := []byte(`{"hello":"upstream"}`)
+	resp, err := c.Post(up.URL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST through trafficRT failed: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if got := stats.bytesUp.Load(); got != int64(len(body)) {
+		t.Errorf("bytesUp=%d, want %d (request body bytes)", got, len(body))
+	}
+	if got := stats.bytesDown.Load(); got != 10 {
+		t.Errorf("bytesDown=%d, want 10 (response body bytes)", got)
+	}
+}
+
 // resetStats clears the global stats so tests don't affect each other.
 func resetStats() {
 	stats.mu.Lock()
@@ -27,7 +53,8 @@ func resetStats() {
 	stats.cacheCreation = 0
 	stats.inputTokens = 0
 	stats.outputTokens = 0
-	stats.bytesForward.Store(0)
+	stats.bytesUp.Store(0)
+	stats.bytesDown.Store(0)
 	stats.statusRetries.Store(0)
 	stats.classifierRewrites.Store(0)
 	stats.classifierHits.Store(0)
@@ -522,17 +549,17 @@ func TestClearStatsFinished(t *testing.T) {
 	}
 }
 
-// TestComputeRateCounterReset verifies that after clearing stats the cumulative bytes reset to zero and the rate doesn't go negative.
-func TestComputeRateCounterReset(t *testing.T) {
-	rateMu.Lock()
-	prevRateBytes, prevRateT, lastRate = 1000, time.Now().Add(-time.Second), 500
-	rateMu.Unlock()
-	if got := computeRate(100); got != 0 {
-		t.Errorf("计数器回零后 rate=%d, want 0（负增量应被钳位）", got)
+// TestClearStatsUpstreamBytes verifies 「清空统计」 zeroes the upstream-traffic counters (bytesUp/bytesDown).
+func TestClearStatsUpstreamBytes(t *testing.T) {
+	stats.bytesUp.Store(123)
+	stats.bytesDown.Store(456)
+	clearStats(&Config{RecentSampleWindow: 5})
+	if got := stats.bytesUp.Load(); got != 0 {
+		t.Errorf("clearStats 后 bytesUp=%d, want 0", got)
 	}
-	rateMu.Lock()
-	prevRateBytes, prevRateT, lastRate = 0, time.Time{}, 0
-	rateMu.Unlock()
+	if got := stats.bytesDown.Load(); got != 0 {
+		t.Errorf("clearStats 后 bytesDown=%d, want 0", got)
+	}
 }
 
 // TestMarkClientGone499 verifies archived status codes follow upstream bookkeeping: 499 only asks "did the upstream finish sending"

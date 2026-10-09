@@ -538,7 +538,8 @@ func clearStats(c *Config) {
 	stats.outputTokens = 0
 	stats.modelStats = nil
 	stats.mu.Unlock()
-	stats.bytesForward.Store(0)
+	stats.bytesUp.Store(0)
+	stats.bytesDown.Store(0)
 	stats.statusRetries.Store(0)
 	stats.classifierRewrites.Store(0)
 	stats.classifierHits.Store(0)
@@ -597,6 +598,42 @@ var client = &http.Client{
 	Timeout: 0,
 }
 
+// trafficRT counts upstream traffic for the 发给上游/上游返回 status cards at the single shared client's transport
+// layer, so every upstream call is covered (main forwarding, search sub-requests, count_tokens probes; each retry
+// attempt counts its own bytes): request-body bytes as sent (bytesUp), response-body bytes as read (bytesDown).
+type trafficRT struct{ base http.RoundTripper }
+
+func (t trafficRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		r2 := new(http.Request)
+		*r2 = *req
+		r2.Body = &countingReadCloser{rc: req.Body, add: func(n int64) { stats.bytesUp.Add(n) }}
+		req = r2
+	}
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	resp.Body = &countingReadCloser{rc: resp.Body, add: func(n int64) { stats.bytesDown.Add(n) }}
+	return resp, nil
+}
+
+// countingReadCloser adds every read's byte count into add (upstream traffic stats); Close passes through.
+type countingReadCloser struct {
+	rc  io.ReadCloser
+	add func(int64)
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.rc.Read(p)
+	if n > 0 {
+		c.add(int64(n))
+	}
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error { return c.rc.Close() }
+
 // ---- Live status row ----
 // Token counters from concurrent requests aggregate into the global stats; a dedicated goroutine refreshes one line
 // in place every 100ms (\r to line start + \033[K to clear the tail), adding no log lines. log output goes through
@@ -628,7 +665,8 @@ type liveStats struct {
 	inputTokens        int64                  // Cumulative input tokens
 	outputTokens       int64                  // Cumulative output tokens (sum of each stream's current accumulation, grows with streams)
 	modelStats         map[string]*modelUsage // Token usage aggregated by real upstream model name
-	bytesForward       atomic.Int64           // Cumulative forwarded bytes, growing live during streams (ARK doesn't send tokens mid-stream; this shows live progress)
+	bytesUp            atomic.Int64           // Cumulative request-body bytes sent upstream (each retry attempt counted), for the 发给上游 card
+	bytesDown          atomic.Int64           // Cumulative response-body bytes returned from upstream (counted as read), for the 上游返回 card
 	statusRetries      atomic.Int64           // Retries since startup (status codes/timeouts/network errors/in-body errors, +1 per retry)
 	classifierRewrites atomic.Int64           // Classifier hits with thinking rewritten (off or low) since startup
 	classifierHits     atomic.Int64           // Requests matching a classifier signature since startup: counted whether or not rerouted/rewritten
@@ -4088,7 +4126,6 @@ func searchAndRespond(w http.ResponseWriter, body []byte, sf *SearchRoute, f *fl
 		line = append(line, '\n', '\n')
 		f.appendContent(line)
 		f.bytes.Add(int64(len(line)))
-		stats.bytesForward.Add(int64(len(line)))
 		if canFlush {
 			flusher.Flush()
 		}
@@ -4333,8 +4370,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 				flusher.Flush()
 			}
 			n := int64(len(out))
-			stats.bytesForward.Add(n) // Live traffic (bytes), growing with each forwarded chunk
-			f.bytes.Add(n)            // Per-stream bytes, for the icon display (post-strip: what the client actually received)
+			f.bytes.Add(n) // Per-stream bytes, for the icon display (post-strip: what the client actually received)
 			if teeDown {
 				f.appendContentDown(out) // The client-bound bytes can differ from the upstream side (model written back and/or thinking stripped): the downstream side gets its own tee
 			}
@@ -4416,7 +4452,6 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 			if canFlush {
 				flusher.Flush()
 			}
-			stats.bytesForward.Add(int64(len(tail)))
 			f.bytes.Add(int64(len(tail)))
 			f.appendContentDown(tail)
 		}
@@ -4485,7 +4520,6 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 			if len(line) == 0 {
 				continue
 			}
-			stats.bytesForward.Add(int64(len(line)))
 			f.bytes.Add(int64(len(line)))
 			f.appendContent(line)
 			if f.searchDebug {
@@ -4656,7 +4690,6 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
-	stats.bytesForward.Add(int64(len(out)))
 	f.bytes.Add(int64(len(out)))
 	f.appendContentDown(out) // Tee the rebuilt non-streaming JSON to the downstream side (the actual proxy→client shape; the upstream-side SSE lines are teed line by line into content by handleChunk)
 	// The assembled JSON has been written in one shot = fully delivered (499 re-marking only looks at incompletely sent streams)
@@ -5402,11 +5435,14 @@ func main() {
 	// Set a "first-byte timeout" for upstream requests: beyond it the request is considered stuck and resent internally (case-0 retry).
 	// ResponseHeaderTimeout, not client.Timeout, so only the first-byte wait is limited and streaming Bodies are never cut.
 	// Set once at startup; reload doesn't rebuild the Transport (avoiding concurrent field mutation against in-flight requests).
+	// The trafficRT wrapper counts upstream-bound bytes for the status cards; every upstream call shares this client.
+	base := http.RoundTripper(http.DefaultTransport)
 	if c.UpstreamHeaderTimeoutSec > 0 {
 		tr := http.DefaultTransport.(*http.Transport).Clone()
 		tr.ResponseHeaderTimeout = time.Duration(c.UpstreamHeaderTimeoutSec * float64(time.Second))
-		client.Transport = tr
+		base = tr
 	}
+	client.Transport = trafficRT{base: base}
 
 	// Log output: always into logRing (polled by the web 「查看日志」 page) + stderr.
 	// The program has no terminal UI: Windows builds with the GUI subsystem have no console, macOS .apps have no terminal — writing stderr is harmless;
