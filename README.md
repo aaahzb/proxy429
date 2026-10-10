@@ -79,14 +79,7 @@ built by AI agents, directed by someone who depends on them all day.
 
 ### Screenshots
 
-![Status page: in-flight streams, retry counts, token and cache-hit telemetry](docs/screenshot-status.jpg)
-
-<details>
-<summary>Activity heatmap</summary>
-
-![Activity heatmap: last 48 hours in 15-minute cells, color depth switchable between request count, input+output and output tokens](docs/screenshot-heatmap.jpg)
-
-</details>
+![Status page: per-direction upstream byte counters, token and cache-hit telemetry, and the activity heatmap overlay (last 48 hours, 15-minute cells)](docs/screenshot-status.jpg)
 
 <details>
 <summary>Stream viewer</summary>
@@ -198,14 +191,7 @@ agent 写代码。我不是 Go 开发者，纯 vibe coding——为 AI agent 造
 
 ### 截图
 
-![状态页：在途流、重试次数、token 与缓存命中统计](docs/screenshot-status.jpg)
-
-<details>
-<summary>活跃度热图</summary>
-
-![活跃度热图：最近 48 小时、15 分钟一格，颜色深浅口径可切换请求次数 / 输入+输出 / 输出 token](docs/screenshot-heatmap.jpg)
-
-</details>
+![状态页：分方向上游字节计数、token 与缓存命中统计，以及活跃度热图弹窗（近 48 小时、15 分钟一格）](docs/screenshot-status.jpg)
 
 <details>
 <summary>流查看器</summary>
