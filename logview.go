@@ -1110,7 +1110,7 @@ const logViewerHTML = `<!DOCTYPE html>
 <div id="heatModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:40;align-items:center;justify-content:center" onclick="if(event.target===this)this.style.display='none'">
   <div style="background:#1a1a1a;border:1px solid #555;border-radius:8px;padding:20px 24px;max-width:96vw;position:relative">
     <button class="ghost" style="position:absolute;top:10px;right:12px" onclick="document.getElementById('heatModal').style.display='none'">关闭</button>
-    <div style="font-size:15px;margin-bottom:8px;color:#d4d4d4;padding-right:70px">活跃度（近两天，每格15分钟）</div>
+    <div style="font-size:15px;margin-bottom:8px;color:#d4d4d4;padding-right:70px">活跃度</div>
     <div id="heatMetricRow" style="margin-bottom:12px">
       <button id="heatM0" class="ghost" style="padding:1px 8px;font-size:12px;border-color:#39d353" onclick="heatSetMetric(0)">请求次数</button>
       <button id="heatM1" class="ghost" style="margin-left:4px;padding:1px 8px;font-size:12px" onclick="heatSetMetric(1)">输入+输出</button>
@@ -3089,7 +3089,7 @@ var enHTMLRepl = [][2]string{
 	{`('配置: '+d.currentCfg)`, `('Config: '+d.currentCfg)`},
 	{`card('活跃/等待', d.active + ' / ' + d.waiting)`, `card('Active / Waiting', d.active + ' / ' + d.waiting)`},
 	{`>活跃度</button>`, `>Activity</button>`},
-	{`活跃度（近两天，每格15分钟）`, `Activity (last 48 hours, one cell per 15 min)`},
+	{`>活跃度</div>`, `>Activity</div>`},
 	{`>请求次数</button>`, `>Requests</button>`},
 	{`>输入+输出</button>`, `>In+Out</button>`},
 	{`>输出</button>`, `>Output</button>`},

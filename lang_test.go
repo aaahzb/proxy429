@@ -432,7 +432,7 @@ func TestLogViewerHeatmap(t *testing.T) {
 		`>请求次数</button>`,
 		`>输入+输出</button>`,
 		`>输出</button>`,
-		`活跃度（近两天，每格15分钟）`,
+		`>活跃度</div>`,
 		`id="heatMetricRow"`,
 	} {
 		if !strings.Contains(logViewerHTML, want) {
