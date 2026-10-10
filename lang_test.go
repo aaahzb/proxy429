@@ -433,6 +433,7 @@ func TestLogViewerHeatmap(t *testing.T) {
 		`>输入+输出</button>`,
 		`>输出</button>`,
 		`活跃度（近两天，每格15分钟）`,
+		`id="heatMetricRow"`,
 	} {
 		if !strings.Contains(logViewerHTML, want) {
 			t.Errorf("活跃度热图缺少 %q", want)
