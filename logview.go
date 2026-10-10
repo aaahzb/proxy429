@@ -152,7 +152,7 @@ type logData struct {
 	CacheObs      []cacheObsRow     `json:"cacheObs"`  // Observed cache lifetimes (by upstream URL+model); the cache-hit popup's second table
 	BytesUp       int64             `json:"bytesUp"`   // Bytes sent upstream (request bodies; each retry attempt counted)
 	BytesDown     int64             `json:"bytesDown"` // Bytes returned from upstream (response bodies, counted as read)
-	HeatBase      int64             `json:"heatBase"`  // Absolute slot number (unix/1800) of Heat[0]; the 活跃度 heatmap window base
+	HeatBase      int64             `json:"heatBase"`  // Absolute slot number (unix/900) of Heat[0]; the 活跃度 heatmap window base
 	Heat          [][5]int64        `json:"heat"`      // 192 quarter-hour slots oldest-first, each [requests, output tokens, input tokens, bytes up, bytes down]
 	Retries       int64             `json:"retries"`
 	Classifiers   int64             `json:"classifiers"`
@@ -2573,28 +2573,23 @@ function heatCellVal(v){
   if(heatMetric===2) return v[1];
   return v[0];
 }
-// 活跃度热图：32 列 x 6 行，行 = 8 小时分段（昨天三段 + 今天三段，从上到下顺读），列 = 15 分钟一格。
-// 颜色按所选口径的值相对窗口内最大值分 4 级（GitHub 配色）；今天未到时刻的格子留白（点框）。
+// 活跃度热图：32 列 x 6 行滚动窗口，列 = 15 分钟一格，行 = 8 小时；右下 = 当前格，左上 = 48 小时前，
+// 每 15 分钟最旧一格被挤出，不按日历日翻页。颜色按所选口径的值相对窗口内最大值分 4 级（GitHub 配色）。
 function heatHTML(){
   if(!latestHeat.length) return '<div style="color:#888">暂无数据</div>';
   var lvlColor = ['#2d333b','#0e4429','#006d32','#26a641','#39d353'];
   var nowSlot = Math.floor(Date.now()/1000/900);
   var maxVal = 0, i, r, c;
   for(i=0;i<latestHeat.length;i++) if(latestHeat[i] && heatCellVal(latestHeat[i])>maxVal) maxVal = heatCellVal(latestHeat[i]);
-  var today0 = new Date(); today0.setHours(0,0,0,0);
-  var ydaySlot = Math.floor(today0.getTime()/1000/900) - 96; // 昨天 0 点的槽号（一天 = 96 个 15 分钟槽）
-  var labels = ['昨 0-8','昨 8-16','昨 16-24','今 0-8','今 8-16','今 16-24'];
+  var firstSlot = nowSlot-191; // 滚动窗口最旧一格；末格（右下）= 当前槽 nowSlot
+  var labels = ['-48h','-40h','-32h','-24h','-16h','-8h']; // 每行起点距现在的小时数，语言中立
   var h = '<div style="display:grid;grid-template-columns:auto repeat(32,12px);gap:2px;align-items:center;font-size:11px;color:#888">';
   h += '<div></div>';
   for(c=0;c<32;c++) h += '<div style="text-align:center;white-space:nowrap">'+(c%8===0?('+'+(c/4)+'h'):'')+'</div>';
   for(r=0;r<6;r++){
     h += '<div style="padding-right:4px;white-space:nowrap">'+labels[r]+'</div>';
     for(c=0;c<32;c++){
-      var slot = ydaySlot + r*32 + c;
-      if(slot > nowSlot){
-        h += '<div style="width:12px;height:12px;border:1px dotted #333;border-radius:2px;box-sizing:border-box"></div>';
-        continue;
-      }
+      var slot = firstSlot + r*32 + c;
       var idx = slot - latestHeatBase;
       var v = (idx>=0 && idx<latestHeat.length) ? latestHeat[idx] : null;
       var val = v ? heatCellVal(v) : 0;
@@ -3093,7 +3088,6 @@ var enHTMLRepl = [][2]string{
 	{`>请求次数</button>`, `>Requests</button>`},
 	{`>输入+输出</button>`, `>In+Out</button>`},
 	{`>输出</button>`, `>Output</button>`},
-	{`'昨 0-8','昨 8-16','昨 16-24','今 0-8','今 8-16','今 16-24'`, `'Yd 0-8','Yd 8-16','Yd 16-24','Today 0-8','Today 8-16','Today 16-24'`},
 	{` 请求 · 输入 `, ` req · in `},
 	{` · 输出 `, ` · out `},
 	{`card('发给上游', fmtBytes(d.bytesUp))`, `card('To upstream', fmtBytes(d.bytesUp))`},

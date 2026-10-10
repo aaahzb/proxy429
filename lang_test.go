@@ -434,12 +434,18 @@ func TestLogViewerHeatmap(t *testing.T) {
 		`>输出</button>`,
 		`>活跃度</div>`,
 		`id="heatMetricRow"`,
-		`('+'+(c/4)+'h')`,                      // tick labels use h in both languages; 时 wrapped mid-label
-		`text-align:center;white-space:nowrap`, // tick labels must not wrap inside their 12px cell
+		`('+'+(c/4)+'h')`,                          // tick labels use h in both languages; 时 wrapped mid-label
+		`text-align:center;white-space:nowrap`,     // tick labels must not wrap inside their 12px cell
+		`nowSlot-191`,                              // rolling 48h window: oldest cell = now-191 slots, newest = now
+		`'-48h','-40h','-32h','-24h','-16h','-8h'`, // row labels are hours-ago, language-neutral
 	} {
 		if !strings.Contains(logViewerHTML, want) {
 			t.Errorf("活跃度热图缺少 %q", want)
 		}
+	}
+	// The window must roll continuously (one cell out per 15 minutes), never flip a whole day at midnight.
+	if strings.Contains(logViewerHTML, "ydaySlot") {
+		t.Errorf("热图窗口应按当前时刻滚动，不应再按日历日对齐（发现 ydaySlot）")
 	}
 	// 活跃度 must not sit next to 清空统计 (misclick hazard): it lives at the far end of the toolbar row.
 	iReset := strings.Index(logViewerHTML, `id="resetStatsBtn"`)

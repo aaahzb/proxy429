@@ -62,11 +62,12 @@ providers.
   `program-settings.txt` (program settings, kept separate from the routing
   config — the proxy never rewrites your config file's formatting).
 - **Activity heatmap**: the status page's Activity button opens a
-  GitHub-style mosaic of the last 48 hours — 15-minute cells, six
-  8-hour rows x 32 columns. Three buttons switch what the color depth
-  encodes (request count / input+output tokens / output tokens); hover
-  shows the exact numbers plus up/down bytes. Data persists to
-  `heatmap.dat`, so the picture survives restarts.
+  GitHub-style rolling mosaic of the last 48 hours — 15-minute cells,
+  six 8-hour rows x 32 columns, sliding one cell every 15 minutes.
+  Three buttons switch what the color depth encodes (request count /
+  input+output tokens / output tokens); hover shows the exact numbers
+  plus up/down bytes. Data persists to `heatmap.dat`, so the picture
+  survives restarts.
 - **Model hijacking**: route any model name (e.g., `fable`) to any upstream
   model, with a system-tray right-click menu to switch routes on the fly.
 - **Cross-platform tray app** (Windows / macOS / Linux), single binary,
@@ -187,8 +188,9 @@ observability. Also: [Usage guide](docs/usage.md) ·
   原生流只在代理改写请求体时才存下游侧；路由改模型的流响应也因模型名写回而两侧不同、同样双存）。控制台界面中英双语：首次运行
   跟随系统语言，网页里可切换，选择存在 `program-settings.txt`（程序设置，
   与路由配置分离——代理绝不重排你的配置文件排版）。
-- **活跃度热图**：状态页「活跃度」按钮弹出 GitHub 风格马赛克图，覆盖
-  最近 48 小时——15 分钟一格，6 个 8 小时行 × 32 列。三个按钮切换颜色
+- **活跃度热图**：状态页「活跃度」按钮弹出 GitHub 风格马赛克图，滚动
+  覆盖最近 48 小时——15 分钟一格，6 个 8 小时行 × 32 列，每 15 分钟
+  挤掉最旧一格。三个按钮切换颜色
   深浅的编码口径（请求次数 / 输入+输出 token / 输出 token），悬停显示
   具体数字与上下行字节。数据落盘 `heatmap.dat`，重启不丢。
 - **模型劫持**：把任意模型名（如 `fable`）路由到任意上游模型，系统托盘
