@@ -612,14 +612,14 @@ func (t trafficRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Body != nil {
 		r2 := new(http.Request)
 		*r2 = *req
-		r2.Body = &countingReadCloser{rc: req.Body, add: func(n int64) { stats.bytesUp.Add(n); heatAdd(time.Now(), 0, 0, n, 0) }}
+		r2.Body = &countingReadCloser{rc: req.Body, add: func(n int64) { stats.bytesUp.Add(n); heatAdd(time.Now(), 0, 0, 0, n, 0) }}
 		req = r2
 	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil || resp == nil {
 		return resp, err
 	}
-	resp.Body = &countingReadCloser{rc: resp.Body, add: func(n int64) { stats.bytesDown.Add(n); heatAdd(time.Now(), 0, 0, 0, n) }}
+	resp.Body = &countingReadCloser{rc: resp.Body, add: func(n int64) { stats.bytesDown.Add(n); heatAdd(time.Now(), 0, 0, 0, 0, n) }}
 	return resp, nil
 }
 
@@ -640,16 +640,17 @@ func (c *countingReadCloser) Read(p []byte) (int, error) {
 func (c *countingReadCloser) Close() error { return c.rc.Close() }
 
 // ---- Activity heatmap (活跃度 heatmap) ----
-// heatSlots half-hour slots in a ring keyed by absolute slot number (unix/1800), covering the last 48h.
+// heatSlots 15-minute slots in a ring keyed by absolute slot number (unix/900), covering the last 48h.
 // Writing a position whose stored slot number is stale zeroes it first, so the ring self-rotates.
-const heatSlots = 96
+const heatSlots = 192
 
-// heatSlot holds one half hour of activity: finished requests (count_tokens probes excluded; interrupted
-// streams counted — the activity happened), output tokens, and upstream-direction wire bytes.
+// heatSlot holds one 15-minute cell of activity: finished requests (count_tokens probes excluded; interrupted
+// streams counted — the activity happened), output and input tokens, and upstream-direction wire bytes.
 type heatSlot struct {
-	Slot int64 `json:"slot"` // absolute half-hour slot number (unix/1800); 0 = never written
+	Slot int64 `json:"slot"` // absolute 15-minute slot number (unix/900); 0 = never written
 	Req  int64 `json:"req"`
 	Out  int64 `json:"out"`
+	In   int64 `json:"in"`
 	Up   int64 `json:"up"`
 	Down int64 `json:"down"`
 }
@@ -661,8 +662,8 @@ var (
 )
 
 // heatAdd records activity into the slot containing at, zeroing the position first if it holds a stale slot.
-func heatAdd(at time.Time, req, out, up, down int64) {
-	slot := at.Unix() / 1800
+func heatAdd(at time.Time, req, out, in, up, down int64) {
+	slot := at.Unix() / 900
 	heatMu.Lock()
 	e := &heat[slot%heatSlots]
 	if e.Slot != slot {
@@ -670,6 +671,7 @@ func heatAdd(at time.Time, req, out, up, down int64) {
 	}
 	e.Req += req
 	e.Out += out
+	e.In += in
 	e.Up += up
 	e.Down += down
 	heatDirty = true
@@ -678,25 +680,25 @@ func heatAdd(at time.Time, req, out, up, down int64) {
 
 // heatAt returns the [req, out, up, down] counters of the slot containing t, or zeros when the ring holds a
 // stale or never-written slot at that position.
-func heatAt(t time.Time) [4]int64 {
-	slot := t.Unix() / 1800
+func heatAt(t time.Time) [5]int64 {
+	slot := t.Unix() / 900
 	heatMu.Lock()
 	defer heatMu.Unlock()
 	if e := heat[slot%heatSlots]; e.Slot == slot {
-		return [4]int64{e.Req, e.Out, e.Up, e.Down}
+		return [5]int64{e.Req, e.Out, e.In, e.Up, e.Down}
 	}
-	return [4]int64{}
+	return [5]int64{}
 }
 
-// snapshotHeat returns the oldest retained slot number and the 96 slots (oldest-first) for the console heatmap.
-func snapshotHeat() (int64, [][4]int64) {
-	cur := time.Now().Unix() / 1800
+// snapshotHeat returns the oldest retained slot number and the 192 slots (oldest-first) for the console heatmap.
+func snapshotHeat() (int64, [][5]int64) {
+	cur := time.Now().Unix() / 900
 	base := cur - heatSlots + 1
-	out := make([][4]int64, heatSlots)
+	out := make([][5]int64, heatSlots)
 	heatMu.Lock()
 	for i := range out {
 		if e := heat[(base+int64(i))%heatSlots]; e.Slot == base+int64(i) {
-			out[i] = [4]int64{e.Req, e.Out, e.Up, e.Down}
+			out[i] = [5]int64{e.Req, e.Out, e.In, e.Up, e.Down}
 		}
 	}
 	heatMu.Unlock()
@@ -725,10 +727,10 @@ func heatSave() error {
 	if p == "" {
 		return nil
 	}
-	f := heatFile{V: 1}
+	f := heatFile{V: 2} // v2: 15-minute slot scale (v1 half-hour files are rejected on load)
 	heatMu.Lock()
 	for _, e := range heat {
-		if e.Slot != 0 && (e.Req != 0 || e.Out != 0 || e.Up != 0 || e.Down != 0) {
+		if e.Slot != 0 && (e.Req != 0 || e.Out != 0 || e.In != 0 || e.Up != 0 || e.Down != 0) {
 			f.Slots = append(f.Slots, e)
 		}
 	}
@@ -755,7 +757,10 @@ func heatLoad() error {
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil
 	}
-	cur := time.Now().Unix() / 1800
+	if f.V != 2 { // v1 used the half-hour slot scale; its slot numbers are meaningless here
+		return nil
+	}
+	cur := time.Now().Unix() / 900
 	heatMu.Lock()
 	for _, e := range f.Slots {
 		if e.Slot >= cur-heatSlots+1 && e.Slot <= cur {
@@ -1681,7 +1686,7 @@ func addFinished(f *flight) {
 	finishedMu.Unlock()
 	// 活跃度热图：流归档时记一格（count_tokens 探针不计，与 token 统计同口径；499 中断流计入——活动确实发生了）。
 	if !ff.countTokens {
-		heatAdd(ff.ended, 1, ff.outTokens, 0, 0)
+		heatAdd(ff.ended, 1, ff.outTokens, ff.inTokens, 0, 0)
 	}
 	log.Printf("[flight] #%d archived %d bytes stage=%d", f.id, len(content), ff.stage)
 }

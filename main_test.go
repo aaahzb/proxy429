@@ -562,26 +562,26 @@ func TestClearStatsUpstreamBytes(t *testing.T) {
 	}
 }
 
-// TestHeatSlotRotation pins the half-hour ring semantics: slots are keyed by absolute unix/1800 slot number,
+// TestHeatSlotRotation pins the 15-minute ring semantics: slots are keyed by absolute unix/900 slot number,
 // and writing a position whose stored slot number is stale (48h later lands on the same position) zeroes it first.
 func TestHeatSlotRotation(t *testing.T) {
 	heatMu.Lock()
 	heat = [heatSlots]heatSlot{}
 	heatMu.Unlock()
 
-	t0 := time.Unix(1800*100000, 0) // arbitrary slot-aligned instant
-	heatAdd(t0, 3, 100, 10, 20)
-	heatAdd(t0, 2, 50, 5, 5)
-	if got := heatAt(t0); got != [4]int64{5, 150, 15, 25} {
-		t.Fatalf("同一槽累计=%v, want [5 150 15 25]", got)
+	t0 := time.Unix(900*200000, 0) // arbitrary slot-aligned instant
+	heatAdd(t0, 3, 100, 200, 10, 20)
+	heatAdd(t0, 2, 50, 60, 5, 5)
+	if got := heatAt(t0); got != [5]int64{5, 150, 260, 15, 25} {
+		t.Fatalf("同一槽累计=%v, want [5 150 260 15 25]", got)
 	}
-	// Same ring position 96 slots (48h) later: the stale entry must be zeroed before recording.
-	later := t0.Add(heatSlots * 30 * time.Minute)
-	heatAdd(later, 1, 7, 0, 0)
-	if got := heatAt(later); got != [4]int64{1, 7, 0, 0} {
-		t.Fatalf("过期槽未清零: %v, want [1 7 0 0]", got)
+	// Same ring position 192 slots (48h) later: the stale entry must be zeroed before recording.
+	later := t0.Add(heatSlots * 15 * time.Minute)
+	heatAdd(later, 1, 7, 8, 0, 0)
+	if got := heatAt(later); got != [5]int64{1, 7, 8, 0, 0} {
+		t.Fatalf("过期槽未清零: %v, want [1 7 8 0 0]", got)
 	}
-	if got := heatAt(t0); got != [4]int64{} {
+	if got := heatAt(t0); got != [5]int64{} {
 		t.Fatalf("旧槽仍可读: %v, want 全零", got)
 	}
 }
@@ -602,8 +602,8 @@ func TestHeatPersistenceRoundTrip(t *testing.T) {
 
 	now := time.Now()
 	recent := now.Add(-30 * time.Minute)
-	heatAdd(recent, 4, 200, 40, 60)
-	heatAdd(now, 1, 2, 3, 4)
+	heatAdd(recent, 4, 200, 300, 40, 60)
+	heatAdd(now, 1, 2, 3, 4, 5)
 	if err := heatSave(); err != nil {
 		t.Fatalf("heatSave: %v", err)
 	}
@@ -613,10 +613,10 @@ func TestHeatPersistenceRoundTrip(t *testing.T) {
 	if err := heatLoad(); err != nil {
 		t.Fatalf("heatLoad: %v", err)
 	}
-	if got := heatAt(recent); got != [4]int64{4, 200, 40, 60} {
+	if got := heatAt(recent); got != [5]int64{4, 200, 300, 40, 60} {
 		t.Errorf("半小时前的槽未恢复: %v", got)
 	}
-	if got := heatAt(now); got != [4]int64{1, 2, 3, 4} {
+	if got := heatAt(now); got != [5]int64{1, 2, 3, 4, 5} {
 		t.Errorf("当前槽未恢复: %v", got)
 	}
 
@@ -624,8 +624,8 @@ func TestHeatPersistenceRoundTrip(t *testing.T) {
 	heatMu.Lock()
 	heat = [heatSlots]heatSlot{}
 	heatMu.Unlock()
-	ancient := now.Add(-heatSlots * 30 * time.Minute)
-	heatAdd(ancient, 9, 9, 9, 9)
+	ancient := now.Add(-heatSlots * 15 * time.Minute)
+	heatAdd(ancient, 9, 9, 9, 9, 9)
 	if err := heatSave(); err != nil {
 		t.Fatalf("heatSave: %v", err)
 	}
@@ -635,8 +635,24 @@ func TestHeatPersistenceRoundTrip(t *testing.T) {
 	if err := heatLoad(); err != nil {
 		t.Fatalf("heatLoad: %v", err)
 	}
-	if got := heatAt(ancient); got != [4]int64{} {
+	if got := heatAt(ancient); got != [5]int64{} {
 		t.Errorf("过期槽应被丢弃: %v", got)
+	}
+
+	// A v1 file (half-hour slot scale) is rejected wholesale: the slot numbering changed with the 15-minute cells.
+	if err := os.WriteFile(filepath.Join(dir, "heatmap.json"), []byte(`{"v":1,"slots":[{"slot":1,"req":9}]}`), 0644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	heatMu.Lock()
+	heat = [heatSlots]heatSlot{}
+	heatMu.Unlock()
+	if err := heatLoad(); err != nil {
+		t.Fatalf("heatLoad: %v", err)
+	}
+	for i, e := range heat {
+		if e.Slot != 0 {
+			t.Fatalf("v1 文件应整体拒绝, 槽 %d = %+v", i, e)
+		}
 	}
 }
 
@@ -645,21 +661,22 @@ func TestClearStatsHeat(t *testing.T) {
 	heatMu.Lock()
 	heat = [heatSlots]heatSlot{}
 	heatMu.Unlock()
-	heatAdd(time.Now(), 2, 10, 5, 5)
+	heatAdd(time.Now(), 2, 10, 20, 5, 5)
 	clearStats(&Config{RecentSampleWindow: 5})
-	if got := heatAt(time.Now()); got != [4]int64{} {
+	if got := heatAt(time.Now()); got != [5]int64{} {
 		t.Errorf("clearStats 后热图槽=%v, want 全零", got)
 	}
 }
 
 // TestLogDataHeat pins the console contract: /__logs/data carries heatBase (the absolute slot number of
-// heat[0]) and a 96-entry heat array ordered oldest-first, each entry [requests, output tokens, up, down].
+// heat[0]) and a 192-entry heat array ordered oldest-first, each entry
+// [requests, output tokens, input tokens, bytes up, bytes down].
 func TestLogDataHeat(t *testing.T) {
 	heatMu.Lock()
 	heat = [heatSlots]heatSlot{}
 	heatMu.Unlock()
 	now := time.Now()
-	heatAdd(now, 3, 30, 300, 3000)
+	heatAdd(now, 3, 30, 300, 3000, 30000)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/__logs/data", nil)
@@ -667,20 +684,20 @@ func TestLogDataHeat(t *testing.T) {
 	logDataHandler(rec, req)
 	var d struct {
 		HeatBase int64      `json:"heatBase"`
-		Heat     [][4]int64 `json:"heat"`
+		Heat     [][5]int64 `json:"heat"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
 		t.Fatalf("logData JSON: %v", err)
 	}
-	cur := now.Unix() / 1800
+	cur := now.Unix() / 900
 	if d.HeatBase != cur-heatSlots+1 {
 		t.Errorf("heatBase=%d, want %d", d.HeatBase, cur-heatSlots+1)
 	}
 	if len(d.Heat) != heatSlots {
 		t.Fatalf("heat 长度=%d, want %d", len(d.Heat), heatSlots)
 	}
-	if got := d.Heat[heatSlots-1]; got != [4]int64{3, 30, 300, 3000} {
-		t.Errorf("最新槽=%v, want [3 30 300 3000]", got)
+	if got := d.Heat[heatSlots-1]; got != [5]int64{3, 30, 300, 3000, 30000} {
+		t.Errorf("最新槽=%v, want [3 30 300 3000 30000]", got)
 	}
 }
 

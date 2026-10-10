@@ -153,7 +153,7 @@ type logData struct {
 	BytesUp       int64             `json:"bytesUp"`   // Bytes sent upstream (request bodies; each retry attempt counted)
 	BytesDown     int64             `json:"bytesDown"` // Bytes returned from upstream (response bodies, counted as read)
 	HeatBase      int64             `json:"heatBase"`  // Absolute slot number (unix/1800) of Heat[0]; the 活跃度 heatmap window base
-	Heat          [][4]int64        `json:"heat"`      // 96 half-hour slots oldest-first, each [requests, output tokens, bytes up, bytes down]
+	Heat          [][5]int64        `json:"heat"`      // 192 quarter-hour slots oldest-first, each [requests, output tokens, input tokens, bytes up, bytes down]
 	Retries       int64             `json:"retries"`
 	Classifiers   int64             `json:"classifiers"`
 	AvgFirstByte  float64           `json:"avgFirstByte"` // ms
@@ -1110,7 +1110,11 @@ const logViewerHTML = `<!DOCTYPE html>
 <div id="heatModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:40;align-items:center;justify-content:center" onclick="if(event.target===this)this.style.display='none'">
   <div style="background:#1a1a1a;border:1px solid #555;border-radius:8px;padding:20px 24px;max-width:96vw;position:relative">
     <button class="ghost" style="position:absolute;top:10px;right:12px" onclick="document.getElementById('heatModal').style.display='none'">关闭</button>
-    <div style="font-size:15px;margin-bottom:12px;color:#d4d4d4">活跃度（近两天，每格半小时）</div>
+    <div style="font-size:15px;margin-bottom:12px;color:#d4d4d4">活跃度（近两天，每格15分钟）
+      <button id="heatM0" class="ghost" style="margin-left:12px;padding:1px 8px;font-size:12px;border-color:#39d353" onclick="heatSetMetric(0)">请求次数</button>
+      <button id="heatM1" class="ghost" style="margin-left:4px;padding:1px 8px;font-size:12px" onclick="heatSetMetric(1)">输入+输出</button>
+      <button id="heatM2" class="ghost" style="margin-left:4px;padding:1px 8px;font-size:12px" onclick="heatSetMetric(2)">输出</button>
+    </div>
     <div id="heatModalBody"></div>
   </div>
 </div>
@@ -2525,6 +2529,7 @@ var latestModelStats = [];
 var latestCacheObs = [];
 var latestHeat = [];
 var latestHeatBase = 0;
+var heatMetric = 0; // 活跃度着色口径：0=请求次数 1=输入+输出 2=输出
 var latestClsHits = 0;    // 分类器命中总量（classifiers：无论是否分流/改写都计）
 var latestClsNoThink = 0; // 其中实际改写思考配置的次数（classifierNoThink：off 或 low）
 var latestClsHitsCC = 0, latestClsHitsCodex = 0; // 分源命中：Claude Code / Codex
@@ -2555,39 +2560,51 @@ function refreshCacheModal(){
   document.getElementById('cacheModalTotal').textContent = '总计 '+cacheHitPct(tCr, tIn, tCc);
   document.getElementById('cacheModalBody').innerHTML = cacheRowsHTML(true) + cacheObsHTML();
 }
-// 活跃度热图：16 列 x 6 行，行 = 8 小时分段（昨天三段 + 今天三段，从上到下顺读），列 = 半小时一格。
-// 颜色按该格请求数相对窗口内最大值分 4 级（GitHub 配色）；今天未到时刻的格子留白（点框）。
+// 活跃度热图着色口径切换：0=请求次数 1=输入+输出 2=输出。
+function heatSetMetric(m){
+  heatMetric = m;
+  for(var k=0;k<3;k++) document.getElementById('heatM'+k).style.borderColor = (k===m?'#39d353':'');
+  document.getElementById('heatModalBody').innerHTML = heatHTML();
+}
+// 活跃度热图单元格取值：v = [请求数, 输出 token, 输入 token, 上行字节, 下行字节]。
+function heatCellVal(v){
+  if(heatMetric===1) return v[1]+v[2];
+  if(heatMetric===2) return v[1];
+  return v[0];
+}
+// 活跃度热图：32 列 x 6 行，行 = 8 小时分段（昨天三段 + 今天三段，从上到下顺读），列 = 15 分钟一格。
+// 颜色按所选口径的值相对窗口内最大值分 4 级（GitHub 配色）；今天未到时刻的格子留白（点框）。
 function heatHTML(){
   if(!latestHeat.length) return '<div style="color:#888">暂无数据</div>';
   var lvlColor = ['#2d333b','#0e4429','#006d32','#26a641','#39d353'];
-  var nowSlot = Math.floor(Date.now()/1000/1800);
-  var maxReq = 0, i, r, c;
-  for(i=0;i<latestHeat.length;i++) if(latestHeat[i] && latestHeat[i][0]>maxReq) maxReq = latestHeat[i][0];
+  var nowSlot = Math.floor(Date.now()/1000/900);
+  var maxVal = 0, i, r, c;
+  for(i=0;i<latestHeat.length;i++) if(latestHeat[i] && heatCellVal(latestHeat[i])>maxVal) maxVal = heatCellVal(latestHeat[i]);
   var today0 = new Date(); today0.setHours(0,0,0,0);
-  var ydaySlot = Math.floor(today0.getTime()/1000/1800) - 48; // 昨天 0 点的槽号（一天 = 48 个半小时槽）
+  var ydaySlot = Math.floor(today0.getTime()/1000/900) - 96; // 昨天 0 点的槽号（一天 = 96 个 15 分钟槽）
   var labels = ['昨 0-8','昨 8-16','昨 16-24','今 0-8','今 8-16','今 16-24'];
-  var h = '<div style="display:grid;grid-template-columns:auto repeat(16,14px);gap:3px;align-items:center;font-size:11px;color:#888">';
+  var h = '<div style="display:grid;grid-template-columns:auto repeat(32,12px);gap:2px;align-items:center;font-size:11px;color:#888">';
   h += '<div></div>';
-  for(c=0;c<16;c++) h += '<div style="text-align:center">'+(c%4===0?('+'+(c/2)+'时'):'')+'</div>';
+  for(c=0;c<32;c++) h += '<div style="text-align:center">'+(c%8===0?('+'+(c/4)+'时'):'')+'</div>';
   for(r=0;r<6;r++){
     h += '<div style="padding-right:4px;white-space:nowrap">'+labels[r]+'</div>';
-    for(c=0;c<16;c++){
-      var slot = ydaySlot + r*16 + c;
+    for(c=0;c<32;c++){
+      var slot = ydaySlot + r*32 + c;
       if(slot > nowSlot){
-        h += '<div style="width:14px;height:14px;border:1px dotted #333;border-radius:2px;box-sizing:border-box"></div>';
+        h += '<div style="width:12px;height:12px;border:1px dotted #333;border-radius:2px;box-sizing:border-box"></div>';
         continue;
       }
       var idx = slot - latestHeatBase;
       var v = (idx>=0 && idx<latestHeat.length) ? latestHeat[idx] : null;
-      var req = v ? v[0] : 0;
-      var lvl = req===0 ? 0 : Math.max(1, Math.ceil(req/maxReq*4));
+      var val = v ? heatCellVal(v) : 0;
+      var lvl = val===0 ? 0 : Math.max(1, Math.ceil(val/maxVal*4));
       var tip = '';
-      if(v && (v[0]||v[1]||v[2]||v[3])){
-        var st = new Date(slot*1800*1000), en = new Date((slot+1)*1800*1000);
+      if(v && (v[0]||v[1]||v[2]||v[3]||v[4])){
+        var st = new Date(slot*900*1000), en = new Date((slot+1)*900*1000);
         var p2 = function(x){ return (x<10?'0':'')+x; };
-        tip = (st.getMonth()+1)+'-'+p2(st.getDate())+' '+p2(st.getHours())+':'+p2(st.getMinutes())+'–'+p2(en.getHours())+':'+p2(en.getMinutes())+' · '+v[0]+' 请求 · 输出 '+v[1]+' · ↑'+fmtBytes(v[2])+' ↓'+fmtBytes(v[3]);
+        tip = (st.getMonth()+1)+'-'+p2(st.getDate())+' '+p2(st.getHours())+':'+p2(st.getMinutes())+'–'+p2(en.getHours())+':'+p2(en.getMinutes())+' · '+v[0]+' 请求 · 输入 '+fmtNum(v[2])+' · 输出 '+fmtNum(v[1])+' · ↑'+fmtBytes(v[3])+' ↓'+fmtBytes(v[4]);
       }
-      h += '<div'+(tip?(' title="'+tip+'"'):'')+' style="width:14px;height:14px;border-radius:2px;background:'+lvlColor[lvl]+'"></div>';
+      h += '<div'+(tip?(' title="'+tip+'"'):'')+' style="width:12px;height:12px;border-radius:2px;background:'+lvlColor[lvl]+'"></div>';
     }
   }
   h += '</div>';
@@ -3071,10 +3088,14 @@ var enHTMLRepl = [][2]string{
 	{`('配置: '+d.currentCfg)`, `('Config: '+d.currentCfg)`},
 	{`card('活跃/等待', d.active + ' / ' + d.waiting)`, `card('Active / Waiting', d.active + ' / ' + d.waiting)`},
 	{`>活跃度</button>`, `>Activity</button>`},
-	{`活跃度（近两天，每格半小时）`, `Activity (last 48 hours, one cell per 30 min)`},
+	{`活跃度（近两天，每格15分钟）`, `Activity (last 48 hours, one cell per 15 min)`},
+	{`>请求次数</button>`, `>Requests</button>`},
+	{`>输入+输出</button>`, `>In+Out</button>`},
+	{`>输出</button>`, `>Output</button>`},
 	{`'昨 0-8','昨 8-16','昨 16-24','今 0-8','今 8-16','今 16-24'`, `'Yd 0-8','Yd 8-16','Yd 16-24','Today 0-8','Today 8-16','Today 16-24'`},
-	{`('+'+(c/2)+'时')`, `('+'+(c/2)+'h')`},
-	{` 请求 · 输出 `, ` req · out `},
+	{`('+'+(c/4)+'时')`, `('+'+(c/4)+'h')`},
+	{` 请求 · 输入 `, ` req · in `},
+	{` · 输出 `, ` · out `},
 	{`card('发给上游', fmtBytes(d.bytesUp))`, `card('To upstream', fmtBytes(d.bytesUp))`},
 	{`card('上游返回', fmtBytes(d.bytesDown))`, `card('From upstream', fmtBytes(d.bytesDown))`},
 	{`<div class="k">缓存命中</div>`, `<div class="k">Cache hit</div>`},
