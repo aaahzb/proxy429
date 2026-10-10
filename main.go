@@ -552,6 +552,11 @@ func clearStats(c *Config) {
 	finished = nil
 	cacheObsMap = map[string]*cacheObsEntry{} // Clear the empirical cache-lifetime observations too
 	finishedMu.Unlock()
+	// 清空统计连带清掉活跃度热图，并重写持久化文件为空。
+	heatMu.Lock()
+	heat = [heatSlots]heatSlot{}
+	heatMu.Unlock()
+	_ = heatSave()
 }
 
 // reloadConfig re-reads the current config file and atomically swaps the global cfg, without clearing stats (only the "clear stats" button clears).
@@ -607,14 +612,14 @@ func (t trafficRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Body != nil {
 		r2 := new(http.Request)
 		*r2 = *req
-		r2.Body = &countingReadCloser{rc: req.Body, add: func(n int64) { stats.bytesUp.Add(n) }}
+		r2.Body = &countingReadCloser{rc: req.Body, add: func(n int64) { stats.bytesUp.Add(n); heatAdd(time.Now(), 0, 0, n, 0) }}
 		req = r2
 	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil || resp == nil {
 		return resp, err
 	}
-	resp.Body = &countingReadCloser{rc: resp.Body, add: func(n int64) { stats.bytesDown.Add(n) }}
+	resp.Body = &countingReadCloser{rc: resp.Body, add: func(n int64) { stats.bytesDown.Add(n); heatAdd(time.Now(), 0, 0, 0, n) }}
 	return resp, nil
 }
 
@@ -633,6 +638,152 @@ func (c *countingReadCloser) Read(p []byte) (int, error) {
 }
 
 func (c *countingReadCloser) Close() error { return c.rc.Close() }
+
+// ---- Activity heatmap (活跃度 heatmap) ----
+// heatSlots half-hour slots in a ring keyed by absolute slot number (unix/1800), covering the last 48h.
+// Writing a position whose stored slot number is stale zeroes it first, so the ring self-rotates.
+const heatSlots = 96
+
+// heatSlot holds one half hour of activity: finished requests (count_tokens probes excluded; interrupted
+// streams counted — the activity happened), output tokens, and upstream-direction wire bytes.
+type heatSlot struct {
+	Slot int64 `json:"slot"` // absolute half-hour slot number (unix/1800); 0 = never written
+	Req  int64 `json:"req"`
+	Out  int64 `json:"out"`
+	Up   int64 `json:"up"`
+	Down int64 `json:"down"`
+}
+
+var (
+	heatMu    sync.Mutex // guards heat/heatDirty; its own lock so writers under stats.mu/finishedMu never nest
+	heat      [heatSlots]heatSlot
+	heatDirty bool // set by heatAdd; the saver loop persists at most once a minute
+)
+
+// heatAdd records activity into the slot containing at, zeroing the position first if it holds a stale slot.
+func heatAdd(at time.Time, req, out, up, down int64) {
+	slot := at.Unix() / 1800
+	heatMu.Lock()
+	e := &heat[slot%heatSlots]
+	if e.Slot != slot {
+		*e = heatSlot{Slot: slot}
+	}
+	e.Req += req
+	e.Out += out
+	e.Up += up
+	e.Down += down
+	heatDirty = true
+	heatMu.Unlock()
+}
+
+// heatAt returns the [req, out, up, down] counters of the slot containing t, or zeros when the ring holds a
+// stale or never-written slot at that position.
+func heatAt(t time.Time) [4]int64 {
+	slot := t.Unix() / 1800
+	heatMu.Lock()
+	defer heatMu.Unlock()
+	if e := heat[slot%heatSlots]; e.Slot == slot {
+		return [4]int64{e.Req, e.Out, e.Up, e.Down}
+	}
+	return [4]int64{}
+}
+
+// snapshotHeat returns the oldest retained slot number and the 96 slots (oldest-first) for the console heatmap.
+func snapshotHeat() (int64, [][4]int64) {
+	cur := time.Now().Unix() / 1800
+	base := cur - heatSlots + 1
+	out := make([][4]int64, heatSlots)
+	heatMu.Lock()
+	for i := range out {
+		if e := heat[(base+int64(i))%heatSlots]; e.Slot == base+int64(i) {
+			out[i] = [4]int64{e.Req, e.Out, e.Up, e.Down}
+		}
+	}
+	heatMu.Unlock()
+	return base, out
+}
+
+// heatFile is the on-disk form of heatmap.json, persisted next to the active config.json (like the
+// active-config state file) so the heatmap survives restarts and exe swaps.
+type heatFile struct {
+	V     int        `json:"v"`
+	Slots []heatSlot `json:"slots"`
+}
+
+// heatPath returns the heatmap.json path beside the active config, or "" when no config path is set (tests).
+func heatPath() string {
+	p := currentConfigPath()
+	if p == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(p), "heatmap.json")
+}
+
+// heatSave writes the non-empty slots to heatmap.json. No-op without a config path.
+func heatSave() error {
+	p := heatPath()
+	if p == "" {
+		return nil
+	}
+	f := heatFile{V: 1}
+	heatMu.Lock()
+	for _, e := range heat {
+		if e.Slot != 0 && (e.Req != 0 || e.Out != 0 || e.Up != 0 || e.Down != 0) {
+			f.Slots = append(f.Slots, e)
+		}
+	}
+	heatMu.Unlock()
+	data, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p, data, 0644)
+}
+
+// heatLoad restores slots inside the 48h window from heatmap.json; stale or future slots are dropped, and a
+// missing or corrupt file just starts empty.
+func heatLoad() error {
+	p := heatPath()
+	if p == "" {
+		return nil
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	var f heatFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil
+	}
+	cur := time.Now().Unix() / 1800
+	heatMu.Lock()
+	for _, e := range f.Slots {
+		if e.Slot >= cur-heatSlots+1 && e.Slot <= cur {
+			heat[e.Slot%heatSlots] = e
+		}
+	}
+	heatMu.Unlock()
+	return nil
+}
+
+// heatSaverLoop persists a dirty heatmap once a minute; started once at startup.
+func heatSaverLoop() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		heatMu.Lock()
+		dirty := heatDirty
+		heatMu.Unlock()
+		if !dirty {
+			continue
+		}
+		if err := heatSave(); err == nil {
+			heatMu.Lock()
+			heatDirty = false
+			heatMu.Unlock()
+		}
+	}
+}
 
 // ---- Live status row ----
 // Token counters from concurrent requests aggregate into the global stats; a dedicated goroutine refreshes one line
@@ -1528,6 +1679,10 @@ func addFinished(f *flight) {
 	finished = append(finished, ff)
 	trimFinishedLocked()
 	finishedMu.Unlock()
+	// 活跃度热图：流归档时记一格（count_tokens 探针不计，与 token 统计同口径；499 中断流计入——活动确实发生了）。
+	if !ff.countTokens {
+		heatAdd(ff.ended, 1, ff.outTokens, 0, 0)
+	}
 	log.Printf("[flight] #%d archived %d bytes stage=%d", f.id, len(content), ff.stage)
 }
 
@@ -5517,6 +5672,9 @@ func runServer(c *Config) {
 	http.HandleFunc(fullStorePath, fullStoreHandler)
 	http.HandleFunc(uiLangPath, uiLangHandler)
 	http.HandleFunc("/", handler)
+	// 活跃度热图：装载 48h 窗口内的持久化数据（缺失/损坏文件即从空开始），并启动每分钟脏落盘。
+	heatLoad()
+	go heatSaverLoop()
 	err := http.ListenAndServe(c.Listen, nil)
 	log.Fatal(err)
 }

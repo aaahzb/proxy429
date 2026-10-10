@@ -416,3 +416,20 @@ func TestLogViewerInflightCardMerged(t *testing.T) {
 		}
 	}
 }
+
+// TestLogViewerHeatmap pins the activity-heatmap contract: an 活跃度 button on the status row opens a
+// GitHub-style mosaic modal (16 columns x 6 rows, one cell per half hour, last 48h), fed by the
+// heatBase/heat fields of /__logs/data and rendered client-side.
+func TestLogViewerHeatmap(t *testing.T) {
+	for _, want := range []string{
+		`id="heatModal"`,
+		`>活跃度</button>`,
+		`function heatHTML()`,
+		`latestHeat = d.heat`,
+		`heatBase`,
+	} {
+		if !strings.Contains(logViewerHTML, want) {
+			t.Errorf("活跃度热图缺少 %q", want)
+		}
+	}
+}

@@ -152,6 +152,8 @@ type logData struct {
 	CacheObs      []cacheObsRow     `json:"cacheObs"`  // Observed cache lifetimes (by upstream URL+model); the cache-hit popup's second table
 	BytesUp       int64             `json:"bytesUp"`   // Bytes sent upstream (request bodies; each retry attempt counted)
 	BytesDown     int64             `json:"bytesDown"` // Bytes returned from upstream (response bodies, counted as read)
+	HeatBase      int64             `json:"heatBase"`  // Absolute slot number (unix/1800) of Heat[0]; the 活跃度 heatmap window base
+	Heat          [][4]int64        `json:"heat"`      // 96 half-hour slots oldest-first, each [requests, output tokens, bytes up, bytes down]
 	Retries       int64             `json:"retries"`
 	Classifiers   int64             `json:"classifiers"`
 	AvgFirstByte  float64           `json:"avgFirstByte"` // ms
@@ -190,6 +192,7 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 	stats.mu.Unlock()
 	d.ModelStats = stats.snapshotModelStats()
 	d.CacheObs = snapshotCacheObs()
+	d.HeatBase, d.Heat = snapshotHeat()
 	d.BytesUp = stats.bytesUp.Load()
 	d.BytesDown = stats.bytesDown.Load()
 	d.Retries = stats.statusRetries.Load()
@@ -1072,6 +1075,7 @@ const logViewerHTML = `<!DOCTYPE html>
 <div class="pane active" id="pane-status">
   <div style="margin-bottom:8px"><span class="st idle" id="status">⚪ 连接中</span> <span id="curCfg" style="margin-left:10px;color:#888"></span>
     <button id="resetStatsBtn" class="ghost" style="margin-left:16px;padding:2px 8px">清空统计</button>
+    <button id="heatBtn" class="ghost" style="margin-left:8px;padding:2px 8px" onclick="document.getElementById('heatModalBody').innerHTML=heatHTML();document.getElementById('heatModal').style.display='flex'">活跃度</button>
     <label style="margin-left:12px;color:#9a9a9a">保留完成流: <input id="finishedCapInput" type="number" min="0" max="200" value="10" style="width:50px;background:#1e1e1e;color:#d4d4d4;border:1px solid #333;border-radius:3px;padding:2px 4px;font:inherit"></label>
     <button id="finishedCapBtn" class="ghost" style="padding:2px 8px">设置</button>
     <span id="finishedCapMsg"></span>
@@ -1101,6 +1105,13 @@ const logViewerHTML = `<!DOCTYPE html>
     <button class="ghost" style="position:absolute;top:10px;right:12px" onclick="document.getElementById('cacheModal').style.display='none'">关闭</button>
     <div style="font-size:15px;margin-bottom:12px;color:#d4d4d4">缓存命中明细（按真实上游模型） <span id="cacheModalTotal" style="color:#888;font-size:12px;margin-left:8px"></span></div>
     <div id="cacheModalBody"></div>
+  </div>
+</div>
+<div id="heatModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:40;align-items:center;justify-content:center" onclick="if(event.target===this)this.style.display='none'">
+  <div style="background:#1a1a1a;border:1px solid #555;border-radius:8px;padding:20px 24px;max-width:96vw;position:relative">
+    <button class="ghost" style="position:absolute;top:10px;right:12px" onclick="document.getElementById('heatModal').style.display='none'">关闭</button>
+    <div style="font-size:15px;margin-bottom:12px;color:#d4d4d4">活跃度（近两天，每格半小时）</div>
+    <div id="heatModalBody"></div>
   </div>
 </div>
 <div id="retryTip" style="display:none;position:fixed;z-index:35;background:#1a1a1a;border:1px solid #555;border-radius:6px;padding:8px 10px;max-width:540px;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-size:12px"></div>
@@ -1785,6 +1796,7 @@ async function poll(){
     // 缓存命中明细：缓存最新 modelStats / cacheObs / 分类器双计数，tooltip/modal 打开时实时刷新
     latestModelStats = d.modelStats || [];
     latestCacheObs = d.cacheObs || [];
+    latestHeat = d.heat || []; latestHeatBase = d.heatBase || 0; // 活跃度热图缓存，弹窗打开时渲染
     latestClsHits = d.classifiers || 0;
     latestClsNoThink = d.classifierNoThink || 0;
     latestClsHitsCC = d.classifiersCC || 0;
@@ -2511,6 +2523,8 @@ document.getElementById('fullStoreChk').onchange = async function(){
 // ---- 缓存命中明细：hover tooltip + 点击放大弹窗 ----
 var latestModelStats = [];
 var latestCacheObs = [];
+var latestHeat = [];
+var latestHeatBase = 0;
 var latestClsHits = 0;    // 分类器命中总量（classifiers：无论是否分流/改写都计）
 var latestClsNoThink = 0; // 其中实际改写思考配置的次数（classifierNoThink：off 或 low）
 var latestClsHitsCC = 0, latestClsHitsCodex = 0; // 分源命中：Claude Code / Codex
@@ -2540,6 +2554,44 @@ function refreshCacheModal(){
   latestModelStats.forEach(function(m){ tCr+=m.cacheRead; tIn+=m.input; tCc+=(m.cacheCreation||0); });
   document.getElementById('cacheModalTotal').textContent = '总计 '+cacheHitPct(tCr, tIn, tCc);
   document.getElementById('cacheModalBody').innerHTML = cacheRowsHTML(true) + cacheObsHTML();
+}
+// 活跃度热图：16 列 x 6 行，行 = 8 小时分段（昨天三段 + 今天三段，从上到下顺读），列 = 半小时一格。
+// 颜色按该格请求数相对窗口内最大值分 4 级（GitHub 配色）；今天未到时刻的格子留白（点框）。
+function heatHTML(){
+  if(!latestHeat.length) return '<div style="color:#888">暂无数据</div>';
+  var lvlColor = ['#2d333b','#0e4429','#006d32','#26a641','#39d353'];
+  var nowSlot = Math.floor(Date.now()/1000/1800);
+  var maxReq = 0, i, r, c;
+  for(i=0;i<latestHeat.length;i++) if(latestHeat[i] && latestHeat[i][0]>maxReq) maxReq = latestHeat[i][0];
+  var today0 = new Date(); today0.setHours(0,0,0,0);
+  var ydaySlot = Math.floor(today0.getTime()/1000/1800) - 48; // 昨天 0 点的槽号（一天 = 48 个半小时槽）
+  var labels = ['昨 0-8','昨 8-16','昨 16-24','今 0-8','今 8-16','今 16-24'];
+  var h = '<div style="display:grid;grid-template-columns:auto repeat(16,14px);gap:3px;align-items:center;font-size:11px;color:#888">';
+  h += '<div></div>';
+  for(c=0;c<16;c++) h += '<div style="text-align:center">'+(c%4===0?('+'+(c/2)+'时'):'')+'</div>';
+  for(r=0;r<6;r++){
+    h += '<div style="padding-right:4px;white-space:nowrap">'+labels[r]+'</div>';
+    for(c=0;c<16;c++){
+      var slot = ydaySlot + r*16 + c;
+      if(slot > nowSlot){
+        h += '<div style="width:14px;height:14px;border:1px dotted #333;border-radius:2px;box-sizing:border-box"></div>';
+        continue;
+      }
+      var idx = slot - latestHeatBase;
+      var v = (idx>=0 && idx<latestHeat.length) ? latestHeat[idx] : null;
+      var req = v ? v[0] : 0;
+      var lvl = req===0 ? 0 : Math.max(1, Math.ceil(req/maxReq*4));
+      var tip = '';
+      if(v && (v[0]||v[1]||v[2]||v[3])){
+        var st = new Date(slot*1800*1000), en = new Date((slot+1)*1800*1000);
+        var p2 = function(x){ return (x<10?'0':'')+x; };
+        tip = (st.getMonth()+1)+'-'+p2(st.getDate())+' '+p2(st.getHours())+':'+p2(st.getMinutes())+'–'+p2(en.getHours())+':'+p2(en.getMinutes())+' · '+v[0]+' 请求 · 输出 '+v[1]+' · ↑'+fmtBytes(v[2])+' ↓'+fmtBytes(v[3]);
+      }
+      h += '<div'+(tip?(' title="'+tip+'"'):'')+' style="width:14px;height:14px;border-radius:2px;background:'+lvlColor[lvl]+'"></div>';
+    }
+  }
+  h += '</div>';
+  return h;
 }
 // 实测缓存时间表（按上游 URL+模型）：数据来自代理侧对同会话相邻流的实测，内存态
 function cacheObsHTML(){
@@ -3018,6 +3070,11 @@ var enHTMLRepl = [][2]string{
 	{`'🔴 已断开（代理可能已退出）'`, `'🔴 Disconnected (the proxy may have exited)'`},
 	{`('配置: '+d.currentCfg)`, `('Config: '+d.currentCfg)`},
 	{`card('活跃/等待', d.active + ' / ' + d.waiting)`, `card('Active / Waiting', d.active + ' / ' + d.waiting)`},
+	{`>活跃度</button>`, `>Activity</button>`},
+	{`活跃度（近两天，每格半小时）`, `Activity (last 48 hours, one cell per 30 min)`},
+	{`'昨 0-8','昨 8-16','昨 16-24','今 0-8','今 8-16','今 16-24'`, `'Yd 0-8','Yd 8-16','Yd 16-24','Today 0-8','Today 8-16','Today 16-24'`},
+	{`('+'+(c/2)+'时')`, `('+'+(c/2)+'h')`},
+	{` 请求 · 输出 `, ` req · out `},
 	{`card('发给上游', fmtBytes(d.bytesUp))`, `card('To upstream', fmtBytes(d.bytesUp))`},
 	{`card('上游返回', fmtBytes(d.bytesDown))`, `card('From upstream', fmtBytes(d.bytesDown))`},
 	{`<div class="k">缓存命中</div>`, `<div class="k">Cache hit</div>`},

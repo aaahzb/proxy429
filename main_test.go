@@ -562,6 +562,128 @@ func TestClearStatsUpstreamBytes(t *testing.T) {
 	}
 }
 
+// TestHeatSlotRotation pins the half-hour ring semantics: slots are keyed by absolute unix/1800 slot number,
+// and writing a position whose stored slot number is stale (48h later lands on the same position) zeroes it first.
+func TestHeatSlotRotation(t *testing.T) {
+	heatMu.Lock()
+	heat = [heatSlots]heatSlot{}
+	heatMu.Unlock()
+
+	t0 := time.Unix(1800*100000, 0) // arbitrary slot-aligned instant
+	heatAdd(t0, 3, 100, 10, 20)
+	heatAdd(t0, 2, 50, 5, 5)
+	if got := heatAt(t0); got != [4]int64{5, 150, 15, 25} {
+		t.Fatalf("同一槽累计=%v, want [5 150 15 25]", got)
+	}
+	// Same ring position 96 slots (48h) later: the stale entry must be zeroed before recording.
+	later := t0.Add(heatSlots * 30 * time.Minute)
+	heatAdd(later, 1, 7, 0, 0)
+	if got := heatAt(later); got != [4]int64{1, 7, 0, 0} {
+		t.Fatalf("过期槽未清零: %v, want [1 7 0 0]", got)
+	}
+	if got := heatAt(t0); got != [4]int64{} {
+		t.Fatalf("旧槽仍可读: %v, want 全零", got)
+	}
+}
+
+// TestHeatPersistenceRoundTrip pins heatmap.json persistence: saved slots reload into the ring, and slots
+// older than the 48h window are dropped on load.
+func TestHeatPersistenceRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	configMu.Lock()
+	old := configFilePath
+	configFilePath = filepath.Join(dir, "config.json")
+	configMu.Unlock()
+	defer func() { configMu.Lock(); configFilePath = old; configMu.Unlock() }()
+
+	heatMu.Lock()
+	heat = [heatSlots]heatSlot{}
+	heatMu.Unlock()
+
+	now := time.Now()
+	recent := now.Add(-30 * time.Minute)
+	heatAdd(recent, 4, 200, 40, 60)
+	heatAdd(now, 1, 2, 3, 4)
+	if err := heatSave(); err != nil {
+		t.Fatalf("heatSave: %v", err)
+	}
+	heatMu.Lock()
+	heat = [heatSlots]heatSlot{}
+	heatMu.Unlock()
+	if err := heatLoad(); err != nil {
+		t.Fatalf("heatLoad: %v", err)
+	}
+	if got := heatAt(recent); got != [4]int64{4, 200, 40, 60} {
+		t.Errorf("半小时前的槽未恢复: %v", got)
+	}
+	if got := heatAt(now); got != [4]int64{1, 2, 3, 4} {
+		t.Errorf("当前槽未恢复: %v", got)
+	}
+
+	// A slot exactly 48h old is outside the window and must be dropped on load.
+	heatMu.Lock()
+	heat = [heatSlots]heatSlot{}
+	heatMu.Unlock()
+	ancient := now.Add(-heatSlots * 30 * time.Minute)
+	heatAdd(ancient, 9, 9, 9, 9)
+	if err := heatSave(); err != nil {
+		t.Fatalf("heatSave: %v", err)
+	}
+	heatMu.Lock()
+	heat = [heatSlots]heatSlot{}
+	heatMu.Unlock()
+	if err := heatLoad(); err != nil {
+		t.Fatalf("heatLoad: %v", err)
+	}
+	if got := heatAt(ancient); got != [4]int64{} {
+		t.Errorf("过期槽应被丢弃: %v", got)
+	}
+}
+
+// TestClearStatsHeat verifies 清空统计 also zeroes the activity heatmap ring.
+func TestClearStatsHeat(t *testing.T) {
+	heatMu.Lock()
+	heat = [heatSlots]heatSlot{}
+	heatMu.Unlock()
+	heatAdd(time.Now(), 2, 10, 5, 5)
+	clearStats(&Config{RecentSampleWindow: 5})
+	if got := heatAt(time.Now()); got != [4]int64{} {
+		t.Errorf("clearStats 后热图槽=%v, want 全零", got)
+	}
+}
+
+// TestLogDataHeat pins the console contract: /__logs/data carries heatBase (the absolute slot number of
+// heat[0]) and a 96-entry heat array ordered oldest-first, each entry [requests, output tokens, up, down].
+func TestLogDataHeat(t *testing.T) {
+	heatMu.Lock()
+	heat = [heatSlots]heatSlot{}
+	heatMu.Unlock()
+	now := time.Now()
+	heatAdd(now, 3, 30, 300, 3000)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/__logs/data", nil)
+	req.RemoteAddr = "127.0.0.1:1234" // isLocalRequest gate
+	logDataHandler(rec, req)
+	var d struct {
+		HeatBase int64      `json:"heatBase"`
+		Heat     [][4]int64 `json:"heat"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatalf("logData JSON: %v", err)
+	}
+	cur := now.Unix() / 1800
+	if d.HeatBase != cur-heatSlots+1 {
+		t.Errorf("heatBase=%d, want %d", d.HeatBase, cur-heatSlots+1)
+	}
+	if len(d.Heat) != heatSlots {
+		t.Fatalf("heat 长度=%d, want %d", len(d.Heat), heatSlots)
+	}
+	if got := d.Heat[heatSlots-1]; got != [4]int64{3, 30, 300, 3000} {
+		t.Errorf("最新槽=%v, want [3 30 300 3000]", got)
+	}
+}
+
 // TestMarkClientGone499 verifies archived status codes follow upstream bookkeeping: 499 only asks "did the upstream finish sending"
 // (delivered), consistent with the upstream provider's backend view; local errors and non-200 statuses are unaffected.
 func TestMarkClientGone499(t *testing.T) {
