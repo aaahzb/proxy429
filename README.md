@@ -10,6 +10,15 @@ A local LLM API proxy that keeps AI coding agents (Claude Code, Codex CLI,
 and other OpenAI/Anthropic-compatible clients) unaffected by flaky model
 providers.
 
+> [!TIP]
+> **👀 Curious what your coding agent is *actually* up to?** Open the
+> console and watch it think, live: in-flight streams render as readable
+> text (or raw SSE) while tokens arrive; finished streams keep their full
+> request/response bodies as an interactive JSON tree, per link side.
+> System prompts, tool schemas, cache hits, retries — an open kitchen,
+> nothing hidden. The most literal way there is to learn how Claude Code /
+> Codex CLI really work.
+
 - **Automatic retry with exponential backoff** on 429/5xx — including
   rate-limit errors hidden inside HTTP-200 SSE streams — with SSE keep-alive
   pings so the client never times out while the proxy retries.
@@ -52,13 +61,6 @@ providers.
   follows the system language on first run and remembers your choice in
   `program-settings.txt` (program settings, kept separate from the routing
   config — the proxy never rewrites your config file's formatting).
-- **👀 Curious what your coding agent is *actually* up to?** Open the
-  console and watch it think, live: in-flight streams render as readable
-  text (or raw SSE) while tokens arrive, and finished streams keep their
-  full request/response bodies as an interactive JSON tree, per link
-  side. System prompts, tool schemas, cache hits, retries — an open
-  kitchen, nothing hidden. The most literal way there is to learn how
-  Claude Code / Codex CLI really work.
 - **Activity heatmap**: the status page's Activity button opens a
   GitHub-style mosaic of the last 48 hours — 15-minute cells, six
   8-hour rows x 32 columns. Three buttons switch what the color depth
@@ -151,6 +153,13 @@ observability. Also: [Usage guide](docs/usage.md) ·
 提供商之间，自动吃掉 429/5xx 限流（指数退避重试，含藏在 200 流里的错误），
 支持模型路由、双协议翻译，带实时网页监控台。
 
+> [!TIP]
+> **👀 好奇你的编程 agent 到底在干嘛？** 打开控制台，看它现场直播
+> 「思考」：在途流随 token 到达实时渲染成可读文本（可切原始 SSE），
+> 完成的流保留完整请求/响应体、展开成交互式 JSON 树，按链路侧随便翻。
+> 系统提示词、工具定义、缓存命中、重试——明厨亮灶，一览无余。学习
+> Claude Code / Codex 工作原理最直观的方式，没有之一。
+
 功能亮点：
 - 429/5xx 自动重试（指数退避，含藏在 200 流里的错误），SSE 保活让客户端
   在代理重试期间永不超时。
@@ -178,11 +187,6 @@ observability. Also: [Usage guide](docs/usage.md) ·
   原生流只在代理改写请求体时才存下游侧；路由改模型的流响应也因模型名写回而两侧不同、同样双存）。控制台界面中英双语：首次运行
   跟随系统语言，网页里可切换，选择存在 `program-settings.txt`（程序设置，
   与路由配置分离——代理绝不重排你的配置文件排版）。
-- **👀 好奇你的编程 agent 到底在干嘛？** 打开控制台，看它现场直播
-  「思考」：在途流随 token 到达实时渲染成可读文本（可切原始 SSE），
-  完成的流保留完整请求/响应体、展开成交互式 JSON 树，按链路侧随便翻。
-  系统提示词、工具定义、缓存命中、重试——明厨亮灶，一览无余。学习
-  Claude Code / Codex 工作原理最直观的方式，没有之一。
 - **活跃度热图**：状态页「活跃度」按钮弹出 GitHub 风格马赛克图，覆盖
   最近 48 小时——15 分钟一格，6 个 8 小时行 × 32 列。三个按钮切换颜色
   深浅的编码口径（请求次数 / 输入+输出 token / 输出 token），悬停显示
