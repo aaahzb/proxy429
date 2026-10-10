@@ -586,7 +586,7 @@ func TestHeatSlotRotation(t *testing.T) {
 	}
 }
 
-// TestHeatPersistenceRoundTrip pins heatmap.json persistence: saved slots reload into the ring, and slots
+// TestHeatPersistenceRoundTrip pins heatmap.dat persistence: saved slots reload into the ring, and slots
 // older than the 48h window are dropped on load.
 func TestHeatPersistenceRoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -640,7 +640,7 @@ func TestHeatPersistenceRoundTrip(t *testing.T) {
 	}
 
 	// A v1 file (half-hour slot scale) is rejected wholesale: the slot numbering changed with the 15-minute cells.
-	if err := os.WriteFile(filepath.Join(dir, "heatmap.json"), []byte(`{"v":1,"slots":[{"slot":1,"req":9}]}`), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "heatmap.dat"), []byte(`{"v":1,"slots":[{"slot":1,"req":9}]}`), 0644); err != nil {
 		t.Fatalf("write v1: %v", err)
 	}
 	heatMu.Lock()
@@ -653,6 +653,55 @@ func TestHeatPersistenceRoundTrip(t *testing.T) {
 		if e.Slot != 0 {
 			t.Fatalf("v1 文件应整体拒绝, 槽 %d = %+v", i, e)
 		}
+	}
+}
+
+// TestHeatPathUsesDatName pins the heatmap persistence file name: heatmap.dat, never a .json name —
+// a .json sibling gets picked up by listConfigFilesIn and shows up in the tray/web config switchers.
+func TestHeatPathUsesDatName(t *testing.T) {
+	dir := t.TempDir()
+	configMu.Lock()
+	old := configFilePath
+	configFilePath = filepath.Join(dir, "config.json")
+	configMu.Unlock()
+	defer func() { configMu.Lock(); configFilePath = old; configMu.Unlock() }()
+
+	if got := filepath.Base(heatPath()); got != "heatmap.dat" {
+		t.Fatalf("热图文件名应为 heatmap.dat(避免被配置切换枚举识别), got %s", got)
+	}
+}
+
+// TestHeatLegacyJSONMigration pins the one-time rename: a legacy heatmap.json next to the active config is
+// renamed to heatmap.dat on load with its data preserved, so it disappears from the config switchers.
+func TestHeatLegacyJSONMigration(t *testing.T) {
+	dir := t.TempDir()
+	configMu.Lock()
+	old := configFilePath
+	configFilePath = filepath.Join(dir, "config.json")
+	configMu.Unlock()
+	defer func() { configMu.Lock(); configFilePath = old; configMu.Unlock() }()
+
+	heatMu.Lock()
+	heat = [heatSlots]heatSlot{}
+	heatMu.Unlock()
+
+	slot := time.Now().Unix() / 900
+	legacy := filepath.Join(dir, "heatmap.json")
+	body := []byte(fmt.Sprintf(`{"v":2,"slots":[{"slot":%d,"req":7,"out":70,"in":30,"up":1,"down":2}]}`, slot))
+	if err := os.WriteFile(legacy, body, 0644); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+	if err := heatLoad(); err != nil {
+		t.Fatalf("heatLoad: %v", err)
+	}
+	if got := heatAt(time.Unix(slot*900, 0)); got != [5]int64{7, 70, 30, 1, 2} {
+		t.Errorf("旧 heatmap.json 的数据应迁入环形缓冲: %v", got)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Errorf("迁移后旧 heatmap.json 应消失(否则仍会被配置切换枚举识别)")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "heatmap.dat")); err != nil {
+		t.Errorf("迁移后应存在 heatmap.dat: %v", err)
 	}
 }
 

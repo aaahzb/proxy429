@@ -66,7 +66,7 @@ providers.
   8-hour rows x 32 columns. Three buttons switch what the color depth
   encodes (request count / input+output tokens / output tokens); hover
   shows the exact numbers plus up/down bytes. Data persists to
-  `heatmap.json`, so the picture survives restarts.
+  `heatmap.dat`, so the picture survives restarts.
 - **Model hijacking**: route any model name (e.g., `fable`) to any upstream
   model, with a system-tray right-click menu to switch routes on the fly.
 - **Cross-platform tray app** (Windows / macOS / Linux), single binary,
@@ -190,7 +190,7 @@ observability. Also: [Usage guide](docs/usage.md) ·
 - **活跃度热图**：状态页「活跃度」按钮弹出 GitHub 风格马赛克图，覆盖
   最近 48 小时——15 分钟一格，6 个 8 小时行 × 32 列。三个按钮切换颜色
   深浅的编码口径（请求次数 / 输入+输出 token / 输出 token），悬停显示
-  具体数字与上下行字节。数据落盘 `heatmap.json`，重启不丢。
+  具体数字与上下行字节。数据落盘 `heatmap.dat`，重启不丢。
 - **模型劫持**：把任意模型名（如 `fable`）路由到任意上游模型，系统托盘
   右键菜单一键切换路由。
 - 跨平台托盘应用（Windows / macOS / Linux），单二进制，~40% 测试代码。

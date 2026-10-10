@@ -705,23 +705,34 @@ func snapshotHeat() (int64, [][5]int64) {
 	return base, out
 }
 
-// heatFile is the on-disk form of heatmap.json, persisted next to the active config.json (like the
+// heatFile is the on-disk form of heatmap.dat, persisted next to the active config.json (like the
 // active-config state file) so the heatmap survives restarts and exe swaps.
 type heatFile struct {
 	V     int        `json:"v"`
 	Slots []heatSlot `json:"slots"`
 }
 
-// heatPath returns the heatmap.json path beside the active config, or "" when no config path is set (tests).
+// heatPath returns the heatmap.dat path beside the active config, or "" when no config path is set (tests).
+// A .dat extension (not .json) keeps it out of listConfigFiles results — the same trick as the
+// active-config state file; a .json sibling would show up in the tray and web config switchers.
 func heatPath() string {
 	p := currentConfigPath()
+	if p == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(p), "heatmap.dat")
+}
+
+// heatLegacyPath is the pre-rename heatmap.json location, migrated to heatmap.dat on load.
+func heatLegacyPath() string {
+	p := heatPath()
 	if p == "" {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(p), "heatmap.json")
 }
 
-// heatSave writes the non-empty slots to heatmap.json. No-op without a config path.
+// heatSave writes the non-empty slots to heatmap.dat. No-op without a config path.
 func heatSave() error {
 	p := heatPath()
 	if p == "" {
@@ -739,11 +750,17 @@ func heatSave() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0644)
+	if err := os.WriteFile(p, data, 0644); err != nil {
+		return err
+	}
+	// Best-effort sweep of the pre-rename legacy file so it stops showing up in config switchers.
+	_ = os.Remove(heatLegacyPath())
+	return nil
 }
 
-// heatLoad restores slots inside the 48h window from heatmap.json; stale or future slots are dropped, and a
-// missing or corrupt file just starts empty.
+// heatLoad restores slots inside the 48h window from heatmap.dat; stale or future slots are dropped, and a
+// missing or corrupt file just starts empty. A legacy heatmap.json (from before the rename) is moved to
+// heatmap.dat first so its data survives the upgrade.
 func heatLoad() error {
 	p := heatPath()
 	if p == "" {
@@ -751,7 +768,12 @@ func heatLoad() error {
 	}
 	data, err := os.ReadFile(p)
 	if err != nil {
-		return nil
+		if os.Rename(heatLegacyPath(), p) == nil {
+			data, err = os.ReadFile(p)
+		}
+		if err != nil {
+			return nil
+		}
 	}
 	var f heatFile
 	if err := json.Unmarshal(data, &f); err != nil {
