@@ -40,8 +40,10 @@ providers.
   Set it to `false` for cc-switch-style preemptive thinking-off over such
   histories. The console shows a two-tone `[off->low]` badge for the quiet
   upgrade (the history try-on shows the requested effort as-is).
-- **Live observability**: a local web console showing in-flight streams,
-  token and cache-hit telemetry, and per-request diagnostics. The stream
+- **Live observability**: a local web console showing in-flight streams
+  (one merged active/waiting card per stream, with bytes sent to
+  upstream and bytes returned counted separately), token and cache-hit
+  telemetry, and per-request diagnostics. The stream
   viewer records request/response bodies per link side — proxy↔upstream
   (what the proxy actually sent and received) and client↔proxy (what your
   agent sent and received) — stored separately only when they differ
@@ -50,6 +52,12 @@ providers.
   follows the system language on first run and remembers your choice in
   `program-settings.txt` (program settings, kept separate from the routing
   config — the proxy never rewrites your config file's formatting).
+- **Activity heatmap**: the status page's Activity button opens a
+  GitHub-style mosaic of the last 48 hours — 15-minute cells, six
+  8-hour rows x 32 columns. Three buttons switch what the color depth
+  encodes (request count / input+output tokens / output tokens); hover
+  shows the exact numbers plus up/down bytes. Data persists to
+  `heatmap.json`, so the picture survives restarts.
 - **Model hijacking**: route any model name (e.g., `fable`) to any upstream
   model, with a system-tray right-click menu to switch routes on the fly.
 - **Cross-platform tray app** (Windows / macOS / Linux), single binary,
@@ -142,12 +150,17 @@ observability. Also: [Usage guide](docs/usage.md) ·
   上游 400 拒了才自动关思考重试一次，且不剥思考块，块随回传带回签名、下一
   轮历史自愈；设为 false 则回到 cc-switch 式的预防性关思考。控制台对悄悄
   升级显双色徽标 [off->low]，历史先试如实显示所请档位。
-- 实时可观测性：本地网页控制台显示在途流、token 与缓存命中统计、逐请求
+- 实时可观测性：本地网页控制台显示在途流（每个流一张合并的活跃+等待卡，
+  发给上游与上游返回的字节分开计数）、token 与缓存命中统计、逐请求
   诊断。流查看器的请求体/返回体按链路侧分存——代理↔上游（代理实发/实收）
   与 下游↔代理（客户端实发/实收），仅两侧有差异的流才双存（翻译流恒不同，
   原生流只在代理改写请求体时才存下游侧；路由改模型的流响应也因模型名写回而两侧不同、同样双存）。控制台界面中英双语：首次运行
   跟随系统语言，网页里可切换，选择存在 `program-settings.txt`（程序设置，
   与路由配置分离——代理绝不重排你的配置文件排版）。
+- **活跃度热图**：状态页「活跃度」按钮弹出 GitHub 风格马赛克图，覆盖
+  最近 48 小时——15 分钟一格，6 个 8 小时行 × 32 列。三个按钮切换颜色
+  深浅的编码口径（请求次数 / 输入+输出 token / 输出 token），悬停显示
+  具体数字与上下行字节。数据落盘 `heatmap.json`，重启不丢。
 - **模型劫持**：把任意模型名（如 `fable`）路由到任意上游模型，系统托盘
   右键菜单一键切换路由。
 - 跨平台托盘应用（Windows / macOS / Linux），单二进制，~40% 测试代码。
