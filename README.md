@@ -52,6 +52,13 @@ providers.
   follows the system language on first run and remembers your choice in
   `program-settings.txt` (program settings, kept separate from the routing
   config — the proxy never rewrites your config file's formatting).
+- **See what your agent is actually doing**: in-flight streams render
+  live as readable text (or raw SSE) while tokens arrive, and finished
+  streams keep their full request/response bodies as an interactive
+  JSON tree, viewable per link side. If you are learning how coding
+  agents work, or just curious what Claude Code / Codex CLI really send
+  and receive — system prompts, tool schemas, cache hits, retries —
+  open the console and watch.
 - **Activity heatmap**: the status page's Activity button opens a
   GitHub-style mosaic of the last 48 hours — 15-minute cells, six
   8-hour rows x 32 columns. Three buttons switch what the color depth
@@ -84,7 +91,7 @@ built by AI agents, directed by someone who depends on them all day.
 <details>
 <summary>Stream viewer</summary>
 
-![Stream viewer: interactive JSON tree of a recorded response, shown per link side, with raw-stream and download options](docs/screenshot-stream.jpg)
+![Stream viewer: in-flight streams rendered live as readable text or raw SSE, finished streams as an interactive JSON tree — per link side, with download options](docs/screenshot-stream.jpg)
 
 </details>
 
@@ -171,6 +178,11 @@ observability. Also: [Usage guide](docs/usage.md) ·
   原生流只在代理改写请求体时才存下游侧；路由改模型的流响应也因模型名写回而两侧不同、同样双存）。控制台界面中英双语：首次运行
   跟随系统语言，网页里可切换，选择存在 `program-settings.txt`（程序设置，
   与路由配置分离——代理绝不重排你的配置文件排版）。
+- **看清你的 agent 在干嘛**：在途流随 token 到达实时渲染为可读文本
+  （可切原始 SSE），完成的流保留完整请求/响应体并展开为交互式 JSON
+  树，按链路侧分别查看。想学习编程 agent 的工作原理，或好奇 Claude
+  Code / Codex 实际在发什么收什么——系统提示词、工具定义、缓存命中、
+  重试——打开控制台就能看到。
 - **活跃度热图**：状态页「活跃度」按钮弹出 GitHub 风格马赛克图，覆盖
   最近 48 小时——15 分钟一格，6 个 8 小时行 × 32 列。三个按钮切换颜色
   深浅的编码口径（请求次数 / 输入+输出 token / 输出 token），悬停显示
@@ -196,7 +208,7 @@ agent 写代码。我不是 Go 开发者，纯 vibe coding——为 AI agent 造
 <details>
 <summary>流查看器</summary>
 
-![流查看器：录制响应的交互式 JSON 树，按链路侧查看，可切原始流与下载](docs/screenshot-stream.jpg)
+![流查看器：在途流实时渲染为可读文本或原始 SSE，完成的流展开为交互式 JSON 树，按链路侧查看、可下载](docs/screenshot-stream.jpg)
 
 </details>
 
