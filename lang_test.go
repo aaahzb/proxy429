@@ -434,9 +434,18 @@ func TestLogViewerHeatmap(t *testing.T) {
 		`>输出</button>`,
 		`>活跃度</div>`,
 		`id="heatMetricRow"`,
+		`('+'+(c/4)+'h')`,                      // tick labels use h in both languages; 时 wrapped mid-label
+		`text-align:center;white-space:nowrap`, // tick labels must not wrap inside their 12px cell
 	} {
 		if !strings.Contains(logViewerHTML, want) {
 			t.Errorf("活跃度热图缺少 %q", want)
 		}
+	}
+	// 活跃度 must not sit next to 清空统计 (misclick hazard): it lives at the far end of the toolbar row.
+	iReset := strings.Index(logViewerHTML, `id="resetStatsBtn"`)
+	iFull := strings.Index(logViewerHTML, `id="fullStoreChk"`)
+	iHeat := strings.Index(logViewerHTML, `id="heatBtn"`)
+	if !(iReset >= 0 && iFull > iReset && iHeat > iFull) {
+		t.Errorf("活跃度按钮应排在工具行末尾（resetStatsBtn < fullStoreChk < heatBtn），实际 %d/%d/%d", iReset, iFull, iHeat)
 	}
 }

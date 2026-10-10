@@ -1075,11 +1075,11 @@ const logViewerHTML = `<!DOCTYPE html>
 <div class="pane active" id="pane-status">
   <div style="margin-bottom:8px"><span class="st idle" id="status">⚪ 连接中</span> <span id="curCfg" style="margin-left:10px;color:#888"></span>
     <button id="resetStatsBtn" class="ghost" style="margin-left:16px;padding:2px 8px">清空统计</button>
-    <button id="heatBtn" class="ghost" style="margin-left:8px;padding:2px 8px" onclick="document.getElementById('heatModalBody').innerHTML=heatHTML();document.getElementById('heatModal').style.display='flex'">活跃度</button>
     <label style="margin-left:12px;color:#9a9a9a">保留完成流: <input id="finishedCapInput" type="number" min="0" max="200" value="10" style="width:50px;background:#1e1e1e;color:#d4d4d4;border:1px solid #333;border-radius:3px;padding:2px 4px;font:inherit"></label>
     <button id="finishedCapBtn" class="ghost" style="padding:2px 8px">设置</button>
     <span id="finishedCapMsg"></span>
     <label style="margin-left:12px;color:#9a9a9a;font-weight:normal" title="开启后新开始的请求记录完整请求体与输出（不设 256KB 上限），流查看器出现「下载请求体/下载输出」按钮；关闭立即清空已存的完整副本，仅能浏览截断内容"><input type="checkbox" id="fullStoreChk"> 储存完整结构体</label>
+    <button id="heatBtn" class="ghost" style="margin-left:12px;padding:2px 8px" onclick="document.getElementById('heatModalBody').innerHTML=heatHTML();document.getElementById('heatModal').style.display='flex'">活跃度</button>
   </div>
   <div id="hijackWarn" style="display:none;background:#3d1414;border:1px solid #c0392b;border-radius:4px;padding:8px 10px;margin-bottom:8px;color:#f0b9b0">⚠ 检测到系统代理已开启，但 NO_PROXY 环境变量未排除回环地址——遵循系统代理的客户端（如 Codex）会把发往 127.0.0.1 的请求交给代理服务器，表现为 503 且本代理收不到任何请求。修复：到「配置」页底部重跑一次 Codex 一键命令（脚本会自动修好），然后重启 Codex。</div>
   <div class="cards" id="cards"></div>
@@ -2586,7 +2586,7 @@ function heatHTML(){
   var labels = ['昨 0-8','昨 8-16','昨 16-24','今 0-8','今 8-16','今 16-24'];
   var h = '<div style="display:grid;grid-template-columns:auto repeat(32,12px);gap:2px;align-items:center;font-size:11px;color:#888">';
   h += '<div></div>';
-  for(c=0;c<32;c++) h += '<div style="text-align:center">'+(c%8===0?('+'+(c/4)+'时'):'')+'</div>';
+  for(c=0;c<32;c++) h += '<div style="text-align:center;white-space:nowrap">'+(c%8===0?('+'+(c/4)+'h'):'')+'</div>';
   for(r=0;r<6;r++){
     h += '<div style="padding-right:4px;white-space:nowrap">'+labels[r]+'</div>';
     for(c=0;c<32;c++){
@@ -3094,7 +3094,6 @@ var enHTMLRepl = [][2]string{
 	{`>输入+输出</button>`, `>In+Out</button>`},
 	{`>输出</button>`, `>Output</button>`},
 	{`'昨 0-8','昨 8-16','昨 16-24','今 0-8','今 8-16','今 16-24'`, `'Yd 0-8','Yd 8-16','Yd 16-24','Today 0-8','Today 8-16','Today 16-24'`},
-	{`('+'+(c/4)+'时')`, `('+'+(c/4)+'h')`},
 	{` 请求 · 输入 `, ` req · in `},
 	{` · 输出 `, ` · out `},
 	{`card('发给上游', fmtBytes(d.bytesUp))`, `card('To upstream', fmtBytes(d.bytesUp))`},
