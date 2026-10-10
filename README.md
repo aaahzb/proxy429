@@ -82,6 +82,27 @@ built by AI agents, directed by someone who depends on them all day.
 ![Status page: in-flight streams, retry counts, token and cache-hit telemetry](docs/screenshot-status.jpg)
 
 <details>
+<summary>Activity heatmap</summary>
+
+![Activity heatmap: last 48 hours in 15-minute cells, color depth switchable between request count, input+output and output tokens](docs/screenshot-heatmap.jpg)
+
+</details>
+
+<details>
+<summary>Stream viewer</summary>
+
+![Stream viewer: interactive JSON tree of a recorded response, shown per link side, with raw-stream and download options](docs/screenshot-stream.jpg)
+
+</details>
+
+<details>
+<summary>Cache-hit details</summary>
+
+![Cache-hit details: hit rate per real upstream model, plus measured cache lifetimes](docs/screenshot-cache.jpg)
+
+</details>
+
+<details>
 <summary>Request log page</summary>
 
 ![Log page: per-request routing, retries, first-token and throughput timing](docs/screenshot-logs.jpg)
@@ -178,6 +199,27 @@ agent 写代码。我不是 Go 开发者，纯 vibe coding——为 AI agent 造
 ### 截图
 
 ![状态页：在途流、重试次数、token 与缓存命中统计](docs/screenshot-status.jpg)
+
+<details>
+<summary>活跃度热图</summary>
+
+![活跃度热图：最近 48 小时、15 分钟一格，颜色深浅口径可切换请求次数 / 输入+输出 / 输出 token](docs/screenshot-heatmap.jpg)
+
+</details>
+
+<details>
+<summary>流查看器</summary>
+
+![流查看器：录制响应的交互式 JSON 树，按链路侧查看，可切原始流与下载](docs/screenshot-stream.jpg)
+
+</details>
+
+<details>
+<summary>缓存命中明细</summary>
+
+![缓存命中明细：按真实上游模型统计命中率，并实测缓存存活时间](docs/screenshot-cache.jpg)
+
+</details>
 
 <details>
 <summary>请求日志页</summary>
