@@ -119,6 +119,32 @@ built by AI agents, directed by someone who depends on them all day.
 
 </details>
 
+### Download
+
+Prebuilt binaries are on the [Releases](https://github.com/aaahzb/proxy429/releases) page:
+
+| Platform | File |
+|---|---|
+| Windows x64 | `Proxy429-windows-x64.exe` |
+| Linux x64 | `Proxy429-linux-x64.tar.gz` (tar.gz keeps the executable bit) |
+| macOS Apple Silicon (arm64) | `Proxy429-macOS-AppleSilicon-arm64.dmg` |
+
+> [!WARNING]
+> **macOS: "Apple cannot check Proxy429 for malicious software" on first
+> launch.** The app is ad-hoc signed — no Apple Developer ID certificate,
+> no Apple notarization — so Gatekeeper blocks the first launch of every
+> downloaded copy. Two ways past it:
+> 1. **System Settings → Privacy & Security**, scroll to the Security
+>    section, click **Open Anyway** next to the Proxy429 entry, and
+>    confirm. (On macOS 14 and earlier, right-click → **Open** works too.)
+> 2. Or remove the quarantine flag once in Terminal:
+>    `xattr -d com.apple.quarantine /Applications/Proxy429.app`
+>
+> Either is a one-time fix per install, but the warning returns after
+> every update that replaces the app. Windows SmartScreen ("Windows
+> protected your PC") is the same story for the unsigned exe: **More info
+> → Run anyway**.
+
 ### Quick Start
 
 1. Build with `build.sh` (outputs `release/proxy429`, or
@@ -238,6 +264,29 @@ agent 写代码。我不是 Go 开发者，纯 vibe coding——为 AI agent 造
 ![配置页：浏览器内编辑 JSON 配置，并按当前配置实时生成 Codex 一键配置命令](docs/screenshot-config.jpg)
 
 </details>
+
+### 下载
+
+各平台预编译包见 [Releases](https://github.com/aaahzb/proxy429/releases) 页：
+
+| 平台 | 文件 |
+|---|---|
+| Windows x64 | `Proxy429-windows-x64.exe` |
+| Linux x64 | `Proxy429-linux-x64.tar.gz`（tar.gz 保留可执行权限） |
+| macOS Apple Silicon（arm64） | `Proxy429-macOS-AppleSilicon-arm64.dmg` |
+
+> [!WARNING]
+> **macOS 首次启动报「无法验证是否包含恶意软件」**：应用为 ad-hoc 自签名
+> （没有 Apple 开发者证书、未做 Apple 公证），Gatekeeper 会拦截所有下载
+> 来源的首次启动。两种解法任选：
+> 1. **系统设置 → 隐私与安全性**，拉到「安全性」区域，点 Proxy429 旁的
+>    **「仍要打开」**并确认（macOS 14 及更早也可以右键 → 打开）。
+> 2. 或在终端执行一次：
+>    `xattr -d com.apple.quarantine /Applications/Proxy429.app`
+>
+> 两种都只需操作一次，但覆盖更新后警告会重新出现，需要再来一遍。Windows 的
+> SmartScreen（「Windows 已保护你的电脑」）是同一性质的未签名提示：点
+> 「更多信息 → 仍要运行」。
 
 ### 文档
 
