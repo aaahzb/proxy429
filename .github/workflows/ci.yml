@@ -38,8 +38,11 @@ jobs:
 
       # One unambiguous platform line at the top of every job log. The matrix label says
       # x64 because that is the term Windows/Linux users recognize for amd64.
+      # A block scalar keeps the colons in the echo text legal for YAML.
       - name: Show target platform
-        run: echo "target platform: ${{ matrix.os }} (${{ matrix.arch }}), runner: ${{ runner.os }} (${{ runner.arch }})"
+        run: |
+          echo "target platform: ${{ matrix.os }} (${{ matrix.arch }})"
+          echo "runner: ${{ runner.os }} (${{ runner.arch }})"
 
       - uses: actions/setup-go@v5
         with:
