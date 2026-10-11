@@ -1,0 +1,51 @@
+# CI: re-run the local verification pipeline (vet, tests, gofmt, build.sh) on every
+# push to main and every PR, on all three target platforms.
+# macOS runs on Apple Silicon runners, which also natively satisfies the systray cgo (AppKit) build.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # build.sh defaults GOPROXY to goproxy.cn; the canonical proxy is more reliable from GitHub runners.
+  GOPROXY: https://proxy.golang.org,direct
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Repo blobs are stored LF (local checkouts may be CRLF via autocrlf), so an exact
+      # gofmt check only works on a guaranteed-LF checkout: ubuntu.
+      - name: gofmt check
+        if: matrix.os == 'ubuntu-latest'
+        run: test -z "$(gofmt -l .)"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: build.sh
+        run: bash build.sh
