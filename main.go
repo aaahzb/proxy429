@@ -5597,6 +5597,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// noTrayFlag selects headless mode: no system tray (CI runners and smoke rigs have no tray to click).
+// The HTTP server and web console still run; the process stops on Ctrl+C / SIGTERM like a bare server.
+var noTrayFlag = flag.Bool("no-tray", false, "run without the system tray (headless/CI); stop with Ctrl+C")
+
 func main() {
 	configPath := flag.String("config", "", "config file path (empty = look up ./config.json then the user config dir)")
 	flag.Parse()
@@ -5658,6 +5662,12 @@ func main() {
 	// Loopback-hijack watchdog (read-only): system proxy on + NO_PROXY missing -> red tray light + console banner,
 	// so a silently-vanished codex NO_PROXY fix is noticed before Codex 503s, not after.
 	go watchProxyHijack()
+	if *noTrayFlag {
+		// Headless: no tray event loop to occupy the main thread; block here and let
+		// Ctrl+C / SIGTERM end the process with their default behavior.
+		log.Printf("no-tray mode: system tray disabled; Ctrl+C to stop")
+		select {}
+	}
 	// Ctrl+C -> graceful tray exit: systray.Quit triggers onExit to stop status polling; once Run returns, main exits.
 	go func() {
 		sigCh := make(chan os.Signal, 1)

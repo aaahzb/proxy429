@@ -19,3 +19,9 @@ config.json
 
 # Local release directory (binaries + config templates, local-only, never committed)
 release/
+
+# Smoke rig (test/smoke/): the committed config fixture is synthetic localhost-only — the global
+# config.json ignore above guards real user configs; smoke outputs never enter git.
+!test/smoke/config.json
+test/smoke/out/
+test/smoke/heatmap.dat

@@ -101,7 +101,7 @@ The startup log (containing `proxy started vc639d56-1606: listening http://127.0
 
 > By default `resolveConfigPath` resolves the config path as: `-config` flag > `./config.json` in the current directory (if present) > `os.UserConfigDir()/proxy429/config.json` (macOS `~/Library/Application Support/proxy429/`, Linux `~/.config/proxy429/`, Windows `%AppData%/proxy429/`). On first run without a config, one is generated from the embedded `config.example.json`. For local mock testing use `-config test/config_test.json` — see "Local testing" below.
 >
-> After startup a status-light icon appears: in the menu bar on macOS (`.app` packaging, `LSUIElement=true`, no Dock icon), in the system tray on Windows/Linux. The right-click menu is identical across platforms: 「查看日志」 (Open console — opens the web console in a browser), 「切换配置」 (Switch config — a submenu listing the config files in the config directory, the current one ticked, plus 「刷新列表」/Refresh list), and 「退出代理」 (Quit proxy). Windows builds use the GUI subsystem (`-H=windowsgui`): no console window on launch, pure tray operation.
+> After startup a status-light icon appears: in the menu bar on macOS (`.app` packaging, `LSUIElement=true`, no Dock icon), in the system tray on Windows/Linux. The right-click menu is identical across platforms: 「查看日志」 (Open console — opens the web console in a browser), 「切换配置」 (Switch config — a submenu listing the config files in the config directory, the current one ticked, plus 「刷新列表」/Refresh list), and 「退出代理」 (Quit proxy). Windows builds use the GUI subsystem (`-H=windowsgui`): no console window on launch, pure tray operation. Passing `-no-tray` skips the tray entirely (headless servers, CI): the process behaves like a bare HTTP server and stops on Ctrl+C/SIGTERM.
 
 ### 2. Point Claude Code at the proxy
 
@@ -543,6 +543,7 @@ The `test/` directory holds files for local re-testing without ARK:
 
 - `test/mock_429.go`: a mock server switching among three upstream behaviors via `?mode=` — `429` (status-code retry), `bodyerr` (200 + in-body error retry), `ok` (normal pass-through, with `usage` and `message_delta`, so the web console's Status tab shows tokens ticking). It also prints the received `thinking`/`reasoning_effort`/`max_tokens` for verifying the classifier rewrite.
 - `test/config_test.json`: test config pointing at the local mock, with small retry intervals and `Retry-After` disabled for fast iteration.
+- `test/smoke/`: the committed end-to-end rig (fixtures are synthetic, localhost-only). `smoke.sh` is cross-platform: it builds the mock (9099), launches the freshly built `release/` binary with `-no-tray` on 18083/18084, fires chained Anthropic + Responses requests, and asserts lineage pairing, classifier counters and rewrite payloads, traffic counters, and the heat snapshot. `exe-watchdog.sh` is the Windows-only proxycheck E2E (armed path via a fake `reg` earlier in PATH; quiet path on a clean machine). Both need a fresh `bash build.sh` first; CI runs `smoke.sh` on ubuntu/windows/macos and `exe-watchdog.sh` on Windows.
 
 Re-test flow (run from the project root):
 

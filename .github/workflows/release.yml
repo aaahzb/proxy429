@@ -29,6 +29,8 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: bash build.sh
+      - run: bash test/smoke/smoke.sh
+      - run: bash test/smoke/exe-watchdog.sh
       - run: mv release/proxy429.exe release/proxy429-windows-amd64.exe
       - uses: actions/upload-artifact@v4
         with:
@@ -44,6 +46,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: bash build.sh
+      - run: bash test/smoke/smoke.sh
       # tar.gz keeps the executable bit, which plain artifact upload does not preserve.
       - run: tar -czf release/proxy429-linux-amd64.tar.gz -C release proxy429 usage.md
       - uses: actions/upload-artifact@v4
@@ -63,6 +66,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: bash build.sh
+      - run: bash test/smoke/smoke.sh
       - name: Package DMG
         run: |
           mkdir -p dmg-staging

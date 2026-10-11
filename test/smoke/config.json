@@ -1,0 +1,14 @@
+{
+  "listen": "127.0.0.1:18083",
+  "responses_listen": "127.0.0.1:18084",
+  "upstream": "http://127.0.0.1:9099/ok",
+  "max_retries": 3,
+  "base_delay_s": 0.2,
+  "max_delay_s": 2,
+  "total_budget_s": 10,
+  "retry_status_codes": [429, 500, 502, 503, 504],
+  "respect_retry_after": false,
+  "log_request_detail": false,
+  "recent_sample_window": 20,
+  "classifier_route": { "url": "http://127.0.0.1:9099/think", "classifier_thinking_cc": "off", "classifier_thinking_codex": "low" }
+}

@@ -49,3 +49,11 @@ jobs:
 
       - name: build.sh
         run: bash build.sh
+
+      # Headless end-to-end: mock upstream on 9099 + the just-built binary on 18083/18084 with -no-tray.
+      - name: smoke test
+        run: bash test/smoke/smoke.sh
+
+      - name: proxycheck watchdog E2E (Windows-only)
+        if: matrix.os == 'windows-latest'
+        run: bash test/smoke/exe-watchdog.sh

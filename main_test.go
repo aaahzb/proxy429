@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -3443,5 +3444,17 @@ func TestClassifierAlreadyTargetPassThrough(t *testing.T) {
 				t.Errorf("classifierRewrites=%d want %d", got, tc.wantCount)
 			}
 		})
+	}
+}
+
+// TestNoTrayFlagRegistered: the -no-tray flag must exist and default to false — headless runs
+// (CI runners, the smoke rig) rely on it to skip the system tray.
+func TestNoTrayFlagRegistered(t *testing.T) {
+	f := flag.Lookup("no-tray")
+	if f == nil {
+		t.Fatal("缺少 -no-tray 标志：无头模式（CI/冒烟）需要它关闭托盘")
+	}
+	if f.DefValue != "false" {
+		t.Errorf("-no-tray 默认值应为 false，实际为 %q", f.DefValue)
 	}
 }

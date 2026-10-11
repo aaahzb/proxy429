@@ -28,7 +28,7 @@ A default config (with placeholder keys — replace with your own) is generated 
 | Windows | `%AppData%\proxy429\config.json` |
 | Linux | `~/.config/proxy429/config.json` |
 
-If the startup directory has a `./config.json` it takes priority (handy for debugging in a project directory). You can also pass `-config <path>`.
+If the startup directory has a `./config.json` it takes priority (handy for debugging in a project directory). You can also pass `-config <path>`. Pass `-no-tray` to run headless (no tray icon — useful on servers and in CI); the web console still works and Ctrl+C stops the process.
 
 **Editing the config is best done on the web console's 「配置」 (Config) tab** — JSON is validated before saving (broken JSON never hits disk), and clicking 「保存并重载」 (Save & reload) takes effect immediately, no restart needed.
 
