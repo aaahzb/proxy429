@@ -170,10 +170,10 @@ func TestCodexScriptHandlerValidation(t *testing.T) {
 		"catalog 空段":     "/__codexsetup.ps1?catalog=a,,b",
 		"catalog 含空格":    "/__codexsetup.ps1?catalog=a%20b",
 		"catalog 超 64 段": "/__codexsetup.ps1?catalog=" + string(bytes.Repeat([]byte("a,"), 65)) + "a",
-		"ctx 非数字":      "/__codexsetup.ps1?ctx=abc",
-		"ctx 越界":       "/__codexsetup.ps1?ctx=100",
-		"compact 越界":   "/__codexsetup.ps1?compact=100",
-		"compact 带引号":  "/__codexsetup.ps1?compact=9'0",
+		"ctx 非数字":        "/__codexsetup.ps1?ctx=abc",
+		"ctx 越界":         "/__codexsetup.ps1?ctx=100",
+		"compact 越界":     "/__codexsetup.ps1?compact=100",
+		"compact 带引号":    "/__codexsetup.ps1?compact=9'0",
 	}
 	for name, target := range bad {
 		if code, _ := serveCodexScript(t, ps1, target); code != http.StatusBadRequest {

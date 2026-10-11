@@ -154,9 +154,9 @@ func TestHandlerConvertAllToStream(t *testing.T) {
 	defer mock.Close()
 
 	cfg.Store(&Config{
-		Upstream:          mock.URL,
-		MaxRetries:        0,
-		TotalBudgetSec:    10,
+		Upstream:           mock.URL,
+		MaxRetries:         0,
+		TotalBudgetSec:     10,
 		ConvertAllToStream: true,
 		Routes: []RouteRule{
 			{Pattern: "claude-opus*", URL: mock.URL, Model: "deepseek-v4-flash"},

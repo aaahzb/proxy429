@@ -37,9 +37,12 @@ jobs:
 
       # Repo blobs are stored LF (local checkouts may be CRLF via autocrlf), so an exact
       # gofmt check only works on a guaranteed-LF checkout: ubuntu.
+      # Print the offenders before failing, or the log shows only "exit code 1".
       - name: gofmt check
         if: matrix.os == 'ubuntu-latest'
-        run: test -z "$(gofmt -l .)"
+        run: |
+          bad="$(gofmt -l .)"
+          [ -z "$bad" ] || { echo "not gofmt-formatted:"; echo "$bad"; exit 1; }
 
       - name: go vet
         run: go vet ./...
