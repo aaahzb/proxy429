@@ -93,4 +93,6 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${{ github.ref_name }}" dist/* --title "${{ github.ref_name }}" --generate-notes
+        # This job never checks out the repo, so gh cannot infer the target from git
+        # remotes and dies with "not a git repository". -R pins it explicitly.
+        run: gh release create "${{ github.ref_name }}" dist/* --title "${{ github.ref_name }}" --generate-notes -R "${{ github.repository }}"
