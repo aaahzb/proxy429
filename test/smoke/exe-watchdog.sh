@@ -49,10 +49,21 @@ wait_ports() { for i in $(seq 1 40); do
   probe 18083 /__logs && probe 18084 / && return 0 # console endpoint / mux 404: no flight created
   sleep 0.5
 done; return 1; }
-kill_proxy() { [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null; wait "$PROXY_PID" 2>/dev/null; PROXY_PID=""; sleep 1; }
+kill_proxy() {
+  [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null; wait "$PROXY_PID" 2>/dev/null; PROXY_PID=""
+  sleep 1
+  # Insurance against MSYS kill quirks: if the exe still squats on 18083, taskkill the port owner,
+  # otherwise the next wait_ports would latch onto the zombie and the run would silently test it.
+  local wpid; wpid=$(netstat -ano | grep ':18083 ' | grep LISTENING | awk '{print $NF}' | head -1)
+  [ -n "$wpid" ] && { taskkill //F //PID "$wpid" >/dev/null 2>&1; sleep 1; }
+  return 0
+}
 
 echo "=== Run A: armed path (fake reg + env NO_PROXY stripped) ==="
-PATH="$FAKE:$PATH" env -u NO_PROXY -u no_proxy ./release/proxy429.exe -config "$CFG" -no-tray >"$OUT/exe-a.log" 2>&1 &
+# Launch via exec-subshell, not an `env` wrapper: MSYS `env` spawns the native exe as a grandchild
+# and killing the wrapper PID can orphan it (observed in practice: a zombie still holding
+# 18083/18084 after the trap ran). exec replaces the subshell, so $PROXY_PID IS the exe itself.
+( PATH="$FAKE:$PATH"; unset NO_PROXY no_proxy; exec ./release/proxy429.exe -config "$CFG" -no-tray ) >"$OUT/exe-a.log" 2>&1 &
 PROXY_PID=$!
 wait_ports || { echo "ABORT: ports never up (A)"; exit 1; }
 sleep 1
@@ -66,8 +77,12 @@ ck "$v" "1" "version stamp matches HEAD build"
 ck "$code1" "200" "anthropic port proxies"
 ck "$code2" "200" "responses port proxies"
 ck "$(grep -o '"hijackRisk":true' "$OUT/data-a.json" | head -1)" '"hijackRisk":true' "hijackRisk armed in /__logs/data"
-ck "$(grep -c '\[proxycheck\] system proxy is on' "$OUT/exe-a.log")" "1" "armed transition log line"
-ck "$(grep -o '10\.10\.1\.105:8118' "$OUT/exe-a.log" | head -1)" "10.10.1.105:8118" "log line carries proxy address"
+# Assert against the log ring in /__logs/data (the canonical store the console polls), not the
+# stderr capture: this is a GUI-subsystem exe launched through MSYS layers, where a single stderr
+# write can vanish while the ring (fetched over HTTP from the process under test) is reliable.
+# data-a.json is one compact JSON line, so count occurrences with grep -o, not lines with grep -c.
+ck "$(grep -o '\[proxycheck\] system proxy is on' "$OUT/data-a.json" | wc -l)" "1" "armed transition log line"
+ck "$(grep -o '10\.10\.1\.105:8118' "$OUT/data-a.json" | head -1)" "10.10.1.105:8118" "log line carries proxy address"
 bw=$(grep -c 'id="hijackWarn"' "$OUT/page-a.html"); [ "$bw" -ge 1 ] && bw=1
 ck "$bw" "1" "banner div present in page"
 js=$(grep -c 'd\.hijackRisk' "$OUT/page-a.html"); [ "$js" -ge 1 ] && js=1
@@ -75,13 +90,14 @@ ck "$js" "1" "poll JS toggles banner on hijackRisk"
 kill_proxy
 
 echo "=== Run B: quiet path (real registry + env NO_PROXY stripped) ==="
-env -u NO_PROXY -u no_proxy ./release/proxy429.exe -config "$CFG" -no-tray >"$OUT/exe-b.log" 2>&1 &
+( unset NO_PROXY no_proxy; exec ./release/proxy429.exe -config "$CFG" -no-tray ) >"$OUT/exe-b.log" 2>&1 &
 PROXY_PID=$!
 wait_ports || { echo "ABORT: ports never up (B)"; exit 1; }
 sleep 1
 curl -s --max-time 10 http://127.0.0.1:18083/__logs/data > "$OUT/data-b.json"
 ck "$(grep -c '"hijackRisk"' "$OUT/data-b.json")" "0" "hijackRisk absent (omitempty, quiet)"
-ck "$(grep -c '\[proxycheck\]' "$OUT/exe-b.log")" "0" "zero proxycheck log lines (quiet)"
+# Ring target here too: a lost stderr write would make the zero-count pass vacuously.
+ck "$(grep -o '\[proxycheck\]' "$OUT/data-b.json" | wc -l)" "0" "zero proxycheck log lines (quiet)"
 kill_proxy
 
 [ $fail -eq 0 ] && echo "EXE TEST PASS" || { echo "EXE TEST FAIL"; exit 1; }
