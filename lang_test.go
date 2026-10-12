@@ -133,6 +133,34 @@ func TestRenderLogViewerEN(t *testing.T) {
 	}
 }
 
+// TestLogViewerVersionBadge: the console header carries a version badge next to the language switch —
+// beta builds show "beta <hash>-<HHMM>", release builds "release vX.Y.Z.N" (the stamp comes from build.sh
+// via -ldflags). The __VERSION__ placeholder must always be substituted in the served page.
+func TestLogViewerVersionBadge(t *testing.T) {
+	old := currentUILang()
+	applyUILang("zh")
+	defer applyUILang(old)
+	oldV := Version
+	defer func() { Version = oldV }()
+	for _, v := range []string{"beta cd66927-2100", "release v2026.10.12.1"} {
+		Version = v
+		r := httptest.NewRequest(http.MethodGet, "/__logs", nil)
+		r.RemoteAddr = "127.0.0.1:12345" // isLocalRequest gate
+		w := httptest.NewRecorder()
+		logViewerHandler(w, r)
+		body := w.Body.String()
+		if !strings.Contains(body, `id="verBox"`) {
+			t.Fatalf("页面缺少版本徽章 verBox")
+		}
+		if !strings.Contains(body, ">"+v+"<") {
+			t.Errorf("版本徽章应原样显示 %q", v)
+		}
+		if strings.Contains(body, "__VERSION__") {
+			t.Errorf("__VERSION__ 占位符未被替换")
+		}
+	}
+}
+
 // TestRenderLogViewerENNoChinese is the leak-proof backstop: no Chinese characters may remain in the English-rendered page
 // (except JS comments — // line comments are stripped before the check). Adding Chinese copy without
 // an English counterpart makes this test fail immediately.

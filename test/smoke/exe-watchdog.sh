@@ -71,8 +71,14 @@ curl -s --max-time 10 http://127.0.0.1:18083/__logs/data > "$OUT/data-a.json"
 code1=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST http://127.0.0.1:18083/v1/messages -H "Content-Type: application/json" -d '{"model":"smoke","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}')
 code2=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST http://127.0.0.1:18084/v1/responses -H "Content-Type: application/json" -d '{"model":"gpt-5-codex","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}')
 curl -s --max-time 10 http://127.0.0.1:18083/__logs > "$OUT/page-a.html"
-# The version stamp is "<HEAD short hash>-<build HHMM>" — pin the hash part so a stale exe is caught.
-if grep -q '"version":"'"$(git rev-parse --short HEAD)"'-' "$OUT/data-a.json"; then v=1; else v=0; fi
+# The version stamp mirrors build.sh: "release <tag>" when HEAD is exactly a version tag (CD tag builds),
+# else "beta <HEAD short hash>-<build HHMM>". Pin it so a stale exe is caught.
+if TAG=$(git describe --exact-match --tags HEAD 2>/dev/null); then
+  vexp='"version":"release '"$TAG"
+else
+  vexp='"version":"beta '"$(git rev-parse --short HEAD)"'-'
+fi
+if grep -q "$vexp" "$OUT/data-a.json"; then v=1; else v=0; fi
 ck "$v" "1" "version stamp matches HEAD build"
 ck "$code1" "200" "anthropic port proxies"
 ck "$code2" "200" "responses port proxies"

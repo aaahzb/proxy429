@@ -63,6 +63,9 @@ func logViewerHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		page = strings.Replace(page, "__DOC_BODY__", logViewerDocZH, 1)
 	}
+	// The version badge sits next to the language switch. The stamp is build-controlled ASCII
+	// ("beta <hash>-<HHMM>" or "release vX.Y.Z.N"), safe to inline unescaped in either language.
+	page = strings.Replace(page, "__VERSION__", Version, 1)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write([]byte(page))
@@ -1064,7 +1067,8 @@ const logViewerHTML = `<!DOCTYPE html>
   <div class="tab" data-tab="config">配置</div>
   <span id="hint">关闭此标签页即隐藏 · 代理继续运行</span>
   <button id="docBtn" class="ghost" style="align-self:center;margin:0 12px" onclick="document.getElementById('docModal').style.display='flex'">文档</button>
-  <span id="langBox" style="align-self:center;margin-left:auto;padding-right:12px;color:#9a9a9a">语言
+  <span id="verBox" style="align-self:center;margin-left:auto;padding-right:12px;color:#666;font-size:12px">__VERSION__</span>
+  <span id="langBox" style="align-self:center;padding-right:12px;color:#9a9a9a">语言
     <select id="langSel" style="background:#1e1e1e;color:#d4d4d4;border:1px solid #333;border-radius:3px;padding:2px 4px;font:inherit">
       <option value="zh">中文</option>
       <option value="en">English</option>

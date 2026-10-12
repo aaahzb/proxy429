@@ -133,7 +133,8 @@ type SearchRoute struct {
 	SummaryLevel    string `json:"summary_level"`            // Summary detail under summary_mode: low (default, brief) / mid (medium) / high (thorough)
 }
 
-// Version is the proxy version, injected at build time via -ldflags "-X main.Version=<git-short>"; default dev.
+// Version is the build stamp, injected by build.sh via -ldflags "-X main.Version=...": "release vX.Y.Z.N" when
+// HEAD is exactly a version tag (CD tag builds), otherwise "beta <git-short>-<HHMM>"; bare go builds show "dev".
 var Version = "dev"
 
 // debugSearchDirOverride is injected via ldflags (debug builds): forces search-summary step raws into this directory, ignoring config.search_debug_dir.
@@ -5671,7 +5672,7 @@ func main() {
 		log.Printf("[config] WARNING: %s (the key is inert; the proxy runs without its old behavior)", removedKeyWarningEN(k))
 	}
 
-	log.Printf("proxy started v%s: listening http://%s -> forwarding to %s (max retries %d, classifier thinking: cc=%q codex=%q)",
+	log.Printf("proxy started %s: listening http://%s -> forwarding to %s (max retries %d, classifier thinking: cc=%q codex=%q)",
 		Version, c.Listen, c.Upstream, c.MaxRetries, classifierThinkingModeFor(c, classifierCC), classifierThinkingModeFor(c, classifierCodex))
 
 	// The HTTP server runs in a goroutine: the tray event loop (systray.Run) must occupy the main thread (macOS requires UI on the main thread),
