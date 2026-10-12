@@ -90,9 +90,47 @@ jobs:
           pattern: Proxy429-*
           merge-multiple: true
           path: dist
+      # Full history + tags so the notes step can diff against the previous release tag.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # --generate-notes only summarizes merged PRs, and this repo pushes straight to main,
+      # so it degenerated to a bare Full Changelog link. Build the notes from git log instead:
+      # the commit list between the previous tag and this one, then the static download table
+      # and the unsigned-app first-launch warning (same content as the README Download section).
+      - name: Generate release notes
+        run: |
+          cur="${{ github.ref_name }}"
+          prev="$(git describe --tags --abbrev=0 "${cur}^" 2>/dev/null || true)"
+          {
+            if [ -n "$prev" ]; then
+              echo "## What changed since ${prev}"
+              echo
+              git log --no-merges --pretty=format:'- %s (%h)' "${prev}..${cur}"
+              echo
+              echo
+              echo "**Full diff**: https://github.com/${{ github.repository }}/compare/${prev}...${cur}"
+            else
+              echo "## What changed"
+              echo
+              git log --no-merges --pretty=format:'- %s (%h)' "${cur}"
+              echo
+            fi
+            echo
+            echo "## Download"
+            echo
+            echo '| Platform | File |'
+            echo '|---|---|'
+            echo '| Windows x64 | `Proxy429-windows-x64.exe` |'
+            echo '| Linux x64 | `Proxy429-linux-x64.tar.gz` (tar.gz keeps the executable bit) |'
+            echo '| macOS Apple Silicon (arm64) | `Proxy429-macOS-AppleSilicon-arm64.dmg` |'
+            echo
+            echo '> **First launch warning (expected, not a defect)**: the builds carry no paid code-signing certificate (macOS is ad-hoc signed without Apple notarization; Windows has no Authenticode certificate), so the OS warns on first launch. macOS: System Settings > Privacy & Security > Open Anyway, or run `xattr -d com.apple.quarantine /Applications/Proxy429.app` once. Windows SmartScreen: More info > Run anyway. The warning returns after every update that replaces the app.'
+          } > notes.md
+          cat notes.md
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # This job never checks out the repo, so gh cannot infer the target from git
-        # remotes and dies with "not a git repository". -R pins it explicitly.
-        run: gh release create "${{ github.ref_name }}" dist/* --title "${{ github.ref_name }}" --generate-notes -R "${{ github.repository }}"
+        # -R pins the target repo explicitly; the checkout above exists for git log, not for gh
+        # (an earlier no-checkout version died on "not a git repository").
+        run: gh release create "${{ github.ref_name }}" dist/* --title "${{ github.ref_name }}" --notes-file notes.md -R "${{ github.repository }}"
