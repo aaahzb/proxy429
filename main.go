@@ -4917,7 +4917,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a flight for this request: the web console shows in-flight streams (#id/elapsed/bytes).
-	// ctx cancels automatically when the client disconnects (r.Context()); both the upstream request and retry waits build on it, so a disconnect aborts retries.
+	// ctx cancels automatically when the client disconnects (r.Context()); retry waits build on it, so a disconnect aborts retries.
+	// The upstream request builds on upCtx instead (created below once the flight exists).
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	f := &flight{
@@ -4926,6 +4927,26 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 	f.stageStart.Store(f.start.UnixNano()) // Light-color timing starts at stream creation (the white light times from request receipt)
 	flights.register(f)
+	// The upstream request runs on its own context, decoupled from the client context: Codex closes the connection
+	// the instant the terminal event (message_stop / response.completed) arrives, and severing the upstream then makes
+	// the provider's nginx log a 499 for a response it had in fact fully sent. The watcher propagates a disconnect
+	// only while delivery is incomplete (genuine mid-stream cancels still sever the upstream, so both sides record a
+	// real 499); once delivered, it only arms a grace timer so the forwarding loop drains the upstream body to EOF.
+	upCtx, upCancel := context.WithCancel(context.Background())
+	defer upCancel()
+	handlerDone := make(chan struct{})
+	defer close(handlerDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			if !f.delivered.Load() {
+				upCancel()
+			} else {
+				time.AfterFunc(10*time.Second, upCancel) // Delivered but the upstream hangs: cap the drain so nothing leaks
+			}
+		case <-handlerDone:
+		}
+	}()
 	// Internal requests from the Responses translation port carry a context marker tagging the flight's origin;
 	// the web API column shows [translate]/[Response] (alongside the route-reason tag).
 	if v, ok := r.Context().Value(ctxKeyTranslated).(string); ok {
@@ -5322,7 +5343,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			f.setReqDown(downBody)
 			downBody = nil // The client's original doesn't change; storing it once suffices
 		}
-		upReq, err := http.NewRequestWithContext(ctx, r.Method, upstream+upPath, bytes.NewReader(body))
+		upReq, err := http.NewRequestWithContext(upCtx, r.Method, upstream+upPath, bytes.NewReader(body))
 		if err != nil {
 			log.Printf("[error] failed to build upstream request: %v", err)
 			http.Error(w, "build request failed", http.StatusBadGateway)
