@@ -19,6 +19,15 @@ providers.
 > nothing hidden. The most literal way there is to learn how Claude Code /
 > Codex CLI really work.
 
+> [!TIP]
+> **💰 On a pricey model plan? Stop spending it on safety checks.** Claude
+> Code and Codex fire small background calls you never see — safety
+> classifiers, guardian approvals — and unrouted, they bill against your
+> premium model like any other request. Point `classifier_route` at a
+> cheap model (add `classifier_thinking: "off"` for instant, thinking-free
+> answers) and that chatter never touches your main quota again. The
+> status page's classifier counter shows how much traffic gets diverted.
+
 - **Automatic retry with exponential backoff** on 429/5xx — including
   rate-limit errors hidden inside HTTP-200 SSE streams — with SSE keep-alive
   pings so the client never times out while the proxy retries.
@@ -186,6 +195,14 @@ observability. Also: [Usage guide](docs/usage.md) ·
 > 完成的流保留完整请求/响应体、展开成交互式 JSON 树，按链路侧随便翻。
 > 系统提示词、工具定义、缓存命中、重试——明厨亮灶，一览无余。学习
 > Claude Code / Codex 工作原理最直观的方式，没有之一。
+
+> [!TIP]
+> **💰 贵价套餐的额度，别浪费在安全检查上。** Claude Code / Codex 会在
+> 你看不见的地方持续发小请求——安全分类器、guardian 审批——不配专用
+> 路由时，这些调用和正文一样计在高级模型头上。把 `classifier_route`
+> 指向便宜模型（配上 `classifier_thinking: "off"` 让它无思考秒回），
+> 这类后台消耗从此不碰主模型额度；状态页「分类器」计数卡如实显示这类
+> 调用的真实频率，分流了多少一目了然。
 
 功能亮点：
 - 429/5xx 自动重试（指数退避，含藏在 200 流里的错误），SSE 保活让客户端
