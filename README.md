@@ -31,56 +31,30 @@ providers.
 > classifier counter shows how much traffic gets diverted.
 
 - **Automatic retry with exponential backoff** on 429/5xx — including
-  rate-limit errors hidden inside HTTP-200 SSE streams — with SSE keep-alive
-  pings so the client never times out while the proxy retries.
-- **Model routing**: wildcard routing across providers, dedicated routes for
-  safety-classifier and fast-mode requests, multimodal and web-search
+  rate-limit errors hidden inside HTTP-200 SSE streams — with SSE
+  keep-alive so the client never times out mid-retry.
+- **Model routing**: wildcard routing across providers, dedicated routes
+  for safety-classifier and fast-mode requests, multimodal and web-search
   fallbacks.
 - **Protocol translation**: OpenAI Responses ↔ Anthropic Messages — tool
-  calling, reasoning-mode mapping (adaptive / budget / effort), and
-  byte-level key-order preservation so provider prompt caches stay valid.
-- **Search envelope**: web-search results are sealed into an encrypted
-  envelope in the response; follow-up questions read the previous search
-  content directly without re-searching (translation path only — Claude
-  Code runs its own independent search).
-- **Silent low-thinking upgrade** (per-route `"convertOff2Low": "translate" /
-  "all"` on routes/fallbacks; translate = Responses translation port only,
-  all adds the Anthropic native port): explicit thinking-off requests are
-  quietly upgraded to low thinking upstream, and thinking blocks are stripped
-  on the way back so the
-  client still sees a thinking-off response (usage stays truthful). Avoids
-  Kimi's documented "thinking off routes K3-series to the K2.8 Preview
-  no-thinking model" downgrade. The history door is governed separately by
-  the top-level `"allowNoThinkBlock4Anthropic"` (default `true`): a
-  tool-continuation whose history has no signed thinking block to replay
-  still goes upstream with the requested thinking mode (with convertOff2Low
-  on: the requested effort, low as floor when none was given), and only a
-  real upstream 400 triggers one automatic retry with thinking off; returned
-  thinking blocks are NOT stripped, so the history heals on the next turn.
-  Set it to `false` for cc-switch-style preemptive thinking-off over such
-  histories. The console shows a two-tone `[off->low]` badge for the quiet
-  upgrade (the history try-on shows the requested effort as-is).
-- **Live observability**: a local web console showing in-flight streams
-  (one merged active/waiting card per stream, with bytes sent to
-  upstream and bytes returned counted separately), token and cache-hit
-  telemetry, and per-request diagnostics. The stream
-  viewer records request/response bodies per link side — proxy↔upstream
-  (what the proxy actually sent and received) and client↔proxy (what your
-  agent sent and received) — stored separately only when they differ
-  (translation streams always differ; direct streams only when the proxy
-  rewrote the body). The console UI is bilingual (中文/English): it
-  follows the system language on first run and remembers your choice in
-  `program-settings.txt` (program settings, kept separate from the routing
-  config — the proxy never rewrites your config file's formatting).
-- **Activity heatmap**: the status page's Activity button opens a
-  GitHub-style rolling mosaic of the last 48 hours — 15-minute cells,
-  six 8-hour rows x 32 columns, sliding one cell every 15 minutes.
-  Three buttons switch what the color depth encodes (request count /
-  input+output tokens / output tokens); hover shows the exact numbers
-  plus up/down bytes. Data persists to `heatmap.dat`, so the picture
-  survives restarts.
-- **Model hijacking**: route any model name (e.g., `fable`) to any upstream
-  model, with a system-tray right-click menu to switch routes on the fly.
+  calling, reasoning-mode mapping, byte-level key-order preservation so
+  provider prompt caches stay valid.
+- **Search envelope**: web-search results sealed into an encrypted
+  envelope in the response; follow-ups re-read the previous results
+  instead of searching again (translation path).
+- **Silent low-thinking upgrade**: explicit thinking-off requests quietly
+  go upstream as low thinking and return stripped of thinking blocks —
+  dodging Kimi's documented "thinking off downgrades K3 to the K2.8
+  no-thinking model" trap, and the client never notices.
+- **Live observability**: a web console streaming in-flight requests live
+  with token and cache-hit telemetry; request/response bodies recorded
+  per link side (proxy↔upstream / client↔proxy) for replay. Bilingual
+  中文/English UI.
+- **Activity heatmap**: a GitHub-style rolling mosaic of the last 48
+  hours, three color encodings (requests / tokens / output), persisted
+  to disk across restarts.
+- **Model hijacking**: route any model name (e.g., `fable`) to any
+  upstream model; the tray right-click menu switches routes on the fly.
 - **Cross-platform tray app** (Windows / macOS / Linux), single binary,
   ~40% test code.
 
@@ -208,40 +182,25 @@ observability. Also: [Usage guide](docs/usage.md) ·
 > 显示这类调用的真实频率，分流了多少一目了然。
 
 功能亮点：
-- 429/5xx 自动重试（指数退避，含藏在 200 流里的错误），SSE 保活让客户端
-  在代理重试期间永不超时。
-- 模型路由：通配符跨提供商路由，安全分类器与 fast 模式专用路由，多模态
-  与 web 搜索兜底。
-- 双协议翻译：OpenAI Responses ↔ Anthropic Messages——工具调用、推理模式
-  映射（adaptive / budget / effort）、字节级 key 顺序保留让上游 prompt 缓存
-  保持有效。
-- **搜索信封**：web 搜索结果封进加密信封随响应返回，后续提问直接读上次
-  搜索内容、不再重搜（仅限翻译场景——Claude Code 会独立开一个代理搜索）。
-- **关思考悄悄升级 low**（按路由配 `"convertOff2Low": "translate"/"all"`：
-  translate = 仅 Responses 翻译口，all = 翻译口 + Anthropic 原生口）：
-  下游显式关思考的请求自动改成 low 思考发上游，回传剥离思考块，下游无感知、
-  用量如实透传。规避 Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」
-  的 K3 降级。历史门由顶层参数 `allowNoThinkBlock4Anthropic` 单独掌管（默认
-  true）：工具续轮历史不可回放时仍按所请思考模式发送（开 convertOff2Low 时
-  按下游所请档位发，没给/不认识 → low 保底，同样避开 K2.8 降级路由），真被
-  上游 400 拒了才自动关思考重试一次，且不剥思考块，块随回传带回签名、下一
-  轮历史自愈；设为 false 则回到 cc-switch 式的预防性关思考。控制台对悄悄
-  升级显双色徽标 [off->low]，历史先试如实显示所请档位。
-- 实时可观测性：本地网页控制台显示在途流（每个流一张合并的活跃+等待卡，
-  发给上游与上游返回的字节分开计数）、token 与缓存命中统计、逐请求
-  诊断。流查看器的请求体/返回体按链路侧分存——代理↔上游（代理实发/实收）
-  与 下游↔代理（客户端实发/实收），仅两侧有差异的流才双存（翻译流恒不同，
-  原生流只在代理改写请求体时才存下游侧；路由改模型的流响应也因模型名写回而两侧不同、同样双存）。控制台界面中英双语：首次运行
-  跟随系统语言，网页里可切换，选择存在 `program-settings.txt`（程序设置，
-  与路由配置分离——代理绝不重排你的配置文件排版）。
-- **活跃度热图**：状态页「活跃度」按钮弹出 GitHub 风格马赛克图，滚动
-  覆盖最近 48 小时——15 分钟一格，6 个 8 小时行 × 32 列，每 15 分钟
-  挤掉最旧一格。三个按钮切换颜色
-  深浅的编码口径（请求次数 / 输入+输出 token / 输出 token），悬停显示
-  具体数字与上下行字节。数据落盘 `heatmap.dat`，重启不丢。
-- **模型劫持**：把任意模型名（如 `fable`）路由到任意上游模型，系统托盘
-  右键菜单一键切换路由。
-- 跨平台托盘应用（Windows / macOS / Linux），单二进制，~40% 测试代码。
+- **429/5xx 自动重试**：指数退避，连藏在 200 流里的限流错误也照抓；
+  SSE 保活让客户端在重试期间永不超时。
+- **模型路由**：通配符跨提供商路由，分类器/fast 模式专用路由，
+  多模态与联网搜索兜底。
+- **双协议翻译**：OpenAI Responses ↔ Anthropic Messages 全互转——
+  工具调用、思考模式映射、字节级保序让上游缓存保持有效。
+- **搜索信封**：搜索结果封进加密信封随响应返回，追问直接复读上次
+  结果、不再重复搜索（翻译场景）。
+- **关思考悄悄升级 low**：显式关思考的请求悄悄用 low 档发上游、回传
+  剥掉思考块——规避 Kimi「关思考即降级 K2.8 无思考版」的暗坑，
+  下游完全无感。
+- **实时可观测性**：网页控制台直播在途流，token 与缓存命中统计、
+  逐请求诊断；请求/响应体按链路侧分存（代理↔上游 / 客户端↔代理）
+  随时回放。控制台中英双语。
+- **活跃度热图**：GitHub 风格马赛克热图滚动覆盖最近 48 小时，
+  请求数 / token 三种口径切换，数据落盘、重启不丢。
+- **模型劫持**：任意模型名路由到任意上游模型，托盘右键一键切换。
+- **跨平台托盘应用**：Windows / macOS / Linux，单二进制，
+  ~40% 测试代码。
 
 ### 为什么有这个
 
