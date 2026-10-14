@@ -20,13 +20,15 @@ providers.
 > Codex CLI really work.
 
 > [!TIP]
-> **💰 On a pricey model plan? Stop spending it on safety checks.** Claude
-> Code and Codex fire small background calls you never see — safety
-> classifiers, guardian approvals — and unrouted, they bill against your
-> premium model like any other request. Point `classifier_route` at a
-> cheap model (add `classifier_thinking: "off"` for instant, thinking-free
-> answers) and that chatter never touches your main quota again. The
-> status page's classifier counter shows how much traffic gets diverted.
+> **💰 Running Claude Code / Codex on a pricey third-party plan? Stop
+> spending it on safety checks.** Both tools fire small background calls
+> you never see — safety classifiers, guardian approvals. First-party
+> Anthropic plans already get the classifier free; a third-party endpoint
+> just sees an ordinary request and bills it against your premium model.
+> Point `classifier_route` at a cheap model (add
+> `classifier_thinking: "off"` for instant, thinking-free answers) and
+> that chatter never touches your main quota again. The status page's
+> classifier counter shows how much traffic gets diverted.
 
 - **Automatic retry with exponential backoff** on 429/5xx — including
   rate-limit errors hidden inside HTTP-200 SSE streams — with SSE keep-alive
@@ -197,12 +199,13 @@ observability. Also: [Usage guide](docs/usage.md) ·
 > Claude Code / Codex 工作原理最直观的方式，没有之一。
 
 > [!TIP]
-> **💰 贵价套餐的额度，别浪费在安全检查上。** Claude Code / Codex 会在
-> 你看不见的地方持续发小请求——安全分类器、guardian 审批——不配专用
-> 路由时，这些调用和正文一样计在高级模型头上。把 `classifier_route`
-> 指向便宜模型（配上 `classifier_thinking: "off"` 让它无思考秒回），
-> 这类后台消耗从此不碰主模型额度；状态页「分类器」计数卡如实显示这类
-> 调用的真实频率，分流了多少一目了然。
+> **💰 用 Claude Code / Codex 跑第三方贵价套餐？别把额度浪费在安全
+> 检查上。** 这两个工具会在你看不见的地方持续发小请求——安全分类器、
+> guardian 审批。官方订阅的分类器已经免费，第三方端点却没有这种待遇：
+> 它只看到一个普通请求，照样计在高级模型头上。配上 `classifier_route`
+> 就有了——指向便宜模型（再加 `classifier_thinking: "off"` 让它无思考
+> 秒回），这类后台消耗从此不碰主模型额度。状态页「分类器」计数卡如实
+> 显示这类调用的真实频率，分流了多少一目了然。
 
 功能亮点：
 - 429/5xx 自动重试（指数退避，含藏在 200 流里的错误），SSE 保活让客户端
