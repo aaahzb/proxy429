@@ -1,6 +1,17 @@
+<div align="center">
+
 # Proxy429
 
+**Keep Claude Code / Codex unbothered by flaky model providers.**
+**让 Claude Code / Codex 在上游抽风时照常干活。**
+
+[![CI](https://github.com/aaahzb/proxy429/actions/workflows/ci.yml/badge.svg)](https://github.com/aaahzb/proxy429/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/aaahzb/proxy429)](https://github.com/aaahzb/proxy429/releases)
+[![License](https://img.shields.io/github/license/aaahzb/proxy429)](LICENSE)
+
 [English](#english) | [中文](#中文)
+
+</div>
 
 ---
 
@@ -30,6 +41,8 @@ providers.
 > that chatter never touches your main quota again. The status page's
 > classifier counter shows how much traffic gets diverted.
 
+![Status page: per-direction upstream byte counters, token and cache-hit telemetry, and the activity heatmap overlay (last 48 hours, 15-minute cells)](docs/screenshot-status.jpg)
+
 - **Automatic retry with exponential backoff** on 429/5xx — including
   rate-limit errors hidden inside HTTP-200 SSE streams — with SSE
   keep-alive so the client never times out mid-retry.
@@ -57,52 +70,6 @@ providers.
   upstream model; the tray right-click menu switches routes on the fly.
 - **Cross-platform tray app** (Windows / macOS / Linux), single binary,
   ~40% test code.
-
-### Motivation
-
-I use AI coding agents all day. Running Claude Code against Volcano ARK's
-GLM endpoint, I kept hitting 429 throttling — the built-in retry was slow
-and capped, but I noticed that manually disconnecting and reconnecting
-usually resumed the stream right away. The failures were transient;
-somebody just needed to retry patiently. So I built this proxy to do
-exactly that.
-
-Naturally, the proxy itself is built with the same AI agents: I define the
-problems and judge the results as a heavy daily user; the agents write the
-code. I'm not a Go developer — this is vibe coding: a tool for AI agents,
-built by AI agents, directed by someone who depends on them all day.
-
-### Screenshots
-
-![Status page: per-direction upstream byte counters, token and cache-hit telemetry, and the activity heatmap overlay (last 48 hours, 15-minute cells)](docs/screenshot-status.jpg)
-
-<details>
-<summary>Stream viewer</summary>
-
-![Stream viewer: in-flight streams rendered live as readable text or raw SSE, finished streams as an interactive JSON tree — per link side, with download options](docs/screenshot-stream.jpg)
-
-</details>
-
-<details>
-<summary>Cache-hit details</summary>
-
-![Cache-hit details: hit rate per real upstream model, plus measured cache lifetimes](docs/screenshot-cache.jpg)
-
-</details>
-
-<details>
-<summary>Request log page</summary>
-
-![Log page: per-request routing, retries, first-token and throughput timing](docs/screenshot-logs.jpg)
-
-</details>
-
-<details>
-<summary>Config page</summary>
-
-![Config page: in-browser JSON profile editing, with one-click Codex setup commands generated from the live config](docs/screenshot-config.jpg)
-
-</details>
 
 ### Download
 
@@ -132,11 +99,59 @@ Prebuilt binaries are on the [Releases](https://github.com/aaahzb/proxy429/relea
 
 ### Quick Start
 
-1. Build with `build.sh` (outputs `release/proxy429`, or
-   `release/Proxy429.app` on macOS).
-2. Run it — a config file is generated on first launch.
-3. Point your agent at `http://127.0.0.1:8080` (Claude Code) or the
-   Responses endpoint (Codex CLI). Details in the docs below.
+1. Download the binary for your platform (table above) and run it — a
+   tray icon appears and a config file is generated on first launch.
+2. Point your agent at the proxy: Claude Code → `http://127.0.0.1:8080`,
+   Codex CLI → `http://127.0.0.1:8081` (Responses; the console's config
+   page generates the exact setup commands for you).
+3. Open the console at `http://127.0.0.1:8080/__logs` and watch the
+   traffic live.
+
+Building from source instead: `bash build.sh` (outputs `release/`).
+
+### Screenshots
+
+<details>
+<summary>Stream viewer</summary>
+
+![Stream viewer: in-flight streams rendered live as readable text or raw SSE, finished streams as an interactive JSON tree — per link side, with download options](docs/screenshot-stream.jpg)
+
+</details>
+
+<details>
+<summary>Cache-hit details</summary>
+
+![Cache-hit details: hit rate per real upstream model, plus measured cache lifetimes](docs/screenshot-cache.jpg)
+
+</details>
+
+<details>
+<summary>Request log page</summary>
+
+![Log page: per-request routing, retries, first-token and throughput timing](docs/screenshot-logs.jpg)
+
+</details>
+
+<details>
+<summary>Config page</summary>
+
+![Config page: in-browser JSON profile editing, with one-click Codex setup commands generated from the live config](docs/screenshot-config.jpg)
+
+</details>
+
+### Motivation
+
+I use AI coding agents all day. Running Claude Code against Volcano ARK's
+GLM endpoint, I kept hitting 429 throttling — the built-in retry was slow
+and capped, but I noticed that manually disconnecting and reconnecting
+usually resumed the stream right away. The failures were transient;
+somebody just needed to retry patiently. So I built this proxy to do
+exactly that.
+
+Naturally, the proxy itself is built with the same AI agents: I define the
+problems and judge the results as a heavy daily user; the agents write the
+code. I'm not a Go developer — this is vibe coding: a tool for AI agents,
+built by AI agents, directed by someone who depends on them all day.
 
 ### Documentation
 
@@ -181,6 +196,8 @@ observability. Also: [Usage guide](docs/usage.md) ·
 > 秒回），这类后台消耗从此不碰主模型额度。状态页「分类器」计数卡如实
 > 显示这类调用的真实频率，分流了多少一目了然。
 
+![状态页：分方向上游字节计数、token 与缓存命中统计，以及活跃度热图弹窗（近 48 小时、15 分钟一格）](docs/screenshot-status.jpg)
+
 功能亮点：
 - **429/5xx 自动重试**：指数退避，连藏在 200 流里的限流错误也照抓；
   SSE 保活让客户端在重试期间永不超时。
@@ -202,19 +219,41 @@ observability. Also: [Usage guide](docs/usage.md) ·
 - **跨平台托盘应用**：Windows / macOS / Linux，单二进制，
   ~40% 测试代码。
 
-### 为什么有这个
+### 下载
 
-我整天用 AI 编程 agent 干活。在火山方舟的 GLM 上跑 Claude Code 时老被
-429 打断——自带重试又慢又有次数限制，但我发现手动断开重连**大多数时候**
-立刻就能恢复：失败是暂时的，只是缺个有耐心重试的东西。于是有了这个代理。
+各平台预编译包见 [Releases](https://github.com/aaahzb/proxy429/releases) 页：
 
-这个代理本身也是用同样的 AI agent 造的：我定义问题、作为重度用户验收，
-agent 写代码。我不是 Go 开发者，纯 vibe coding——为 AI agent 造的工具，
-由 AI agent 造，由天天靠它们干活的人指挥。
+| 平台 | 文件 |
+|---|---|
+| Windows x64 | `Proxy429-windows-x64.exe` |
+| Linux x64 | `Proxy429-linux-x64.tar.gz`（tar.gz 保留可执行权限） |
+| macOS Apple Silicon（arm64） | `Proxy429-macOS-AppleSilicon-arm64.dmg` |
+
+> [!WARNING]
+> **macOS 首次启动报「无法验证是否包含恶意软件」**：应用为 ad-hoc 自签名
+> （没有 Apple 开发者证书、未做 Apple 公证），Gatekeeper 会拦截所有下载
+> 来源的首次启动。两种解法任选：
+> 1. **系统设置 → 隐私与安全性**，拉到「安全性」区域，点 Proxy429 旁的
+>    **「仍要打开」**并确认（macOS 14 及更早也可以右键 → 打开）。
+> 2. 或在终端执行一次：
+>    `xattr -d com.apple.quarantine /Applications/Proxy429.app`
+>
+> 两种都只需操作一次，但覆盖更新后警告会重新出现，需要再来一遍。Windows 的
+> SmartScreen（「Windows 已保护你的电脑」）是同一性质的未签名提示：点
+> 「更多信息 → 仍要运行」。
+
+### 快速上手
+
+1. 按上表下载对应平台的二进制并运行——托盘图标出现，首次运行自动生成
+   配置文件。
+2. 把 agent 指到代理：Claude Code → `http://127.0.0.1:8080`，
+   Codex CLI → `http://127.0.0.1:8081`（Responses；控制台配置页会按当前
+   配置生成 Codex 一键配置命令）。
+3. 打开控制台 `http://127.0.0.1:8080/__logs`，实时看流量。
+
+从源码构建：`bash build.sh`（产物在 `release/`）。
 
 ### 截图
-
-![状态页：分方向上游字节计数、token 与缓存命中统计，以及活跃度热图弹窗（近 48 小时、15 分钟一格）](docs/screenshot-status.jpg)
 
 <details>
 <summary>流查看器</summary>
@@ -244,28 +283,15 @@ agent 写代码。我不是 Go 开发者，纯 vibe coding——为 AI agent 造
 
 </details>
 
-### 下载
+### 为什么有这个
 
-各平台预编译包见 [Releases](https://github.com/aaahzb/proxy429/releases) 页：
+我整天用 AI 编程 agent 干活。在火山方舟的 GLM 上跑 Claude Code 时老被
+429 打断——自带重试又慢又有次数限制，但我发现手动断开重连**大多数时候**
+立刻就能恢复：失败是暂时的，只是缺个有耐心重试的东西。于是有了这个代理。
 
-| 平台 | 文件 |
-|---|---|
-| Windows x64 | `Proxy429-windows-x64.exe` |
-| Linux x64 | `Proxy429-linux-x64.tar.gz`（tar.gz 保留可执行权限） |
-| macOS Apple Silicon（arm64） | `Proxy429-macOS-AppleSilicon-arm64.dmg` |
-
-> [!WARNING]
-> **macOS 首次启动报「无法验证是否包含恶意软件」**：应用为 ad-hoc 自签名
-> （没有 Apple 开发者证书、未做 Apple 公证），Gatekeeper 会拦截所有下载
-> 来源的首次启动。两种解法任选：
-> 1. **系统设置 → 隐私与安全性**，拉到「安全性」区域，点 Proxy429 旁的
->    **「仍要打开」**并确认（macOS 14 及更早也可以右键 → 打开）。
-> 2. 或在终端执行一次：
->    `xattr -d com.apple.quarantine /Applications/Proxy429.app`
->
-> 两种都只需操作一次，但覆盖更新后警告会重新出现，需要再来一遍。Windows 的
-> SmartScreen（「Windows 已保护你的电脑」）是同一性质的未签名提示：点
-> 「更多信息 → 仍要运行」。
+这个代理本身也是用同样的 AI agent 造的：我定义问题、作为重度用户验收，
+agent 写代码。我不是 Go 开发者，纯 vibe coding——为 AI agent 造的工具，
+由 AI agent 造，由天天靠它们干活的人指挥。
 
 ### 文档
 
