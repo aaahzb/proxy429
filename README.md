@@ -2,8 +2,12 @@
 
 # Proxy429
 
-**Keep Claude Code / Codex unbothered by flaky model providers.**
-**让 Claude Code / Codex 在上游抽风时照常干活。**
+**See What Your AI Agents Are Actually Doing.**  
+**实时看见 AI Agent 正在做什么。**
+
+Inspect live model requests and responses, explore captured payloads, and monitor token usage, cache hits, retries, and latency — all through a local web console.
+
+实时查看模型请求与响应，检查捕获到的请求内容，并监控 Token、缓存命中、重试和延迟。
 
 [![CI](https://github.com/aaahzb/proxy429/actions/workflows/ci.yml/badge.svg)](https://github.com/aaahzb/proxy429/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/aaahzb/proxy429)](https://github.com/aaahzb/proxy429/releases)
@@ -17,156 +21,118 @@
 
 ## English
 
-A local LLM API proxy that keeps AI coding agents (Claude Code, Codex CLI,
-and other OpenAI/Anthropic-compatible clients) unaffected by flaky model
-providers.
+Proxy429 is a local LLM API proxy for Claude Code, Codex CLI, and compatible OpenAI/Anthropic API clients. It helps requests recover from transient upstream failures — and gives you a live window into the traffic flowing between your agent and its model provider.
 
-> [!TIP]
-> **👀 Curious what your coding agent is *actually* up to?** Open the
-> console and watch it think, live: in-flight streams render as readable
-> text (or raw SSE) while tokens arrive; finished streams keep their full
-> request/response bodies as an interactive JSON tree, per link side.
-> System prompts, tool schemas, cache hits, retries — an open kitchen,
-> nothing hidden. The most literal way there is to learn how Claude Code /
-> Codex CLI really work.
+### See what your agent sends and receives
 
-> [!TIP]
-> **💰 Running Claude Code / Codex on a pricey third-party plan? Stop
-> spending it on safety checks.** Both tools fire small background calls
-> you never see — safety classifiers, guardian approvals. First-party
-> Anthropic plans already get the classifier free; a third-party endpoint
-> just sees an ordinary request and bills it against your premium model.
-> Point `classifier_route` at a cheap model (add
-> `classifier_thinking: "off"` for instant, thinking-free answers) and
-> that chatter never touches your main quota again. The status page's
-> classifier counter shows how much traffic gets diverted.
+![Proxy429 status page showing live traffic statistics and activity](docs/screenshot-status.jpg)
 
-![Status page: per-direction upstream byte counters, token and cache-hit telemetry, and the activity heatmap overlay (last 48 hours, 15-minute cells)](docs/screenshot-status.jpg)
+Open the local console while your agent is working:
 
-- **Automatic retry with exponential backoff** on 429/5xx — including
-  rate-limit errors hidden inside HTTP-200 SSE streams — with SSE
-  keep-alive so the client never times out mid-retry.
-- **Model routing**: wildcard routing across providers, dedicated routes
-  for safety-classifier and fast-mode requests, multimodal and web-search
-  fallbacks.
-- **Protocol translation**: OpenAI Responses ↔ Anthropic Messages — tool
-  calling, reasoning-mode mapping, byte-level key-order preservation so
-  provider prompt caches stay valid.
-- **Search envelope**: web-search results sealed into an encrypted
-  envelope in the response; follow-ups re-read the previous results
-  instead of searching again (translation path).
-- **Silent low-thinking upgrade**: explicit thinking-off requests quietly
-  go upstream as low thinking and return stripped of thinking blocks —
-  dodging Kimi's documented "thinking off downgrades K3 to the K2.8
-  no-thinking model" trap, and the client never notices.
-- **Live observability**: a web console streaming in-flight requests live
-  with token and cache-hit telemetry; request/response bodies recorded
-  per link side (proxy↔upstream / client↔proxy) for replay. Bilingual
-  中文/English UI.
-- **Activity heatmap**: a GitHub-style rolling mosaic of the last 48
-  hours, three color encodings (requests / tokens / output), persisted
-  to disk across restarts.
-- **Model hijacking**: route any model name (e.g., `fable`) to any
-  upstream model; the tray right-click menu switches routes on the fly.
-- **Cross-platform tray app** (Windows / macOS / Linux), single binary,
-  ~40% test code.
+- **Inspect live streams:** watch in-flight output arrive in real time, rendered as readable text or raw SSE.
+- **Explore full payloads:** inspect completed request and response bodies in an interactive JSON tree, with per-link-side views.
+- **Examine model context:** review the captured payload sent upstream, including message content and other request fields present in the body.
+- **Download for deeper debugging:** save request and output payloads for offline inspection.
+- **Understand runtime behavior:** see token and byte counts, cache-hit rates, retries, first-token latency (TTFT), and throughput.
+- **Review recent activity:** use the rolling 48-hour activity heatmap to see request, token, or output activity over time.
 
-### Download
+The console can help answer practical questions: What did the agent send to the model? What came back? How much context and output were involved? Did the request retry, hit cache, or take unusually long?
 
-Prebuilt binaries are on the [Releases](https://github.com/aaahzb/proxy429/releases) page:
+> **Subagent note:** Proxy429 exposes captured request/response payloads. Whether a payload belongs to a particular subagent, and how parent/child calls relate to one another, depends on the information available in the captured requests; do not treat this as automatic parent-child tracing unless that relationship is explicitly identifiable.
 
-| Platform | File |
-|---|---|
-| Windows x64 | `Proxy429-windows-x64.exe` |
-| Linux x64 | `Proxy429-linux-x64.tar.gz` (tar.gz keeps the executable bit) |
-| macOS Apple Silicon (arm64) | `Proxy429-macOS-AppleSilicon-arm64.dmg` |
+### More than an inspector: a resilient local proxy
 
-> [!WARNING]
-> **macOS: "Apple cannot check Proxy429 for malicious software" on first
-> launch.** The app is ad-hoc signed — no Apple Developer ID certificate,
-> no Apple notarization — so Gatekeeper blocks the first launch of every
-> downloaded copy. Two ways past it:
-> 1. **System Settings → Privacy & Security**, scroll to the Security
->    section, click **Open Anyway** next to the Proxy429 entry, and
->    confirm. (On macOS 14 and earlier, right-click → **Open** works too.)
-> 2. Or remove the quarantine flag once in Terminal:
->    `xattr -d com.apple.quarantine /Applications/Proxy429.app`
->
-> Either is a one-time fix per install, but the warning returns after
-> every update that replaces the app. Windows SmartScreen ("Windows
-> protected your PC") is the same story for the unsigned exe: **More info
-> → Run anyway**.
+- **Automatic retries:** exponential backoff for configured upstream status codes, including common 429 and 5xx failures, with support for rate-limit errors surfaced inside HTTP-200 SSE streams.
+- **Flexible routing:** route model patterns to upstream providers and configure dedicated routes for supported request types such as classifier or fast-mode calls.
+- **Protocol translation:** translate between OpenAI Responses and Anthropic Messages API formats, including tool calls and reasoning-mode mapping.
+- **Cache visibility:** inspect cache-hit statistics by upstream model and review measured cache lifetimes.
+- **Model remapping:** route a client-facing model name to a different upstream model and switch routes from the tray menu.
+- **Search follow-ups:** in the protocol-translation path, search results can be carried in an encrypted response envelope for reuse by follow-up requests.
+- **Thinking behavior:** configured thinking-mode handling can adapt requests and responses for supported upstreams.
+- **Cross-platform tray app:** Windows, macOS, and Linux builds, with a bilingual Chinese/English web console.
+
+See [Design and Architecture](docs/DESIGN.md) for implementation details and behavior.
 
 ### Quick Start
 
-1. Download the binary for your platform (table above) and run it — a
-   tray icon appears and a config file is generated on first launch.
-2. Point your agent at the proxy: Claude Code → `http://127.0.0.1:8080`,
-   Codex CLI → `http://127.0.0.1:8081` (Responses; the console's config
-   page generates the exact setup commands for you).
-3. Open the console at `http://127.0.0.1:8080/__logs` and watch the
-   traffic live.
+1. **Download and launch** the release for your operating system. Proxy429 creates its configuration file on first launch.
+2. **Configure your client** to use the local proxy:
+   - Claude Code: `http://127.0.0.1:8080`
+   - Codex CLI (Responses API): `http://127.0.0.1:8081`
 
-Building from source instead: `bash build.sh` (outputs `release/`).
+   The console's configuration page can generate setup commands for Codex based on the current configuration.
+3. **Inspect traffic** at `http://127.0.0.1:8080/__logs`.
+
+For detailed setup and configuration, see the [Usage Guide](docs/usage.md).
+
+### Download
+
+Download prebuilt binaries from [GitHub Releases](https://github.com/aaahzb/proxy429/releases).
+
+| Platform | Release asset |
+|---|---|
+| Windows x64 | `Proxy429-windows-x64.exe` |
+| Linux x64 | `Proxy429-linux-x64.tar.gz` |
+| macOS Apple Silicon (arm64) | `Proxy429-macOS-AppleSilicon-arm64.dmg` |
+
+> [!WARNING]
+> **macOS first launch:** Proxy429 is ad-hoc signed and is not notarized with an Apple Developer ID. Gatekeeper may block the first launch.
+>
+> - Open **System Settings → Privacy & Security**, find the Proxy429 message, choose **Open Anyway**, and confirm. On macOS 14 and earlier, right-clicking the app and choosing **Open** may also work.
+> - Alternatively, remove the quarantine attribute in Terminal with `xattr -d com.apple.quarantine /Applications/Proxy429.app` (adjust the path if the app is installed elsewhere).
+>
+> The warning may return after an update replaces the app. On Windows, SmartScreen may also warn because the executable is unsigned; review the source and release before choosing **More info → Run anyway**.
 
 ### Screenshots
 
 <details>
-<summary>Stream viewer</summary>
+<summary><strong>Stream viewer</strong> — inspect live streams and completed request/response bodies</summary>
 
-![Stream viewer: in-flight streams rendered live as readable text or raw SSE, finished streams as an interactive JSON tree — per link side, with download options](docs/screenshot-stream.jpg)
-
-</details>
-
-<details>
-<summary>Cache-hit details</summary>
-
-![Cache-hit details: hit rate per real upstream model, plus measured cache lifetimes](docs/screenshot-cache.jpg)
+![Stream viewer showing in-flight streams as readable text or raw SSE and completed streams as an interactive JSON tree](docs/screenshot-stream.jpg)
 
 </details>
 
 <details>
-<summary>Request log page</summary>
+<summary><strong>Cache-hit details</strong> — review cache-hit rates and cache lifetimes</summary>
 
-![Log page: per-request routing, retries, first-token and throughput timing](docs/screenshot-logs.jpg)
+![Cache-hit details showing hit rates by upstream model and measured cache lifetimes](docs/screenshot-cache.jpg)
 
 </details>
 
 <details>
-<summary>Config page</summary>
+<summary><strong>Request log</strong> — review routing, retries, and timing</summary>
 
-![Config page: in-browser JSON profile editing, with one-click Codex setup commands generated from the live config](docs/screenshot-config.jpg)
+![Request log showing per-request routing, retries, first-token latency, and throughput timing](docs/screenshot-logs.jpg)
 
 </details>
 
-### Motivation
+<details>
+<summary><strong>Configuration</strong> — edit profiles and generate client setup commands</summary>
 
-I use AI coding agents all day. Running Claude Code against Volcano ARK's
-GLM endpoint, I kept hitting 429 throttling — the built-in retry was slow
-and capped, but I noticed that manually disconnecting and reconnecting
-usually resumed the stream right away. The failures were transient;
-somebody just needed to retry patiently. So I built this proxy to do
-exactly that.
+![Configuration page showing JSON profile editing and generated Codex setup commands](docs/screenshot-config.jpg)
 
-Naturally, the proxy itself is built with the same AI agents: I define the
-problems and judge the results as a heavy daily user; the agents write the
-code. I'm not a Go developer — this is vibe coding: a tool for AI agents,
-built by AI agents, directed by someone who depends on them all day.
+</details>
 
 ### Documentation
 
-Full design documentation: [docs/DESIGN.md](docs/DESIGN.md) — retry
-semantics, routing, protocol translation, cache-preserving rewrites,
-observability. Also: [Usage guide](docs/usage.md) ·
-[Windows quickstart](docs/windows-quickstart.md) ·
-[Autostart setup](docs/autostart-setup.md)
+- [Usage Guide](docs/usage.md)
+- [Windows Quick Start](docs/windows-quickstart.md)
+- [Autostart Setup](docs/autostart-setup.md)
+- [Design and Architecture](docs/DESIGN.md)
+
+### Build from Source
+
+Run `bash build.sh`. Build artifacts are written to `release/`.
+
+### Motivation
+
+I built Proxy429 after repeatedly hitting transient 429 throttling while using Claude Code with a GLM endpoint on Volcano Engine ARK. Manually reconnecting often let the work continue, which suggested that a patient retrying proxy could make these failures less disruptive.
+
+Proxy429 is also built with AI coding agents: I define the problems and evaluate the results as a daily user, while the agents help implement the code.
 
 ### Acknowledgments
 
-- [cc-switch](https://github.com/farion1231/cc-switch) (MIT, © 2025 Jason
-  Young) — the Responses translation test suites are ported from its Rust
-  tests; the thinking-mode mapping is aligned with cc-switch 3.20.0; the
-  `[cc-switch: omitted N bytes]` marker is kept for client compatibility.
+- [cc-switch](https://github.com/farion1231/cc-switch) (MIT, © 2025 Jason Young): parts of the Responses translation test suite are ported from its Rust tests; thinking-mode mapping follows cc-switch 3.20.0, and the `[cc-switch: omitted N bytes]` marker is retained for compatibility.
 
 ### License
 
@@ -176,133 +142,104 @@ observability. Also: [Usage guide](docs/usage.md) ·
 
 ## 中文
 
-一个本地 LLM API 代理：夹在 Claude Code / Codex 等 AI 编程 agent 和上游模型
-提供商之间，自动吃掉 429/5xx 限流（指数退避重试，含藏在 200 流里的错误），
-支持模型路由、双协议翻译，带实时网页监控台。
+Proxy429 是一个面向 Claude Code、Codex CLI 及兼容 OpenAI/Anthropic API 客户端的本地 LLM API 代理。它帮助请求从上游临时故障中恢复，并提供模型路由、协议翻译和实时网页控制台，方便查看请求流量。
 
-> [!TIP]
-> **👀 好奇你的编程 agent 到底在干嘛？** 打开控制台，看它现场直播
-> 「思考」：在途流随 token 到达实时渲染成可读文本（可切原始 SSE），
-> 完成的流保留完整请求/响应体、展开成交互式 JSON 树，按链路侧随便翻。
-> 系统提示词、工具定义、缓存命中、重试——明厨亮灶，一览无余。学习
-> Claude Code / Codex 工作原理最直观的方式，没有之一。
+![Proxy429 状态页：上游字节计数、token 与缓存命中统计，以及近 48 小时活跃度热图](docs/screenshot-status.jpg)
 
-> [!TIP]
-> **💰 用 Claude Code / Codex 跑第三方贵价套餐？别把额度浪费在安全
-> 检查上。** 这两个工具会在你看不见的地方持续发小请求——安全分类器、
-> guardian 审批。官方订阅的分类器已经免费，第三方端点却没有这种待遇：
-> 它只看到一个普通请求，照样计在高级模型头上。配上 `classifier_route`
-> 就有了——指向便宜模型（再加 `classifier_thinking: "off"` 让它无思考
-> 秒回），这类后台消耗从此不碰主模型额度。状态页「分类器」计数卡如实
-> 显示这类调用的真实频率，分流了多少一目了然。
+### 为什么使用 Proxy429？
 
-![状态页：分方向上游字节计数、token 与缓存命中统计，以及活跃度热图弹窗（近 48 小时、15 分钟一格）](docs/screenshot-status.jpg)
+- **临时故障自动重试：** 对 HTTP 429/5xx 进行指数退避重试，也能处理藏在 HTTP 200 SSE 流中的限流错误。
+- **灵活的模型路由：** 支持跨提供商通配符路由，以及分类器、fast 模式专用路由和多模态或联网搜索兜底。
+- **API 协议翻译：** 支持 OpenAI Responses ↔ Anthropic Messages，涵盖工具调用与思考模式映射。
+- **实时查看请求：** 在网页控制台查看进行中的流、按链路侧检查请求/响应体，并追踪路由、重试、token 用量和缓存活动。
+- **了解缓存表现：** 按上游模型查看缓存命中统计，并通过持续保存的 48 小时热图回顾近期活动。
+- **模型名称映射：** 将客户端使用的模型名路由到指定的上游模型，也可以通过托盘菜单切换路由。
+- **复用搜索结果：** 在协议翻译路径中，搜索结果可以通过加密响应信封传递，供后续请求复用。
+- **调整思考模式：** 对明确关闭思考的请求，可转换为上游 low-thinking 请求，并从响应中移除思考块。
 
-功能亮点：
-- **429/5xx 自动重试**：指数退避，连藏在 200 流里的限流错误也照抓；
-  SSE 保活让客户端在重试期间永不超时。
-- **模型路由**：通配符跨提供商路由，分类器/fast 模式专用路由，
-  多模态与联网搜索兜底。
-- **双协议翻译**：OpenAI Responses ↔ Anthropic Messages 全互转——
-  工具调用、思考模式映射、字节级保序让上游缓存保持有效。
-- **搜索信封**：搜索结果封进加密信封随响应返回，追问直接复读上次
-  结果、不再重复搜索（翻译场景）。
-- **关思考悄悄升级 low**：显式关思考的请求悄悄用 low 档发上游、回传
-  剥掉思考块——规避 Kimi「关思考即降级 K2.8 无思考版」的暗坑，
-  下游完全无感。
-- **实时可观测性**：网页控制台直播在途流，token 与缓存命中统计、
-  逐请求诊断；请求/响应体按链路侧分存（代理↔上游 / 客户端↔代理）
-  随时回放。控制台中英双语。
-- **活跃度热图**：GitHub 风格马赛克热图滚动覆盖最近 48 小时，
-  请求数 / token 三种口径切换，数据落盘、重启不丢。
-- **模型劫持**：任意模型名路由到任意上游模型，托盘右键一键切换。
-- **跨平台托盘应用**：Windows / macOS / Linux，单二进制，
-  ~40% 测试代码。
-
-### 下载
-
-各平台预编译包见 [Releases](https://github.com/aaahzb/proxy429/releases) 页：
-
-| 平台 | 文件 |
-|---|---|
-| Windows x64 | `Proxy429-windows-x64.exe` |
-| Linux x64 | `Proxy429-linux-x64.tar.gz`（tar.gz 保留可执行权限） |
-| macOS Apple Silicon（arm64） | `Proxy429-macOS-AppleSilicon-arm64.dmg` |
-
-> [!WARNING]
-> **macOS 首次启动报「无法验证是否包含恶意软件」**：应用为 ad-hoc 自签名
-> （没有 Apple 开发者证书、未做 Apple 公证），Gatekeeper 会拦截所有下载
-> 来源的首次启动。两种解法任选：
-> 1. **系统设置 → 隐私与安全性**，拉到「安全性」区域，点 Proxy429 旁的
->    **「仍要打开」**并确认（macOS 14 及更早也可以右键 → 打开）。
-> 2. 或在终端执行一次：
->    `xattr -d com.apple.quarantine /Applications/Proxy429.app`
->
-> 两种都只需操作一次，但覆盖更新后警告会重新出现，需要再来一遍。Windows 的
-> SmartScreen（「Windows 已保护你的电脑」）是同一性质的未签名提示：点
-> 「更多信息 → 仍要运行」。
+实现细节和行为说明见[设计与架构文档](docs/DESIGN.md)。
 
 ### 快速上手
 
-1. 按上表下载对应平台的二进制并运行——托盘图标出现，首次运行自动生成
-   配置文件。
-2. 把 agent 指到代理：Claude Code → `http://127.0.0.1:8080`，
-   Codex CLI → `http://127.0.0.1:8081`（Responses；控制台配置页会按当前
-   配置生成 Codex 一键配置命令）。
-3. 打开控制台 `http://127.0.0.1:8080/__logs`，实时看流量。
+1. **下载并运行：** 从下方 Release 页面下载对应操作系统的版本。首次运行时，Proxy429 会自动生成配置文件。
+2. **配置客户端**使用本地代理：
+   - Claude Code：`http://127.0.0.1:8080`
+   - Codex CLI（Responses API）：`http://127.0.0.1:8081`
 
-从源码构建：`bash build.sh`（产物在 `release/`）。
+   控制台的配置页面可以根据当前配置生成 Codex 设置命令。
+3. **查看请求流量：** 打开 `http://127.0.0.1:8080/__logs`。
+
+完整配置方法请参阅[使用指南](docs/usage.md)。
+
+### 下载
+
+各平台预编译版本见 [GitHub Releases](https://github.com/aaahzb/proxy429/releases)。
+
+| 平台 | Release 文件 |
+|---|---|
+| Windows x64 | `Proxy429-windows-x64.exe` |
+| Linux x64 | `Proxy429-linux-x64.tar.gz` |
+| macOS Apple Silicon（arm64） | `Proxy429-macOS-AppleSilicon-arm64.dmg` |
+
+> [!WARNING]
+> **macOS 首次启动提示无法验证应用：** Proxy429 使用 ad-hoc 签名，没有 Apple Developer ID 证书，也未进行 Apple 公证，因此 Gatekeeper 可能拦截首次启动。
+>
+> - 打开**系统设置 → 隐私与安全性**，找到 Proxy429 的提示，点击**仍要打开**并确认。macOS 14 及更早版本也可以尝试右键应用并选择**打开**。
+> - 或者在终端执行 `xattr -d com.apple.quarantine /Applications/Proxy429.app`（如果应用安装在其他位置，请调整路径）。
+>
+> 更新替换应用后，警告可能再次出现。Windows 版本也可能因可执行文件未签名而触发 SmartScreen；选择“更多信息 → 仍要运行”前，请先确认源码和 Release 的可信度。
 
 ### 截图
 
 <details>
-<summary>流查看器</summary>
+<summary><strong>流查看器</strong> — 查看实时流与完整请求/响应体</summary>
 
-![流查看器：在途流实时渲染为可读文本或原始 SSE，完成的流展开为交互式 JSON 树，按链路侧查看、可下载](docs/screenshot-stream.jpg)
-
-</details>
-
-<details>
-<summary>缓存命中明细</summary>
-
-![缓存命中明细：按真实上游模型统计命中率，并实测缓存存活时间](docs/screenshot-cache.jpg)
+![流查看器：在途流可显示为可读文本或原始 SSE，完成的流可展开为交互式 JSON 树](docs/screenshot-stream.jpg)
 
 </details>
 
 <details>
-<summary>请求日志页</summary>
+<summary><strong>缓存命中明细</strong> — 查看各上游模型的命中率和缓存存活时间</summary>
 
-![日志页：每个请求的路由、重试、首字与吞吐耗时](docs/screenshot-logs.jpg)
+![缓存命中明细：按上游模型展示命中率与实测缓存存活时间](docs/screenshot-cache.jpg)
 
 </details>
 
 <details>
-<summary>配置页</summary>
+<summary><strong>请求日志</strong> — 检查路由、重试和耗时</summary>
 
-![配置页：浏览器内编辑 JSON 配置，并按当前配置实时生成 Codex 一键配置命令](docs/screenshot-config.jpg)
+![请求日志：展示每个请求的路由、重试、首 token 延迟和吞吐耗时](docs/screenshot-logs.jpg)
 
 </details>
 
-### 为什么有这个
+<details>
+<summary><strong>配置页面</strong> — 编辑配置并生成客户端设置命令</summary>
 
-我整天用 AI 编程 agent 干活。在火山方舟的 GLM 上跑 Claude Code 时老被
-429 打断——自带重试又慢又有次数限制，但我发现手动断开重连**大多数时候**
-立刻就能恢复：失败是暂时的，只是缺个有耐心重试的东西。于是有了这个代理。
+![配置页面：在浏览器中编辑 JSON 配置，并生成 Codex 设置命令](docs/screenshot-config.jpg)
 
-这个代理本身也是用同样的 AI agent 造的：我定义问题、作为重度用户验收，
-agent 写代码。我不是 Go 开发者，纯 vibe coding——为 AI agent 造的工具，
-由 AI agent 造，由天天靠它们干活的人指挥。
+</details>
 
 ### 文档
 
-完整设计文档见 [docs/DESIGN.md](docs/DESIGN.md)（重试语义、路由、协议翻译、
-保缓存改写、可观测性；英文撰写）。另有英文文档：[使用说明](docs/usage.md) ·
-[Windows 快速部署](docs/windows-quickstart.md) ·
-[开机自启](docs/autostart-setup.md)
+- [使用指南](docs/usage.md)
+- [Windows 快速上手](docs/windows-quickstart.md)
+- [开机自启](docs/autostart-setup.md)
+- [设计与架构](docs/DESIGN.md)（英文）
 
-### 致谢与协议
+### 从源码构建
 
-- [cc-switch](https://github.com/farion1231/cc-switch)（MIT, © 2025 Jason
-  Young）：Responses 翻译测试集移植自其 Rust 测试；thinking 映射与其
-  3.20.0 对齐；协议标记为兼容沿用。
-- 本项目以 [MIT](LICENSE) © 2026 aaahzb 开源。
+运行 `bash build.sh`，构建产物会输出到 `release/`。
+
+### 项目缘起
+
+我在火山引擎 ARK 的 GLM 端点上使用 Claude Code 时，经常遇到临时性的 429 限流。手动断开并重连往往就能继续工作，这让我意识到：一个能够耐心重试的代理，可以减少这类故障对工作流的干扰。
+
+Proxy429 本身也是借助 AI 编程 Agent 开发的：我负责定义问题，并以日常重度用户的身份验收结果，Agent 协助完成代码实现。
+
+### 致谢
+
+- [cc-switch](https://github.com/farion1231/cc-switch)（MIT，© 2025 Jason Young）：部分 Responses 翻译测试移植自其 Rust 测试；思考模式映射参考 cc-switch 3.20.0，并为兼容性保留 `[cc-switch: omitted N bytes]` 标记。
+
+### 许可证
+
+本项目采用 [MIT 许可证](LICENSE)，© 2026 aaahzb。
