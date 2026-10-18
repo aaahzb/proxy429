@@ -23,9 +23,21 @@ Inspect live model requests and responses, explore captured payloads, and monito
 
 Proxy429 is a local LLM API proxy for Claude Code, Codex CLI, and compatible OpenAI/Anthropic API clients. It helps requests recover from transient upstream failures — and gives you a live window into the traffic flowing between your agent and its model provider.
 
-### See what your agent sends and receives
-
 ![Proxy429 status page showing live traffic statistics and activity](docs/screenshot-status.jpg)
+
+### Quick Start
+
+1. **Download and launch** the release for your operating system. Proxy429 creates its configuration file on first launch.
+2. **Configure your client** to use the local proxy:
+   - Claude Code: `http://127.0.0.1:8080`
+   - Codex CLI (Responses API): `http://127.0.0.1:8081`
+
+   The console's configuration page can generate setup commands for Codex based on the current configuration.
+3. **Inspect traffic** at `http://127.0.0.1:8080/__logs`.
+
+For detailed setup and configuration, see the [Usage Guide](docs/usage.md).
+
+### See what your agent sends and receives
 
 Open the local console while your agent is working:
 
@@ -52,18 +64,6 @@ The console can help answer practical questions: What did the agent send to the 
 - **Cross-platform tray app:** Windows, macOS, and Linux builds, with a bilingual Chinese/English web console.
 
 See [Design and Architecture](docs/DESIGN.md) for implementation details and behavior.
-
-### Quick Start
-
-1. **Download and launch** the release for your operating system. Proxy429 creates its configuration file on first launch.
-2. **Configure your client** to use the local proxy:
-   - Claude Code: `http://127.0.0.1:8080`
-   - Codex CLI (Responses API): `http://127.0.0.1:8081`
-
-   The console's configuration page can generate setup commands for Codex based on the current configuration.
-3. **Inspect traffic** at `http://127.0.0.1:8080/__logs`.
-
-For detailed setup and configuration, see the [Usage Guide](docs/usage.md).
 
 ### Download
 
@@ -134,6 +134,10 @@ Proxy429 is also built with AI coding agents: I define the problems and evaluate
 
 - [cc-switch](https://github.com/farion1231/cc-switch) (MIT, © 2025 Jason Young): parts of the Responses translation test suite are ported from its Rust tests; thinking-mode mapping follows cc-switch 3.20.0, and the `[cc-switch: omitted N bytes]` marker is retained for compatibility.
 
+### Contributing
+
+Issues and pull requests are welcome. When reporting a bug, include the stream ID shown in the console, so the captured request and response can be inspected.
+
 ### License
 
 [MIT](LICENSE) © 2026 aaahzb
@@ -145,6 +149,18 @@ Proxy429 is also built with AI coding agents: I define the problems and evaluate
 Proxy429 是一个面向 Claude Code、Codex CLI 及兼容 OpenAI/Anthropic API 客户端的本地 LLM API 代理。它帮助请求从上游临时故障中恢复，并提供模型路由、协议翻译和实时网页控制台，方便查看请求流量。
 
 ![Proxy429 状态页：上游字节计数、token 与缓存命中统计，以及近 48 小时活跃度热图](docs/screenshot-status.jpg)
+
+### 快速上手
+
+1. **下载并运行：** 从下方 Release 页面下载对应操作系统的版本。首次运行时，Proxy429 会自动生成配置文件。
+2. **配置客户端**使用本地代理：
+   - Claude Code：`http://127.0.0.1:8080`
+   - Codex CLI（Responses API）：`http://127.0.0.1:8081`
+
+   控制台的配置页面可以根据当前配置生成 Codex 设置命令。
+3. **查看请求流量：** 打开 `http://127.0.0.1:8080/__logs`。
+
+完整配置方法请参阅[使用指南](docs/usage.md)。
 
 ### 为什么使用 Proxy429？
 
@@ -158,18 +174,6 @@ Proxy429 是一个面向 Claude Code、Codex CLI 及兼容 OpenAI/Anthropic API 
 - **调整思考模式：** 对明确关闭思考的请求，可转换为上游 low-thinking 请求，并从响应中移除思考块。
 
 实现细节和行为说明见[设计与架构文档](docs/DESIGN.md)。
-
-### 快速上手
-
-1. **下载并运行：** 从下方 Release 页面下载对应操作系统的版本。首次运行时，Proxy429 会自动生成配置文件。
-2. **配置客户端**使用本地代理：
-   - Claude Code：`http://127.0.0.1:8080`
-   - Codex CLI（Responses API）：`http://127.0.0.1:8081`
-
-   控制台的配置页面可以根据当前配置生成 Codex 设置命令。
-3. **查看请求流量：** 打开 `http://127.0.0.1:8080/__logs`。
-
-完整配置方法请参阅[使用指南](docs/usage.md)。
 
 ### 下载
 
@@ -239,6 +243,10 @@ Proxy429 本身也是借助 AI 编程 Agent 开发的：我负责定义问题，
 ### 致谢
 
 - [cc-switch](https://github.com/farion1231/cc-switch)（MIT，© 2025 Jason Young）：部分 Responses 翻译测试移植自其 Rust 测试；思考模式映射参考 cc-switch 3.20.0，并为兼容性保留 `[cc-switch: omitted N bytes]` 标记。
+
+### 参与贡献
+
+欢迎提交 Issue 和 Pull Request。报 bug 时附上控制台里的流 ID，可直接查看捕获的请求与响应。
 
 ### 许可证
 
