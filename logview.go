@@ -2773,6 +2773,18 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <td style="padding:6px 8px;vertical-align:top">仅该 route 未标 no_search 时生效；与 search_fallback 互斥</td>
       </tr>
       <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>claudeSearchSummary</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] 条目 / search_fallback</td>
+      <td style="padding:6px 8px;vertical-align:top">独立搜索子代理请求注入摘要指令：forceLow/forceMid/forceHigh 按档注入、noForce 不注入</td>
+      <td style="padding:6px 8px;vertical-align:top">每条 pattern 独立设置；route 自己服务时压过 enhance_search legacy 字段，落 search_fallback 时逐字段压过 sf 自己的值（没设的字段回落 sf）</td>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>claudeSearchThinking</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] 条目 / search_fallback</td>
+      <td style="padding:6px 8px;vertical-align:top">改写独立搜索子代理请求的思考档位：off/low/mid/high/max</td>
+      <td style="padding:6px 8px;vertical-align:top">逐字段优先级同上；不设 = 不动该请求的思考</td>
+      </tr>
+      <tr style="border-bottom:1px solid #333">
       <td style="padding:6px 8px;vertical-align:top">只影响 Responses 口；Anthropic 口仍走该 route 的 url；配了它该 route 的 text_only/no_search/enhance_search 对透传流不生效</td>
       </tr>
       <tr style="border-bottom:1px solid #333">
@@ -2803,7 +2815,7 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <td style="padding:6px 8px;vertical-align:top"><code>search_fallback</code></td>
       <td style="padding:6px 8px;vertical-align:top">顶层</td>
       <td style="padding:6px 8px;vertical-align:top">搜索兜底上游</td>
-      <td style="padding:6px 8px;vertical-align:top">route 标 no_search 且请求含搜索时走它；整请求转发给上游自己搜索回答。独立搜索子代理请求还可被 claudeSearchSummary 注入摘要指令 / claudeSearchThinking 改写思考（单请求，优先于 legacy 的 summary_mode/summary_thinking）</td>
+      <td style="padding:6px 8px;vertical-align:top">route 标 no_search 且请求含搜索时走它；整请求转发给上游自己搜索回答。独立搜索子代理请求还可被 claudeSearchSummary 注入摘要指令 / claudeSearchThinking 改写思考（单请求，优先于 legacy 的 summary_mode/summary_thinking；这两个字段也能挂在 routes[] 条目上按 pattern 各自设置，命中 route 设了的字段逐字段压过这里的值）</td>
       </tr>
       </table>
       <h3>pattern 顺序</h3>
@@ -2818,7 +2830,7 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <h3>增强搜索 enhance_search</h3>
       <p>route 配 <code>enhance_search</code> 后，<b>仅当该 route 支持搜索（未标 <code>no_search</code>）</b>时生效：对独立搜索子代理请求（体含 "Perform a web search for the query"），把摘要指令注入该请求的用户消息，仍走本 route 自己的上游，一次请求完成搜索+逐条摘要（Result N: ...），上游响应原样透传给客户端（控制台完整可见）。</p>
       <p>与 <code>search_fallback</code> 互斥：route 支持搜索（未标 <code>no_search</code>）走 enhance_search；route 标 <code>no_search</code> 缺搜索才走 <code>search_fallback</code>。</p>
-      <p><code>summary_level</code>：low（简短）/ mid（中等）/ high（详尽）/ max（含代码公式逐字复述），控制注入指令的详细度。<code>summary_thinking</code>：是否把该请求的思考改写为 low。search_fallback 上另有新字段 <code>claudeSearchSummary</code>（forceLow/forceMid/forceHigh 按档注入 / noForce 不注入）与 <code>claudeSearchThinking</code>（off/low/mid/high/max 改写思考），优先于这两个 legacy 字段。</p>
+      <p><code>summary_level</code>：low（简短）/ mid（中等）/ high（详尽）/ max（含代码公式逐字复述），控制注入指令的详细度。<code>summary_thinking</code>：是否把该请求的思考改写为 low。另有新字段 <code>claudeSearchSummary</code>（forceLow/forceMid/forceHigh 按档注入 / noForce 不注入）与 <code>claudeSearchThinking</code>（off/low/mid/high/max 改写思考），可挂在 search_fallback 或任意 routes[] 条目上（每条 pattern 独立，不配 enhance_search 也能用），优先于这两个 legacy 字段。</p>
       <h3>缓存命中</h3>
       <p>命中率 = cache_read / (input + cache_read + cache_creation)，与 Claude Code 的 cache hit 算法一致：缓存写入不算命中、但计入总输入。高命中率（90%+）主要来自上游模型（DeepSeek/Kimi）的原生 context caching，代理只透传 usage，不做额外缓存优化。点击状态页「缓存命中」卡片可看按真实上游模型分组的明细（含写入量），弹窗底部另有「实测缓存时间」表（按上游 URL+模型归组，规则见「统计字段」的「缓存年龄」条目）。中途断开的流（按 Esc、网络掉线）不计入聚合：它们只有 message_start 的预估 usage（部分上游的 start.input 含 cache_read 且 start.cr=0），计入会污染命中率，日志里标 [中断]。</p>
       <h3>统计字段</h3>
@@ -2898,6 +2910,18 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <td style="padding:6px 8px;vertical-align:top">Only applies when the route is NOT marked no_search; mutually exclusive with search_fallback</td>
       </tr>
       <tr style="border-bottom:1px solid #2a2a2a">
+      <td style="padding:6px 8px;vertical-align:top"><code>claudeSearchSummary</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] entry / search_fallback</td>
+      <td style="padding:6px 8px;vertical-align:top">Inject the summary instruction into standalone search sub-agent requests: forceLow/forceMid/forceHigh inject at level, noForce disables</td>
+      <td style="padding:6px 8px;vertical-align:top">Per-pattern independent; beats the route's enhance_search legacy fields when the route serves, and beats search_fallback's own values per field when diverted there (unset fields fall back to sf)</td>
+      </tr>
+      <tr style="border-bottom:1px solid #2a2a2a">
+      <td style="padding:6px 8px;vertical-align:top"><code>claudeSearchThinking</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] entry / search_fallback</td>
+      <td style="padding:6px 8px;vertical-align:top">Rewrite the standalone search sub-agent request's thinking level: off/low/mid/high/max</td>
+      <td style="padding:6px 8px;vertical-align:top">Same per-field precedence; unset = leave the request's thinking untouched</td>
+      </tr>
+      <tr style="border-bottom:1px solid #2a2a2a">
       <td style="padding:6px 8px;vertical-align:top"><code>thinking</code></td>
       <td style="padding:6px 8px;vertical-align:top">routes[] entry</td>
       <td style="padding:6px 8px;vertical-align:top">Declares the target model's thinking shape: auto (default, looked up by client model name) / adaptive / budget</td>
@@ -2925,7 +2949,7 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <td style="padding:6px 8px;vertical-align:top"><code>search_fallback</code></td>
       <td style="padding:6px 8px;vertical-align:top">Top level</td>
       <td style="padding:6px 8px;vertical-align:top">Search fallback upstream</td>
-      <td style="padding:6px 8px;vertical-align:top">Used when a route is marked no_search and the request contains search; the whole request is forwarded to the upstream to search and answer. Standalone search sub-agent requests may additionally get an injected summary instruction (claudeSearchSummary) / a thinking rewrite (claudeSearchThinking) — single request, taking precedence over the legacy summary_mode/summary_thinking</td>
+      <td style="padding:6px 8px;vertical-align:top">Used when a route is marked no_search and the request contains search; the whole request is forwarded to the upstream to search and answer. Standalone search sub-agent requests may additionally get an injected summary instruction (claudeSearchSummary) / a thinking rewrite (claudeSearchThinking) — single request, taking precedence over the legacy summary_mode/summary_thinking; both fields also mount on routes[] entries per pattern, and a hit route's set fields override these values per field</td>
       </tr>
       </tbody>
       </table>
@@ -2939,7 +2963,7 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <h3>Enhanced search: enhance_search</h3>
       <p>With <code>enhance_search</code> on a route, it applies <b>only when that route supports search (not marked <code>no_search</code>)</b>: for a standalone search sub-agent request (body carries "Perform a web search for the query"), the summary instruction is injected into that request's user message, which still goes to the route's own upstream — search + per-result summaries (Result N: ...) complete in a single request, the upstream response streaming through untouched (fully visible in this console).</p>
       <p>Mutually exclusive with <code>search_fallback</code>: a route that supports search (not marked <code>no_search</code>) uses enhance_search; a route marked <code>no_search</code> uses <code>search_fallback</code> when search is missing.</p>
-      <p><code>summary_level</code>: low (brief) / mid / high (detailed) / max (verbatim with code & formulas) — controls the injected instruction's verbosity. <code>summary_thinking</code>: whether to rewrite the request's thinking to low. search_fallback additionally offers <code>claudeSearchSummary</code> (forceLow/forceMid/forceHigh inject at level / noForce disables) and <code>claudeSearchThinking</code> (off/low/mid/high/max rewrite thinking), taking precedence over these legacy fields.</p>
+      <p><code>summary_level</code>: low (brief) / mid / high (detailed) / max (verbatim with code & formulas) — controls the injected instruction's verbosity. <code>summary_thinking</code>: whether to rewrite the request's thinking to low. The newer fields <code>claudeSearchSummary</code> (forceLow/forceMid/forceHigh inject at level / noForce disables) and <code>claudeSearchThinking</code> (off/low/mid/high/max rewrite thinking) mount on search_fallback or on any routes[] entry (per-pattern independent, no enhance_search needed), taking precedence over these legacy fields.</p>
       <h3>Cache hit</h3>
       <p>Hit rate = cache_read / (input + cache_read + cache_creation), same as Claude Code's cache-hit algorithm: cache writes don't count as hits but do count into total input. High hit rates (90%+) mainly come from upstream models' (DeepSeek/Kimi) native context caching — the proxy only forwards usage, with no extra cache optimization. Click the Status tab's "Cache hit" card for details grouped by real upstream model (including write volume); the modal's bottom also has a "Measured cache lifetime" table (grouped by upstream URL+model; rules in "Stats fields" → "Cache age"). Streams cut off midway (Esc, network drops) don't count into aggregates: they only have message_start's estimated usage (some upstreams include cache_read in start.input with start.cr=0), which would pollute the hit rate; they're marked [interrupted] in the log.</p>
       <h3>Stats fields</h3>

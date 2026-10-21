@@ -4,8 +4,9 @@
 # c1/c2 interior tail-element growth (sess C), r1/r2 Responses chain. a3 = session-less control.
 # Portable: curl-based port probes (no netstat/taskkill), cleanup by PID, proxy runs with -no-tray.
 # Requires a fresh build first (bash build.sh). CI runs this on ubuntu/windows/macos; locally: bash test/smoke/smoke.sh
-# Search: s1 routes via search_fallback (new claudeSearch* fields); s2 via enhance_search (legacy summary_*). Both must reach
-# the mock exactly once (single-request summary injection, no step1/step2) and stream its search answer back untouched.
+# Search: s1 routes via search_fallback (the smoke-sf route's own claudeSearchSummary=forceHigh overrides sf's forceMid
+# per field; sf's thinking=low still applies); s2 via enhance_search (legacy summary_*). Both must reach the mock exactly
+# once (single-request summary injection, no step1/step2) and stream its search answer back untouched.
 set -u
 cd "$(dirname "$0")/../.."
 CFG="$(pwd -W 2>/dev/null || pwd)/test/smoke/config.json"
@@ -135,8 +136,9 @@ echo "anthropic k3 -> HTTP $code"
 code=$(curl -s -o "$OUT/g4.resp" -w "%{http_code}" --max-time 30 -X POST "http://127.0.0.1:18084/v1/responses" -H "Content-Type: application/json" --data-binary "@$OUT/g4.json")
 echo "responses g4 -> HTTP $code"
 
-# Search single-request smoke: s1 (id 17) hits route smoke-sf (no_search) -> search_fallback with claudeSearchSummary=forceMid
-# + claudeSearchThinking=low; s2 (id 18) hits route smoke-enh -> enhance_search legacy path (summary_level=high, summary_thinking -> low).
+# Search single-request smoke: s1 (id 17) hits route smoke-sf (no_search) -> search_fallback; the route's own
+# claudeSearchSummary=forceHigh overrides sf's forceMid per field, while sf's claudeSearchThinking=low still applies.
+# s2 (id 18) hits route smoke-enh -> enhance_search legacy path (summary_level=high, summary_thinking -> low).
 cat > "$OUT/s1.json" <<'EOF'
 {"model":"smoke-sf","max_tokens":8192,"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"Perform a web search for the query: smoke weather"}]}
 EOF
@@ -198,12 +200,13 @@ grep -q '"type":"reasoning"' "$OUT/g1.resp" && { echo "G1 REASONING NOT STRIPPED
 grep -q '"type":"reasoning"' "$OUT/g2.resp" && { echo "G2 REASONING NOT STRIPPED"; clsok=0; }
 grep -q '"type":"reasoning"' "$OUT/g3.resp" && { echo "G3 REASONING NOT STRIPPED"; clsok=0; }
 grep -qE "off-.{1,10}low" "$OUT/recent.json" || { echo "OFF->LOW BADGE MISSING in recent.json"; clsok=0; }
-# --- search single-request assertions (s1 id 17 = new claudeSearch* fields; s2 id 18 = legacy via enhance_search):
+# --- search single-request assertions (s1 id 17 = route claudeSearchSummary overriding sf per field; s2 id 18 = legacy via enhance_search):
 searchok=1
 s1up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=17&side=up")
 echo "$s1up" | grep -q 'Perform a web search for the query: smoke weather' || { echo "S1 MARKER LOST upstream"; searchok=0; }
 echo "$s1up" | grep -q 'After performing the web search' || { echo "S1 INJECTION MISSING"; searchok=0; }
-echo "$s1up" | grep -q 'medium-detail plaintext summary' || { echo "S1 LEVEL NOT MID"; searchok=0; }
+echo "$s1up" | grep -q 'detailed comprehensive plaintext summary' || { echo "S1 ROUTE OVERRIDE NOT HIGH"; searchok=0; }
+echo "$s1up" | grep -q 'medium-detail' && { echo "S1 SF FORCEMID LEAKED (route override lost)"; searchok=0; }
 echo "$s1up" | grep -q '"budget_tokens":2048' || { echo "S1 THINKING-LOW REWRITE MISSING"; searchok=0; }
 echo "$s1up" | grep -q '"model":"searchmodel"' || { echo "S1 FALLBACK MODEL SWAP MISSING"; searchok=0; }
 s2up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=18&side=up")

@@ -47,7 +47,9 @@
       "url": "https://api.deepseek.com",
       "api": "sk-deepseek-replace-with-your-key",
       "model": "deepseek-V4-pro",
-      "convertOff2Low": "translate"
+      "convertOff2Low": "translate",
+      "claudeSearchThinking": "low",
+      "claudeSearchSummary": "forceMid"
     },
     {
       "pattern": "codex-fable*",

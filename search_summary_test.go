@@ -456,3 +456,156 @@ func TestSearchFallbackLegacySummaryThinking(t *testing.T) {
 		t.Errorf("开思考后不应残留 temperature: %s", up)
 	}
 }
+
+// ---- Per-route claudeSearch* fields (routes[] entries) ----
+
+// bigMaxSearchReq mirrors searchSubagentReq with max_tokens raised so a max-level budget (24576) fits under
+// the max_tokens/2 cap without truncation.
+var bigMaxSearchReq = strings.Replace(searchSubagentReq, `"max_tokens":32000`, `"max_tokens":64000`, 1)
+
+// runSearchE2EFull generalizes runSearchE2E: the route rule is caller-supplied (per-route claudeSearch* fields);
+// when routeServesSearch the route's own URL points at the recording search mock (a search-capable route serving
+// the request itself, no search_fallback involved), otherwise the route points at a hit-detecting dummy and
+// search_fallback (sf, nil allowed) serves the diverted request.
+func runSearchE2EFull(t *testing.T, rr RouteRule, sf *SearchRoute, routeServesSearch bool, clientBody string) (clientOut string, sfBodies [][]byte, routeCalled bool) {
+	t.Helper()
+	resetStats()
+	sfMock, bodies := searchE2EMock(t)
+	defer sfMock.Close()
+	if sf != nil {
+		sf.URL = sfMock.URL
+	}
+
+	routeHit := false
+	routeMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		routeHit = true
+		w.WriteHeader(200)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer routeMock.Close()
+	if routeServesSearch {
+		rr.URL = sfMock.URL
+	} else {
+		rr.URL = routeMock.URL
+	}
+
+	cfg.Store(&Config{
+		Upstream:           "http://no-default.example.com",
+		MaxRetries:         0,
+		TotalBudgetSec:     10,
+		RecentSampleWindow: 5,
+		Routes:             []RouteRule{rr},
+		SearchFallback:     sf,
+	})
+	defer cfg.Store(&Config{})
+	stats.resetSampleCap(5)
+
+	proxy := httptest.NewServer(http.HandlerFunc(handler))
+	defer proxy.Close()
+	resp, err := http.Post(proxy.URL+"/v1/messages", "application/json", strings.NewReader(clientBody))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return string(out), bodies(), routeHit
+}
+
+// TestRouteSearchFieldsOverrideSearchFallback locks per-field route-wins on the search_fallback path: the
+// no_search route's forceHigh/max beat search_fallback's own forceLow/low, while sf still serves the request.
+func TestRouteSearchFieldsOverrideSearchFallback(t *testing.T) {
+	out, bodies, routeCalled := runSearchE2EFull(t,
+		RouteRule{Pattern: "claude-opus*", API: "sk-route-xxx", Model: "ark-opus", NoSearch: true,
+			ClaudeSearchSummary: "forceHigh", ClaudeSearchThinking: "max"},
+		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceLow", ClaudeSearchThinking: "low"},
+		false, bigMaxSearchReq)
+	if routeCalled {
+		t.Error("不应命中原 no_search 路由上游")
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
+	}
+	up := string(bodies[0])
+	for _, sub := range []string{"detailed comprehensive", `"budget_tokens":24576`, `"model":"kimi-for-coding"`} {
+		if !strings.Contains(up, sub) {
+			t.Errorf("路由字段应逐字段压过 search_fallback（缺 %q）: %s", sub, up)
+		}
+	}
+	if strings.Contains(up, "short plaintext summary") {
+		t.Errorf("sf 自己的 forceLow 不应生效: %s", up)
+	}
+	checkPassthrough(t, out)
+}
+
+// TestRouteSearchFieldsPartialOverride locks per-field independence: the route's noForce kills the injection
+// while search_fallback's own claudeSearchThinking still applies (the route left thinking unset).
+func TestRouteSearchFieldsPartialOverride(t *testing.T) {
+	_, bodies, _ := runSearchE2EFull(t,
+		RouteRule{Pattern: "claude-opus*", API: "sk-route-xxx", Model: "ark-opus", NoSearch: true,
+			ClaudeSearchSummary: "noForce"},
+		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceMid", ClaudeSearchThinking: "low"},
+		false, searchSubagentReq)
+	if len(bodies) != 1 {
+		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
+	}
+	up := string(bodies[0])
+	if strings.Contains(up, "After performing the web search") {
+		t.Errorf("路由的 noForce 应压过 sf 的 forceMid（不注入）: %s", up)
+	}
+	if !strings.Contains(up, `"thinking":{"type":"enabled","budget_tokens":2048}`) {
+		t.Errorf("路由未设 thinking 时应回落 sf 的 claudeSearchThinking:low: %s", up)
+	}
+}
+
+// TestRouteSearchFieldsOnSearchCapableRoute locks the new standalone use: a search-capable route with no
+// enhance_search still gets injection + thinking rewrite from its own claudeSearch* fields, served by the
+// route's own upstream in one request.
+func TestRouteSearchFieldsOnSearchCapableRoute(t *testing.T) {
+	out, bodies, _ := runSearchE2EFull(t,
+		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding",
+			ClaudeSearchSummary: "forceMid", ClaudeSearchThinking: "low"},
+		nil, true, searchSubagentReq)
+	if len(bodies) != 1 {
+		t.Fatalf("路由上游应只收到 1 个 POST，实收 %d", len(bodies))
+	}
+	up := string(bodies[0])
+	for _, sub := range []string{"After performing the web search", "medium-detail", `"budget_tokens":2048`, `"model":"kimi-for-coding"`} {
+		if !strings.Contains(up, sub) {
+			t.Errorf("路由自身服务时其 claudeSearch* 字段应生效（缺 %q）: %s", sub, up)
+		}
+	}
+	checkPassthrough(t, out)
+}
+
+// TestRouteSearchFieldsBeatEnhanceLegacy locks new-beats-legacy on the route itself: noForce suppresses the
+// enhance_search legacy injection; the body reaches the route upstream unchanged except the model rewrite.
+func TestRouteSearchFieldsBeatEnhanceLegacy(t *testing.T) {
+	_, bodies, _ := runSearchE2EFull(t,
+		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding",
+			EnhanceSearch: &EnhanceSearchConfig{SummaryLevel: "high"}, ClaudeSearchSummary: "noForce"},
+		nil, true, searchSubagentReq)
+	if len(bodies) != 1 {
+		t.Fatalf("路由上游应只收到 1 个 POST，实收 %d", len(bodies))
+	}
+	want := strings.Replace(searchSubagentReq, `"model":"claude-opus-4-8"`, `"model":"kimi-for-coding"`, 1)
+	if !bytes.Equal(bodies[0], []byte(want)) {
+		t.Errorf("noForce 时请求体应仅替换 model，其余逐字节不动:\n got: %s\nwant: %s", bodies[0], want)
+	}
+}
+
+// TestValidateRouteClaudeSearchEnums locks config validation for the route-level fields: bad enums are
+// rejected naming the field, good ones pass.
+func TestValidateRouteClaudeSearchEnums(t *testing.T) {
+	badThink := &Config{Routes: []RouteRule{{Pattern: "x", URL: "http://u", ClaudeSearchThinking: "banana"}}}
+	if err := validateConfigEnums(badThink); err == nil || !strings.Contains(err.Error(), "claudeSearchThinking") {
+		t.Errorf("非法 claudeSearchThinking 应报错并点名字段: %v", err)
+	}
+	badSummary := &Config{Routes: []RouteRule{{Pattern: "x", URL: "http://u", ClaudeSearchSummary: "forceMax"}}}
+	if err := validateConfigEnums(badSummary); err == nil || !strings.Contains(err.Error(), "claudeSearchSummary") {
+		t.Errorf("非法 claudeSearchSummary 应报错并点名字段: %v", err)
+	}
+	ok := &Config{Routes: []RouteRule{{Pattern: "x", URL: "http://u", ClaudeSearchThinking: "mid", ClaudeSearchSummary: "forceHigh"}}}
+	if err := validateConfigEnums(ok); err != nil {
+		t.Errorf("合法枚举不应报错: %v", err)
+	}
+}

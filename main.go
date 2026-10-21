@@ -79,6 +79,9 @@ type RouteRule struct {
 	URLResponseAPI string               `json:"url_response_api,omitempty"` // Native Responses API upstream base URL: when set, Responses-port requests hitting this route are passed through untranslated (affects only the Responses port; Anthropic-port traffic still uses url). Implemented but not battle-tested, hence undocumented
 	Thinking       string               `json:"thinking,omitempty"`         // Thinking shape of the target model (Responses translation only): ""/"auto" = look up by client model name; "adaptive" = force adaptive+effort; "budget" = force enabled+budget_tokens
 	ConvertOff2Low string               `json:"convertOff2Low,omitempty"`   // Per-route thinking-off conversion: ""/unset = off (requests go through untouched); "translate" = Responses translation port only; "all" = translation port + Anthropic native port. When on, an explicit downstream thinking-off is quietly sent upstream as low thinking, with thinking blocks stripped from the response (client unaware)
+
+	ClaudeSearchThinking string `json:"claudeSearchThinking,omitempty"` // Standalone search sub-agent requests hitting this route: rewrite thinking to off/low/mid/high/max; unset = fall back (to enhance_search legacy when this route serves, to search_fallback's own setting when diverted there)
+	ClaudeSearchSummary  string `json:"claudeSearchSummary,omitempty"`  // Same requests: forceLow/forceMid/forceHigh inject the matching summary instruction, noForce disables injection; unset = fall back as above. A set value beats this route's enhance_search legacy fields and (per field) search_fallback's own
 }
 
 // EnhanceSearchConfig holds optional enhanced-search parameters inside a routes entry. When the route hits and the request carries
@@ -303,6 +306,16 @@ func validateConfigEnums(c *Config) error {
 		case "", "auto", "adaptive", "budget":
 		default:
 			return fmt.Errorf("route #%d (pattern %q) has invalid thinking value %q: only auto / adaptive / budget are supported", i+1, c.Routes[i].Pattern, c.Routes[i].Thinking)
+		}
+		switch c.Routes[i].ClaudeSearchThinking {
+		case "", "off", "low", "mid", "high", "max":
+		default:
+			return fmt.Errorf("route #%d (pattern %q) has invalid claudeSearchThinking value %q: only off / low / mid / high / max are supported (unset = leave the request's thinking untouched)", i+1, c.Routes[i].Pattern, c.Routes[i].ClaudeSearchThinking)
+		}
+		switch c.Routes[i].ClaudeSearchSummary {
+		case "", "noForce", "forceLow", "forceMid", "forceHigh":
+		default:
+			return fmt.Errorf("route #%d (pattern %q) has invalid claudeSearchSummary value %q: only noForce / forceLow / forceMid / forceHigh are supported (unset = no summary-prompt injection)", i+1, c.Routes[i].Pattern, c.Routes[i].ClaudeSearchSummary)
 		}
 		if err := checkOff2Low(fmt.Sprintf("route #%d (pattern %q)", i+1, c.Routes[i].Pattern), c.Routes[i].ConvertOff2Low); err != nil {
 			return err
@@ -3655,7 +3668,8 @@ func injectAfterMarker(body []byte, instruction string) ([]byte, bool) {
 }
 
 // resolveSearchBehavior computes the effective summary-injection level and thinking-rewrite level for a standalone
-// search sub-agent request handled by sf (the real search_fallback, or one synthesized from a route's enhance_search).
+// search sub-agent request handled by sf (the real search_fallback with any route-level claudeSearch* overrides merged
+// in per field, or one synthesized from a route's enhance_search legacy fields plus its claudeSearch* fields).
 // The new claudeSearch* fields win; the legacy summary_mode/summary_level/summary_thinking triple applies only when
 // the corresponding new field is unset.
 // sf: the search route in effect (nil tolerated). Returns (injectLevel ""/low/mid/high/max, thinkLevel ""/off/low/mid/high/max).
@@ -4685,7 +4699,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					if needSearch && sf != nil {
 						applyFB(sf.URL, sf.API, sf.Model, "search-fallback", routeSearch)
 						convFlag = sf.ConvertOff2Low // The fallback's own flag overwrites the matched route's
-						searchInjectLevel, searchThinkLevel = resolveSearchBehavior(sf)
+						// The matched route's claudeSearch* fields win over search_fallback's own, per field
+						// (each no_search route can get its own summary/thinking treatment of the same fallback).
+						eff := *sf
+						if rr.ClaudeSearchSummary != "" {
+							eff.ClaudeSearchSummary = rr.ClaudeSearchSummary
+						}
+						if rr.ClaudeSearchThinking != "" {
+							eff.ClaudeSearchThinking = rr.ClaudeSearchThinking
+						}
+						searchInjectLevel, searchThinkLevel = resolveSearchBehavior(&eff)
 						break
 					}
 					// Pure images (no search): use multimodal_fallback when configured; search requests never land on mf (degrade to passthrough when there's no sf).
@@ -4705,17 +4728,25 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.id, origModel, rr.URL, origModel, rr.Model)
 				f.routeReason.Store(routePattern)
 				convFlag = rr.ConvertOff2Low
-				// Enhance search: when the route supports search (no_search:false) and has enhance_search configured, a standalone
-				// search sub-agent request gets the legacy summary behavior (instruction injected into the search request itself,
-				// single-request mode), served by the route's own upstream — the request forwards to the route as usual;
-				// only the body transform after the routing block applies.
-				if rr.EnhanceSearch != nil && hasWebSearch(body) && !rr.NoSearch && !(rr.TextOnly && hasImage(body)) {
-					searchInjectLevel, searchThinkLevel = resolveSearchBehavior(&SearchRoute{
-						SummaryMode:     true,
-						SummaryLevel:    rr.EnhanceSearch.SummaryLevel,
-						SummaryThinking: rr.EnhanceSearch.SummaryThinking,
-					})
-					log.Printf("[route] #%d enhanced search %s -> %s (model %s)", f.id, origModel, rr.URL, rr.Model)
+				// Enhance search / route-level claudeSearch*: when the route supports search (no_search:false) and has
+				// enhance_search or claudeSearch* configured, a standalone search sub-agent request gets the summary instruction
+				// injected into the request itself and/or its thinking rewritten (single-request mode), served by the route's
+				// own upstream — the request forwards to the route as usual; only the body transform after the routing block
+				// applies. The route's claudeSearch* fields win over the legacy enhance_search summary_* fields.
+				if (rr.EnhanceSearch != nil || rr.ClaudeSearchSummary != "" || rr.ClaudeSearchThinking != "") && hasWebSearch(body) && !rr.NoSearch && !(rr.TextOnly && hasImage(body)) {
+					synth := &SearchRoute{
+						ClaudeSearchSummary:  rr.ClaudeSearchSummary,
+						ClaudeSearchThinking: rr.ClaudeSearchThinking,
+					}
+					if rr.EnhanceSearch != nil {
+						synth.SummaryMode = true
+						synth.SummaryLevel = rr.EnhanceSearch.SummaryLevel
+						synth.SummaryThinking = rr.EnhanceSearch.SummaryThinking
+					}
+					searchInjectLevel, searchThinkLevel = resolveSearchBehavior(synth)
+					if searchInjectLevel != "" || searchThinkLevel != "" {
+						log.Printf("[route] #%d enhanced search %s -> %s (model %s)", f.id, origModel, rr.URL, rr.Model)
+					}
 				}
 				break // Ordered: stop at the first hit
 			}

@@ -43,7 +43,7 @@ func TestConfigExampleMatchesStruct(t *testing.T) {
 		t.Errorf("search_fallback.summary_level=%q 不是真实档位", c.SearchFallback.SummaryLevel)
 	}
 
-	// The two claudeSearch* demo values must be enums validateConfigEnums actually accepts.
+	// The claudeSearch* demo values (on search_fallback and routes entries alike) must be enums validateConfigEnums actually accepts.
 	validSearchThink := map[string]bool{"": true, "off": true, "low": true, "mid": true, "high": true, "max": true}
 	validSearchSummary := map[string]bool{"": true, "noForce": true, "forceLow": true, "forceMid": true, "forceHigh": true}
 	if c.SearchFallback != nil {
@@ -52,6 +52,14 @@ func TestConfigExampleMatchesStruct(t *testing.T) {
 		}
 		if !validSearchSummary[c.SearchFallback.ClaudeSearchSummary] {
 			t.Errorf("search_fallback.claudeSearchSummary=%q 不是合法枚举", c.SearchFallback.ClaudeSearchSummary)
+		}
+	}
+	for i, r := range c.Routes {
+		if !validSearchThink[r.ClaudeSearchThinking] {
+			t.Errorf("routes[%d].claudeSearchThinking=%q 不是合法枚举", i, r.ClaudeSearchThinking)
+		}
+		if !validSearchSummary[r.ClaudeSearchSummary] {
+			t.Errorf("routes[%d].claudeSearchSummary=%q 不是合法枚举", i, r.ClaudeSearchSummary)
 		}
 	}
 
