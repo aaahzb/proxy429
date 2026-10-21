@@ -227,6 +227,14 @@ echo "mock mode=search POST count: $scount (want 2: one per request, no step2)"
 slog=$(grep -o 'standalone search sub-agent request' "$OUT/data.json" | wc -l | tr -d ' ')
 echo "[searchsum] single-request log lines: $slog (want 2)"
 [ "$slog" = "2" ] || { echo "SEARCHSUM LOG LINES WRONG"; searchok=0; }
+# --- status-page badge fields: recentflights JSON carries the badge data, the served page carries the badge JS ---
+smark=$(grep -o '"searchMarker":true' "$OUT/recent.json" | wc -l | tr -d ' ')
+slvl=$(grep -o '"searchLevel":"high"' "$OUT/recent.json" | wc -l | tr -d ' ')
+sthk=$(grep -o '"searchThinkTo":"low"' "$OUT/recent.json" | wc -l | tr -d ' ')
+echo "badge fields in recent.json: searchMarker=true x$smark, searchLevel=high x$slvl, searchThinkTo=low x$sthk (want 2/2/2)"
+[ "$smark" = "2" ] && [ "$slvl" = "2" ] && [ "$sthk" = "2" ] || { echo "SEARCH BADGE FIELDS WRONG in recent.json"; searchok=0; }
+grep -qF 'SearchSummary-' "$OUT/page.html" || { echo "SearchSummary BADGE JS MISSING in served page"; searchok=0; }
+grep -qF "thinkFrom||'auto'" "$OUT/page.html" || { echo "auto-from BADGE JS MISSING in served page"; searchok=0; }
 [ "$searchok" = 1 ] && echo "SEARCH SMOKE PASS" || { echo "SEARCH SMOKE FAIL"; exit 1; }
 echo "page classifier(codex) log lines: $(grep -c 'classifier(codex)' "$OUT/data.json")"
 [ "$clsok" = 1 ] && echo "CLS SMOKE PASS" || { echo "CLS SMOKE FAIL"; exit 1; }

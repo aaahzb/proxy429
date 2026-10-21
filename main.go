@@ -1149,6 +1149,10 @@ type flight struct {
 	firstByteMs      int64            // This stream's first-byte latency (ms), recorded only on the normal response path
 	tps              float64          // This stream's streaming tok/s, recorded only on the normal response path
 	searchPrompt     string           // Summary instruction injected into a standalone search sub-agent request (empty when none), shown on the status page via the model cell's hover tooltip
+	searchMarker     bool             // Standalone search sub-agent marker hit (body carries "Perform a web search for the query"); the web model column shows a [Search] badge
+	searchLevel      string           // Summary level actually injected into the marker request (empty = none); upgrades the badge to [SearchSummary-<level>]
+	searchThinkFrom  string           // Thinking value before the search thinking rewrite (empty = no thinking field, shown as auto)
+	searchThinkTo    string           // Configured level the search thinking rewrite targeted (empty = no rewrite); the API column shows [from->to]
 	translated       string           // Translation-port origin tag ("responses"=translated stream, "responses-raw"=native passthrough via a route with url_response_api); the web API column shows [translate]/[Response]
 	countTokens      bool             // count_tokens probe stream (countTokensPath); the response is just {"input_tokens":N}; the web model column shows a [count_tokens] prefix
 	searchStripped   atomic.Int32     // Total replayed search blocks stripped (conversation-watermark strip + 400-fallback strip; the web shows a red [剥N] badge, the split only goes to the log)
@@ -1583,6 +1587,10 @@ type finishedFlight struct {
 	firstByteMs      int64   // This stream's first-byte latency (ms)
 	tps              float64 // This stream's streaming tok/s
 	searchPrompt     string  // Summary instruction injected into a standalone search sub-agent request (empty when none)
+	searchMarker     bool    // Marker hit (the model column shows [Search])
+	searchLevel      string  // Injected summary level (empty = none; the badge upgrades to [SearchSummary-<level>])
+	searchThinkFrom  string  // Thinking value before the rewrite (empty = no thinking field, shown as auto)
+	searchThinkTo    string  // Rewrite target level (empty = no rewrite; the API column shows [from->to])
 	translated       string  // Translation-port origin tag ("responses"=translated, "responses-raw"=native passthrough); the web API column shows [translate]/[Response]
 	countTokens      bool    // count_tokens probe stream; the web model column shows a [count_tokens] prefix
 	tools            string  // Tool-call tag ("[Read*1][Edit*3]", empty when no tools), appended in the web model column
@@ -1698,6 +1706,10 @@ func addFinished(f *flight) {
 		firstByteMs:      f.firstByteMs,
 		tps:              f.tps,
 		searchPrompt:     f.searchPrompt,
+		searchMarker:     f.searchMarker,
+		searchLevel:      f.searchLevel,
+		searchThinkFrom:  f.searchThinkFrom,
+		searchThinkTo:    f.searchThinkTo,
 		translated:       f.translated,
 		countTokens:      f.countTokens,
 		tools:            f.toolCallsTag(),
@@ -4759,14 +4771,19 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// Standalone search sub-agent request (single-request search+summary): inject the summary instruction into the
 	// search request itself and/or rewrite its thinking, then the normal forward path takes over — the upstream
 	// searches and answers in one request and its response streams through untouched (no proxy-side synthesis).
-	if (searchInjectLevel != "" || searchThinkLevel != "") && hasSearchSubagentMarker(body) {
+	// Badge every marker hit ([Search] in the model column), even when no injection/rewrite applies.
+	if hasSearchSubagentMarker(body) {
+		f.searchMarker = true
 		if searchThinkLevel != "" {
 			effModel := targetModel
 			if effModel == "" {
 				effModel = origModel
 			}
+			thinkFrom := f.think
 			if nb, ok := rewriteSearchThinking(body, searchThinkLevel, effModel); ok {
 				body = nb
+				f.searchThinkFrom = thinkFrom // Empty from renders as auto in the API column's [from->to] badge
+				f.searchThinkTo = searchThinkLevel
 			} else {
 				log.Printf("[searchsum] #%d thinking rewrite to %q abandoned (max_tokens too small or body unparsable); request kept as sent", f.id, searchThinkLevel)
 				searchThinkLevel = ""
@@ -4777,10 +4794,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			if nb, ok := injectAfterMarker(body, instr); ok {
 				body = nb
 				f.searchPrompt = instr // The status page shows the injected instruction on hover over the model cell
+				f.searchLevel = searchInjectLevel
 			}
 		}
-		f.think = extractThinkMode(body) // The status page's 「API」 column reflects the rewritten thinking
-		log.Printf("[searchsum] #%d standalone search sub-agent request: summary-level=%q thinking=%q (single-request)", f.id, searchInjectLevel, searchThinkLevel)
+		if searchInjectLevel != "" || searchThinkLevel != "" {
+			f.think = extractThinkMode(body) // The status page's 「API」 column reflects the rewritten thinking
+			log.Printf("[searchsum] #%d standalone search sub-agent request: summary-level=%q thinking=%q (single-request)", f.id, searchInjectLevel, searchThinkLevel)
+		}
 	}
 
 	// upstream may be left empty (with a pattern:"*" catch-all, the default upstream goes unused); still empty here

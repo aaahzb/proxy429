@@ -127,7 +127,11 @@ type flightInfo struct {
 	RouteReason  int32  `json:"routeReason"`           // Route reason: 0=passthrough 1=pattern 2=classifier 3=fast 4=multimodal 5=search
 	Translated   string `json:"translated"`            // Translation-port origin ("responses"=translated / "responses-raw"=native passthrough [implemented, not field-tested, undocumented]); the API column shows [translate]/[Response]
 	CountTokens  bool   `json:"countTokens,omitempty"` // count_tokens probe stream; the model column shows a [count_tokens] prefix
-	SearchPrompt string `json:"searchPrompt,omitempty"`
+	SearchPrompt    string `json:"searchPrompt,omitempty"`
+	SearchMarker    bool   `json:"searchMarker,omitempty"`    // Standalone search sub-agent marker hit; the model column shows [Search]
+	SearchLevel     string `json:"searchLevel,omitempty"`     // Injected summary level; the badge upgrades to [SearchSummary-<level>]
+	SearchThinkFrom string `json:"searchThinkFrom,omitempty"` // Thinking value before the search rewrite (empty renders as auto)
+	SearchThinkTo   string `json:"searchThinkTo,omitempty"`   // Search rewrite target level (empty = none; the API column shows [from->to])
 	ReqTrunc     bool   `json:"reqTrunc,omitempty"`     // Request body truncated to just the head 256KB (download button greyed out)
 	HasFull      bool   `json:"hasFull,omitempty"`      // Full output copy still held (download output available; interactive JSON prefers it when present)
 	StageMs      int64  `json:"stageMs"`                // Milliseconds the current light color has lasted (shown next to the status light; only resets on color change)
@@ -225,7 +229,11 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 			RouteReason:  f.routeReason.Load(),
 			Translated:   f.translated,
 			CountTokens:  f.countTokens,
-			SearchPrompt: f.searchPrompt,
+			SearchPrompt:    f.searchPrompt,
+			SearchMarker:    f.searchMarker,
+			SearchLevel:     f.searchLevel,
+			SearchThinkFrom: f.searchThinkFrom,
+			SearchThinkTo:   f.searchThinkTo,
 			Tools:        f.toolCallsTag(),             // Tool calls accumulate live; the in-flight model column fills in progressively with the 500ms polls
 			Stripped:     int(f.searchStripped.Load()), // Watermark strips are booked at stream creation; 400-fallback strips accrue during forwarding
 			ReqTrunc:     f.reqTrunc(),
@@ -890,6 +898,10 @@ func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 			"firstByte":     fmtFirstByte(ff.firstByteMs),
 			"tps":           fmtTps(ff.tps),
 			"searchPrompt":  ff.searchPrompt,
+			"searchMarker":    ff.searchMarker,
+			"searchLevel":     ff.searchLevel,
+			"searchThinkFrom": ff.searchThinkFrom,
+			"searchThinkTo":   ff.searchThinkTo,
 			"tools":         ff.tools,
 			"stripped":      ff.searchStripped,
 			"reqTrunc":      ff.reqTruncated,
@@ -1262,9 +1274,11 @@ function fmtBytes(n){
 // countTokens 为 true（/v1/messages/count_tokens 探针）时前置灰色 [count_tokens]：
 // 这类流原始内容只有 {"input_tokens":N}，没标记看着像空响应。
 // API 来源（[Anthropic]/[Response]/[translate]）在独立 API 列显示，见 apiCell，不在本列。
-function modelCell(model, prompt, routeReason, countTokens, tools, stripped){
+function modelCell(model, prompt, routeReason, countTokens, tools, stripped, searchMarker, searchLevel){
   var tag = routeTag(routeReason);
   if(tag) model = tag + model;
+  // 独立搜索子代理徽标：所有标记命中挂 [Search]，摘要注入成功升级为 [SearchSummary-档位]（青绿 #4ec9b0，与路由标签淡蓝区分）
+  if(searchMarker) model = (searchLevel ? '<span style="color:#4ec9b0">[SearchSummary-'+esc(searchLevel)+']</span>' : '<span style="color:#4ec9b0">[Search]</span>') + model;
   if(countTokens) model = '<span style="color:#9d9d9d">[count_tokens]</span>' + model;
   // 工具调用标签（"[Read*1][Edit*3]"）：跟在 model 链后，金色区分；来自服务端 toolCallsTag 的已格式化串，转义后插入
   // （注意：本函数内局部变量不能叫 esc——var 声明提升会遮蔽全局 esc()，上面这行就会拿不到函数）
@@ -1284,13 +1298,16 @@ function modelCell(model, prompt, routeReason, countTokens, tools, stripped){
 // 颜色 = 词汇口径。思考是针对上游的——非透传流上游收到的都是 Anthropic 格式（直连原样、翻译映射后），
 // 故只有两色：橙 #d97757=Anthropic thinking 口径、绿 #2bbf8a=Responses reasoning 口径（仅透传）。
 // 所以紫色 [translate] 名后跟的是橙值。关也带色：绿关 vs 橙关能看出是哪侧关的。无思考字段时裸名无 [值]。
-function apiCell(translated, think){
+function apiCell(translated, think, thinkFrom, thinkTo){
   var name, color;
   if(translated === 'responses-raw'){ name = '[Response]'; color = '#2bbf8a'; }
   else if(translated){ name = '[translate]'; color = '#c586c0'; }
   else { name = '[Anthropic]'; color = '#d97757'; }
   var html = '<span style="color:'+color+'">'+name+'</span>';
-  if(think === 'off->low'){
+  if(thinkTo){
+    // 搜索子代理思考改写徽标 [原->新]（原值空 = 请求本无 thinking 字段，显示 auto），青绿；出现时取代普通 [think] 徽标
+    html += '<span style="color:#4ec9b0">['+esc((thinkFrom||'auto')+'->'+thinkTo)+']</span>';
+  } else if(think === 'off->low'){
     // convertOff2Low 升级流双色徽标：off 用翻译紫（下游口径：它发的是关思考），
     // low 用 Anthropic 橙（上游口径：实际发给上游的 low 思考）。
     html += '<span style="color:#c586c0">[off</span><span style="color:#9a9a9a">-&gt;</span><span style="color:#d97757">low]</span>';
@@ -1822,7 +1839,7 @@ async function poll(){
     const fs = d.flights || [];
     fs.forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull, rd:!!f.reqDown, sd:!!f.respDown, rdt:!!f.reqDownTrunc, hfd:!!f.hasFullDown, lst:f.last||0}; });
     flightsBody.innerHTML = fs.map(f =>
-      '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>'+flightDot(f)+attemptTag(f)+' '+fmtStageDur(f.stageMs)+'</td><td>#'+f.id+lastTag(f)+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools,f.stripped)+apiCell(f.translated,f.think)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+flightStatus(f)+'</td></tr>'
+      '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>'+flightDot(f)+attemptTag(f)+' '+fmtStageDur(f.stageMs)+'</td><td>#'+f.id+lastTag(f)+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools,f.stripped,f.searchMarker,f.searchLevel)+apiCell(f.translated,f.think,f.searchThinkFrom,f.searchThinkTo)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+flightStatus(f)+'</td></tr>'
     ).join('');
     // 在途流输出查看：手选单流优先，否则自动跟踪 grid，否则隐藏
     var fv = document.getElementById('flightView');
@@ -1925,7 +1942,7 @@ async function poll(){
         const rfd = await rf.json();
         (rfd.list||[]).forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull, rd:!!f.reqDown, sd:!!f.respDown, rdt:!!f.reqDownTrunc, hfd:!!f.hasFullDown, lst:f.last||0}; });
         document.querySelector('#finishedFlights tbody').innerHTML = (rfd.list||[]).map(function(f){
-          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+lastTag(f)+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools)+apiCell(f.translated,f.think)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+(f.total||'-')+'</td><td>'+(f.gaveUp?'[重试尽]':(f.status?(f.status===200?'200':'['+f.status+']'):'-'))+(f.attempts>1?'<span style="color:#d7ba7d">[重试'+(f.attempts-1)+'次]</span>':'')+'</td><td>'+(f.hitRate||'-')+(f.stripped>0?'<span style="color:#f48771">[剥'+f.stripped+']</span>':'')+'</td><td>'+(f.cacheAge||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
+          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+lastTag(f)+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools,0,f.searchMarker,f.searchLevel)+apiCell(f.translated,f.think,f.searchThinkFrom,f.searchThinkTo)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+(f.total||'-')+'</td><td>'+(f.gaveUp?'[重试尽]':(f.status?(f.status===200?'200':'['+f.status+']'):'-'))+(f.attempts>1?'<span style="color:#d7ba7d">[重试'+(f.attempts-1)+'次]</span>':'')+'</td><td>'+(f.hitRate||'-')+(f.stripped>0?'<span style="color:#f48771">[剥'+f.stripped+']</span>':'')+'</td><td>'+(f.cacheAge||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
         }).join('');
       }
     }catch(e){}

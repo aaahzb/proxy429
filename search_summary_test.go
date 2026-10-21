@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ---- Marker detection ----
@@ -467,7 +468,7 @@ var bigMaxSearchReq = strings.Replace(searchSubagentReq, `"max_tokens":32000`, `
 // when routeServesSearch the route's own URL points at the recording search mock (a search-capable route serving
 // the request itself, no search_fallback involved), otherwise the route points at a hit-detecting dummy and
 // search_fallback (sf, nil allowed) serves the diverted request.
-func runSearchE2EFull(t *testing.T, rr RouteRule, sf *SearchRoute, routeServesSearch bool, clientBody string) (clientOut string, sfBodies [][]byte, routeCalled bool) {
+func runSearchE2EFull(t *testing.T, rr RouteRule, sf *SearchRoute, routeServesSearch bool, clientBody string) (clientOut string, sfBodies [][]byte, routeCalled bool, recent string) {
 	t.Helper()
 	resetStats()
 	sfMock, bodies := searchE2EMock(t)
@@ -508,13 +509,27 @@ func runSearchE2EFull(t *testing.T, rr RouteRule, sf *SearchRoute, routeServesSe
 	}
 	out, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	return string(out), bodies(), routeHit
+	// The finished flight lands in the recent ring asynchronously; poll the handler directly (it is not
+	// registered on the test server's handler) until this flight shows up, and hand the JSON to callers
+	// for status-page badge assertions.
+	for i := 0; i < 100; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, recentFlightsPath, nil)
+		req.RemoteAddr = "127.0.0.1:1" // The console handlers gate on a local peer
+		recentFlightsHandler(rec, req)
+		recent = rec.Body.String()
+		if strings.Contains(recent, `"searchPrompt"`) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return string(out), bodies(), routeHit, recent
 }
 
 // TestRouteSearchFieldsOverrideSearchFallback locks per-field route-wins on the search_fallback path: the
 // no_search route's forceHigh/max beat search_fallback's own forceLow/low, while sf still serves the request.
 func TestRouteSearchFieldsOverrideSearchFallback(t *testing.T) {
-	out, bodies, routeCalled := runSearchE2EFull(t,
+	out, bodies, routeCalled, recent := runSearchE2EFull(t,
 		RouteRule{Pattern: "claude-opus*", API: "sk-route-xxx", Model: "ark-opus", NoSearch: true,
 			ClaudeSearchSummary: "forceHigh", ClaudeSearchThinking: "max"},
 		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceLow", ClaudeSearchThinking: "low"},
@@ -535,12 +550,18 @@ func TestRouteSearchFieldsOverrideSearchFallback(t *testing.T) {
 		t.Errorf("sf 自己的 forceLow 不应生效: %s", up)
 	}
 	checkPassthrough(t, out)
+	// Status-page badges: marker hit + injection + thinking rewrite all surfaced on the recent flight.
+	for _, sub := range []string{`"searchMarker":true`, `"searchLevel":"high"`, `"searchThinkFrom":"off"`, `"searchThinkTo":"max"`} {
+		if !strings.Contains(recent, sub) {
+			t.Errorf("recentflights 应带搜索徽标字段（缺 %q）: %s", sub, recent)
+		}
+	}
 }
 
 // TestRouteSearchFieldsPartialOverride locks per-field independence: the route's noForce kills the injection
 // while search_fallback's own claudeSearchThinking still applies (the route left thinking unset).
 func TestRouteSearchFieldsPartialOverride(t *testing.T) {
-	_, bodies, _ := runSearchE2EFull(t,
+	_, bodies, _, recent := runSearchE2EFull(t,
 		RouteRule{Pattern: "claude-opus*", API: "sk-route-xxx", Model: "ark-opus", NoSearch: true,
 			ClaudeSearchSummary: "noForce"},
 		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceMid", ClaudeSearchThinking: "low"},
@@ -555,13 +576,19 @@ func TestRouteSearchFieldsPartialOverride(t *testing.T) {
 	if !strings.Contains(up, `"thinking":{"type":"enabled","budget_tokens":2048}`) {
 		t.Errorf("路由未设 thinking 时应回落 sf 的 claudeSearchThinking:low: %s", up)
 	}
+	// Badges: noForce kills the injection (level stays empty), the thinking rewrite still shows from->to.
+	for _, sub := range []string{`"searchMarker":true`, `"searchLevel":""`, `"searchThinkFrom":"off"`, `"searchThinkTo":"low"`} {
+		if !strings.Contains(recent, sub) {
+			t.Errorf("recentflights 徽标字段（缺 %q）: %s", sub, recent)
+		}
+	}
 }
 
 // TestRouteSearchFieldsOnSearchCapableRoute locks the new standalone use: a search-capable route with no
 // enhance_search still gets injection + thinking rewrite from its own claudeSearch* fields, served by the
 // route's own upstream in one request.
 func TestRouteSearchFieldsOnSearchCapableRoute(t *testing.T) {
-	out, bodies, _ := runSearchE2EFull(t,
+	out, bodies, _, recent := runSearchE2EFull(t,
 		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding",
 			ClaudeSearchSummary: "forceMid", ClaudeSearchThinking: "low"},
 		nil, true, searchSubagentReq)
@@ -575,12 +602,17 @@ func TestRouteSearchFieldsOnSearchCapableRoute(t *testing.T) {
 		}
 	}
 	checkPassthrough(t, out)
+	for _, sub := range []string{`"searchMarker":true`, `"searchLevel":"mid"`, `"searchThinkFrom":"off"`, `"searchThinkTo":"low"`} {
+		if !strings.Contains(recent, sub) {
+			t.Errorf("recentflights 徽标字段（缺 %q）: %s", sub, recent)
+		}
+	}
 }
 
 // TestRouteSearchFieldsBeatEnhanceLegacy locks new-beats-legacy on the route itself: noForce suppresses the
 // enhance_search legacy injection; the body reaches the route upstream unchanged except the model rewrite.
 func TestRouteSearchFieldsBeatEnhanceLegacy(t *testing.T) {
-	_, bodies, _ := runSearchE2EFull(t,
+	_, bodies, _, _ := runSearchE2EFull(t,
 		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding",
 			EnhanceSearch: &EnhanceSearchConfig{SummaryLevel: "high"}, ClaudeSearchSummary: "noForce"},
 		nil, true, searchSubagentReq)
