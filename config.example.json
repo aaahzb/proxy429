@@ -80,6 +80,8 @@
     "model": "deepseek-search",
     "summary_mode": false,
     "summary_thinking": false,
-    "summary_level": "low"
+    "summary_level": "low",
+    "claudeSearchThinking": "low",
+    "claudeSearchSummary": "forceLow"
   }
 }

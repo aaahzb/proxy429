@@ -5,6 +5,7 @@ package main
 //   mode=bodyerr  → returns HTTP 200 + SSE error event (case B: in-body error retry)
 //   mode=ok       → returns HTTP 200 + normal SSE (case C: normal pass-through)
 //   mode=think    → returns HTTP 200 + SSE with a leading thinking block (exercises the convertOff2Low response stripper)
+//   mode=search   → returns HTTP 200 + SSE with server_tool_use + web_search_tool_result + summary text (a real search upstream's one-request answer)
 // It also prints the received thinking/reasoning_effort/max_tokens to verify classifier rewriting.
 // Usage (from the project root): go run ./test — listens on 127.0.0.1:9099.
 
@@ -33,6 +34,8 @@ func main() {
 				mode = "think"
 			case strings.HasPrefix(r.URL.Path, "/bodyerr/"):
 				mode = "bodyerr"
+			case strings.HasPrefix(r.URL.Path, "/search/"):
+				mode = "search"
 			default:
 				mode = "429"
 			}
@@ -90,6 +93,30 @@ func main() {
 				flusher.Flush()
 			}
 			return
+		case "search":
+			// One-request search answer (the shape a real search upstream produces when the summary instruction rides
+			// inside the search request): server_tool_use + web_search_tool_result + per-result summary text, one SSE stream.
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(200)
+			flusher, _ := w.(http.Flusher)
+			msgStart := `{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}`
+			if reqModel != "" {
+				msgStart = fmt.Sprintf(`{"type":"message_start","message":{"model":%q,"usage":{"input_tokens":10,"output_tokens":1}}}`, reqModel)
+			}
+			w.Write([]byte("event: message_start\ndata: " + msgStart + "\n\n"))
+			w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_smoke\",\"name\":\"web_search\",\"input\":{\"query\":\"smoke\"}}}\n\n"))
+			w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+			w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srvtoolu_smoke\",\"content\":[{\"type\":\"web_search_result\",\"title\":\"Smoke Result\",\"url\":\"https://example.com/smoke\"}]}}\n\n"))
+			w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n"))
+			w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
+			w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"text_delta\",\"text\":\"Result 1: smoke summary\"}}\n\n"))
+			w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\n"))
+			w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":10}}\n\n"))
+			w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
 		case "think":
 			// Thinking-block SSE: block 0 is thinking (with thinking_delta + signature_delta), block 1 is text —
 			// a stripper downstream must drop block 0 wholesale and renumber block 1 to index 0.
@@ -131,7 +158,7 @@ func main() {
 			return
 		}
 	})
-	log.Println("mock 服务器启动: 监听 127.0.0.1:9099 (?mode=429|bodyerr|ok|think，或路径前缀 /ok/ /think/ /bodyerr/)")
+	log.Println("mock 服务器启动: 监听 127.0.0.1:9099 (?mode=429|bodyerr|ok|think|search，或路径前缀 /ok/ /think/ /bodyerr/ /search/)")
 	log.Fatal(http.ListenAndServe("127.0.0.1:9099", nil))
 }
 

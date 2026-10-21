@@ -1,284 +1,458 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
-	"time"
 )
 
-// TestSearchAndRespond verifies summary mode: mock Kimi upstream (step1 non-streaming search results + step2 streaming summary);
-// searchAndRespond should build Kimi-format SSE (server_tool_use + web_search_tool_result + summary text_delta).
-func TestSearchAndRespond(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
-		var m map[string]any
-		body := readAll(t, r.Body)
-		_ = json.Unmarshal(body, &m)
-		stream, _ := m["stream"].(bool)
-		if !stream {
-			// step1: non-streaming JSON returning server_tool_use + web_search_tool_result.
-			resp := map[string]any{
-				"id":          "msg_step1",
-				"model":       "kimi-for-coding",
-				"stop_reason": "end_turn",
-				"content": []map[string]any{
-					{"type": "server_tool_use", "id": "srvtoolu_test1", "name": "web_search", "input": map[string]any{}},
-					{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_test1", "content": []map[string]any{
-						{"type": "web_search_tool_result_content", "url": "https://example.com/1", "title": "Result 1 Title"},
-					}},
-				},
-			}
-			b, _ := json.Marshal(resp)
-			w.Header().Set("content-type", "application/json")
-			w.Write(b)
-			return
+// ---- Marker detection ----
+
+// TestHasSearchSubagentMarker locks the standalone-search marker detection: the Claude Code search sub-agent
+// request carries "Perform a web search for the query" in a user message (string or block-array content form).
+func TestHasSearchSubagentMarker(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"string content form", `{"messages":[{"role":"user","content":"Perform a web search for the query: 广州天气"}]}`, true},
+		{"block content form", `{"messages":[{"role":"user","content":[{"type":"text","text":"Perform a web search for the query: X"}]}]}`, true},
+		{"plain search talk without marker", `{"messages":[{"role":"user","content":"搜一下"}]}`, false},
+		{"web_search tool but no marker", `{"tools":[{"type":"web_search_20250305"}],"messages":[{"role":"user","content":"搜一下"}]}`, false},
+	}
+	for _, tc := range cases {
+		if got := hasSearchSubagentMarker([]byte(tc.body)); got != tc.want {
+			t.Errorf("%s: hasSearchSubagentMarker = %v, want %v", tc.name, got, tc.want)
 		}
-		// step2: streaming SSE returning the summary text.
-		w.Header().Set("content-type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", `{"type":"message_start","message":{"model":"kimi-for-coding"}}`)
-		fmt.Fprintf(w, "event: content_block_start\ndata: %s\n\n", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
-		fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Result 1: this is a detailed summary of the first search result"}}`)
-		fmt.Fprintf(w, "event: content_block_stop\ndata: %s\n\n", `{"type":"content_block_stop","index":0}`)
-		fmt.Fprintf(w, "event: message_delta\ndata: %s\n\n", `{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`)
-		fmt.Fprintf(w, "event: message_stop\ndata: %s\n\n", `{"type":"message_stop"}`)
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	}
+}
 
-	cfg.Store(&Config{})
-	defer cfg.Store(&Config{})
-	resetStats()
+// TestSearchMarkerQuery locks query extraction: the text after the marker inside the same JSON string,
+// with the leading colon stripped; escapes are decoded; no marker means empty (the caller's default kicks in).
+func TestSearchMarkerQuery(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"string form", `{"messages":[{"role":"user","content":"Perform a web search for the query: 广州天气"}]}`, "广州天气"},
+		{"block form", `{"messages":[{"role":"user","content":[{"type":"text","text":"Perform a web search for the query: 广州天气 今天 预报"}]}]}`, "广州天气 今天 预报"},
+		{"escaped chars decoded", `{"messages":[{"role":"user","content":"Perform a web search for the query: 北京\"晴\"转多云"}]}`, `北京"晴"转多云`},
+		{"empty after marker", `{"messages":[{"role":"user","content":"Perform a web search for the query"}]}`, ""},
+		{"no marker", `{"messages":[{"role":"user","content":"搜一下"}]}`, ""},
+	}
+	for _, tc := range cases {
+		if got := searchMarkerQuery([]byte(tc.body)); got != tc.want {
+			t.Errorf("%s: searchMarkerQuery = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
 
-	sf := &SearchRoute{URL: srv.URL, API: "test-key", Model: "kimi-for-coding", SummaryMode: true}
-	f := &flight{id: 1, start: time.Now()}
-	flights.register(f)
-	defer flights.unregister(f.id)
+// ---- Summary instruction injection ----
 
-	body := []byte(`{"model":"claude-sonnet-4.6","stream":true,"messages":[{"role":"user","content":"search weather in Beijing"}],"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
-
-	rec := httptest.NewRecorder()
-	ok := searchAndRespond(rec, body, sf, f, "claude-sonnet-4.6")
+// TestInjectAfterMarkerStringForm locks the byte-level surgery on string-form content: the instruction lands
+// inside the very string holding the marker, everything else preserved byte for byte.
+func TestInjectAfterMarkerStringForm(t *testing.T) {
+	in := `{"model":"m","messages":[{"role":"user","content":"Perform a web search for the query: 广州天气"}]}`
+	instr := "Line1\nLine2 \"quoted\""
+	out, ok := injectAfterMarker([]byte(in), instr)
 	if !ok {
-		t.Fatal("searchAndRespond 返回 false（应成功）")
+		t.Fatal("injectAfterMarker 应成功")
 	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("注入后不是合法 JSON: %v", err)
+	}
+	content, _ := m["messages"].([]any)[0].(map[string]any)["content"].(string)
+	want := "Perform a web search for the query: 广州天气\n\n" + instr
+	if content != want {
+		t.Errorf("content = %q, want %q", content, want)
+	}
+	// Byte preservation: everything before the insertion point and after the string stays untouched.
+	if !bytes.HasPrefix(out, []byte(`{"model":"m","messages":[{"role":"user","content":"Perform a web search for the query: 广州天气`)) {
+		t.Errorf("注入点前的字节被改动: %s", out)
+	}
+	if !bytes.HasSuffix(out, []byte(`"}]}`)) {
+		t.Errorf("字符串收尾后的字节被改动: %s", out)
+	}
+}
 
-	out := rec.Body.String()
-	checks := map[string]string{
-		"server_tool_use":        "缺 server_tool_use 块（下拉触发）",
-		"web_search_tool_result": "缺 web_search_tool_result 块（标题/URL）",
-		"srvtoolu_test1":         "tool_use_id 未回填",
-		"Result 1 Title":         "搜索结果标题未回填",
-		"detailed summary":       "摘要文本未写入",
-		"end_turn":               "缺 stop_reason=end_turn",
-		"message_stop":           "缺 message_stop 收尾",
+// TestInjectAfterMarkerBlockForm locks injection into the text block holding the marker; sibling blocks and
+// other fields (system/tools) stay byte-identical.
+func TestInjectAfterMarkerBlockForm(t *testing.T) {
+	in := `{"system":[{"type":"text","text":"sys"}],"messages":[{"role":"user","content":[{"type":"text","text":"Perform a web search for the query: X"},{"type":"text","text":"second block"}]}],"tools":[{"type":"web_search_20250305"}]}`
+	out, ok := injectAfterMarker([]byte(in), "do the summary")
+	if !ok {
+		t.Fatal("injectAfterMarker 应成功")
 	}
-	for key, msg := range checks {
-		if !strings.Contains(out, key) {
-			t.Errorf("%s（输出缺 %q）", msg, key)
+	s := string(out)
+	if !strings.Contains(s, `"text":"Perform a web search for the query: X\n\ndo the summary"`) {
+		t.Errorf("指令未注入标记所在 text 块: %s", s)
+	}
+	if !strings.Contains(s, `{"type":"text","text":"second block"}`) {
+		t.Errorf("同消息的第二个块被改动: %s", s)
+	}
+	if !strings.Contains(s, `"system":[{"type":"text","text":"sys"}]`) || !strings.Contains(s, `"tools":[{"type":"web_search_20250305"}]`) {
+		t.Errorf("system/tools 字段被改动: %s", s)
+	}
+}
+
+// TestInjectAfterMarkerNoMarker locks the no-marker passthrough: ok=false and the body is returned untouched.
+func TestInjectAfterMarkerNoMarker(t *testing.T) {
+	in := `{"messages":[{"role":"user","content":"搜一下"}]}`
+	out, ok := injectAfterMarker([]byte(in), "x")
+	if ok {
+		t.Error("无标记应 ok=false")
+	}
+	if !bytes.Equal(out, []byte(in)) {
+		t.Errorf("无标记时 body 不应变化: %s", out)
+	}
+}
+
+// ---- Thinking rewrite ----
+
+// TestRewriteSearchThinking locks the claudeSearchThinking mapping: off stays disabled; low/mid/high/max pick
+// adaptive+effort or enabled+budget_tokens by the upstream model; sampling knobs die when thinking turns on;
+// a max_tokens too small for the budget floor abandons the rewrite.
+func TestRewriteSearchThinking(t *testing.T) {
+	base := `{"model":"M","max_tokens":64000,"temperature":1,"top_p":0.9,"thinking":{"type":"disabled"},"output_config":{"effort":"low"},"messages":[]}`
+	cases := []struct {
+		name          string
+		body          string
+		level         string
+		upstreamModel string
+		wantOK        bool
+		wantContains  []string
+		wantAbsent    []string
+	}{
+		{"off keeps disabled, drops output_config, keeps sampling", base, "off", "kimi-for-coding", true,
+			[]string{`"thinking":{"type":"disabled"}`, `"temperature":1`, `"top_p":0.9`},
+			[]string{`"output_config"`, `"budget_tokens"`}},
+		{"low budget model", base, "low", "kimi-for-coding", true,
+			[]string{`"thinking":{"type":"enabled","budget_tokens":2048}`},
+			[]string{`"output_config"`, `"temperature"`, `"top_p"`}},
+		{"mid budget model", base, "mid", "kimi-for-coding", true,
+			[]string{`"budget_tokens":8192`}, nil},
+		{"high budget model", base, "high", "kimi-for-coding", true,
+			[]string{`"budget_tokens":16384`}, nil},
+		{"max budget model", base, "max", "kimi-for-coding", true,
+			[]string{`"budget_tokens":24576`}, nil},
+		{"max adaptive model rewrites effort", base, "max", "claude-fable-5", true,
+			[]string{`"thinking":{"type":"adaptive"}`, `"output_config":{"effort":"max"}`},
+			[]string{`"budget_tokens"`, `"temperature"`}},
+		{"mid maps to medium on adaptive", base, "mid", "claude-fable-5", true,
+			[]string{`"output_config":{"effort":"medium"}`}, nil},
+		{"low adaptive model", base, "low", "claude-fable-5", true,
+			[]string{`"thinking":{"type":"adaptive"}`, `"output_config":{"effort":"low"}`},
+			[]string{`"budget_tokens"`}},
+		{"budget capped at half of small max_tokens", `{"model":"M","max_tokens":4096,"thinking":{"type":"disabled"},"messages":[]}`, "high", "kimi-for-coding", true,
+			[]string{`"budget_tokens":2048`}, nil},
+		{"max_tokens below the floor abandons the rewrite", `{"model":"M","max_tokens":1000,"thinking":{"type":"disabled"},"messages":[]}`, "low", "kimi-for-coding", false,
+			nil, nil},
+		{"empty level is a no-op", base, "", "kimi-for-coding", false, nil, nil},
+	}
+	for _, tc := range cases {
+		out, ok := rewriteSearchThinking([]byte(tc.body), tc.level, tc.upstreamModel)
+		if ok != tc.wantOK {
+			t.Errorf("%s: ok = %v, want %v (out=%s)", tc.name, ok, tc.wantOK, out)
+			continue
 		}
-	}
-	if rec.Code != http.StatusOK {
-		t.Errorf("状态码 %d，期望 200", rec.Code)
-	}
-	if !strings.Contains(rec.Header().Get("content-type"), "text/event-stream") {
-		t.Errorf("content-type=%s，期望含 text/event-stream", rec.Header().Get("content-type"))
-	}
-}
-
-// TestSearchAndRespondStep1Fail verifies false is returned when step1 fails (the handler should degrade).
-func TestSearchAndRespondStep1Fail(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"upstream down"}`))
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	cfg.Store(&Config{})
-	defer cfg.Store(&Config{})
-	resetStats()
-
-	sf := &SearchRoute{URL: srv.URL, API: "test-key", Model: "kimi-for-coding", SummaryMode: true}
-	f := &flight{id: 2, start: time.Now()}
-	flights.register(f)
-	defer flights.unregister(f.id)
-
-	body := []byte(`{"model":"claude-sonnet-4.6","stream":true,"messages":[{"role":"user","content":"q"}],"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
-	rec := httptest.NewRecorder()
-	if searchAndRespond(rec, body, sf, f, "claude-sonnet-4.6") {
-		t.Fatal("step1 失败时应返回 false")
-	}
-}
-
-// TestSearchAndRespondStep2Fallback verifies graded degradation on step2 failure: step2(thinking) fails -> mid (thinking off) retry succeeds.
-// mock: step1 returns search results; stream+with-thinking returns 500; stream+without-thinking returns the mid summary.
-func TestSearchAndRespondStep2Fallback(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
-		body := readAll(t, r.Body)
-		var m map[string]any
-		_ = json.Unmarshal(body, &m)
-		stream, _ := m["stream"].(bool)
-		if !stream {
-			// step1: non-streaming search results
-			resp := map[string]any{
-				"id": "msg_step1", "model": "kimi-for-coding", "stop_reason": "end_turn",
-				"content": []map[string]any{
-					{"type": "server_tool_use", "id": "srvtoolu_test2", "name": "web_search", "input": map[string]any{}},
-					{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_test2", "content": []map[string]any{
-						{"type": "web_search_tool_result_content", "url": "https://example.com/2", "title": "Result 2 Title"},
-					}},
-				},
+		if !ok {
+			if !bytes.Equal(out, []byte(tc.body)) {
+				t.Errorf("%s: 放弃改写时 body 不应变化: %s", tc.name, out)
 			}
-			b, _ := json.Marshal(resp)
-			w.Header().Set("content-type", "application/json")
-			w.Write(b)
-			return
+			continue
 		}
-		// stream=true: step2 (with thinking) fails, degraded mid (without thinking) returns the summary.
-		if strings.Contains(string(body), `"thinking"`) {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`{"error":"step2 down"}`))
-			return
-		}
-		w.Header().Set("content-type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", `{"type":"message_start","message":{"model":"kimi-for-coding"}}`)
-		fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"mid level summary"}}`)
-		fmt.Fprintf(w, "event: message_stop\ndata: %s\n\n", `{"type":"message_stop"}`)
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	cfg.Store(&Config{})
-	defer cfg.Store(&Config{})
-	resetStats()
-
-	sf := &SearchRoute{URL: srv.URL, API: "test-key", Model: "kimi-for-coding", SummaryMode: true, SummaryThinking: true}
-	f := &flight{id: 3, start: time.Now()}
-	flights.register(f)
-	defer flights.unregister(f.id)
-
-	body := []byte(`{"model":"claude-sonnet-4.6","stream":true,"messages":[{"role":"user","content":"q"}],"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
-	rec := httptest.NewRecorder()
-	if !searchAndRespond(rec, body, sf, f, "claude-sonnet-4.6") {
-		t.Fatal("应返回 true（降级 mid 成功）")
-	}
-	out := rec.Body.String()
-	if !strings.Contains(out, "mid level summary") {
-		t.Errorf("降级 mid 摘要缺失，输出: %s", out)
-	}
-}
-
-// TestSearchAndRespondStep2AllFail verifies that when both step2 and mid fail, step1's search results are returned directly (no summary text).
-func TestSearchAndRespondStep2AllFail(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
-		body := readAll(t, r.Body)
-		var m map[string]any
-		_ = json.Unmarshal(body, &m)
-		stream, _ := m["stream"].(bool)
-		if !stream {
-			resp := map[string]any{
-				"id": "msg_step1", "model": "kimi-for-coding", "stop_reason": "end_turn",
-				"content": []map[string]any{
-					{"type": "server_tool_use", "id": "srvtoolu_test3", "name": "web_search", "input": map[string]any{}},
-					{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_test3", "content": []map[string]any{
-						{"type": "web_search_tool_result_content", "url": "https://example.com/3", "title": "Result 3 Title"},
-					}},
-				},
+		s := string(out)
+		for _, sub := range tc.wantContains {
+			if !strings.Contains(s, sub) {
+				t.Errorf("%s: 缺 %q: %s", tc.name, sub, s)
 			}
-			b, _ := json.Marshal(resp)
-			w.Header().Set("content-type", "application/json")
-			w.Write(b)
-			return
 		}
-		// stream=true: both step2 and mid fail
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"all fail"}`))
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	cfg.Store(&Config{})
-	defer cfg.Store(&Config{})
-	resetStats()
-
-	sf := &SearchRoute{URL: srv.URL, API: "test-key", Model: "kimi-for-coding", SummaryMode: true}
-	f := &flight{id: 4, start: time.Now()}
-	flights.register(f)
-	defer flights.unregister(f.id)
-
-	body := []byte(`{"model":"claude-sonnet-4.6","stream":true,"messages":[{"role":"user","content":"q"}],"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
-	rec := httptest.NewRecorder()
-	if !searchAndRespond(rec, body, sf, f, "claude-sonnet-4.6") {
-		t.Fatal("应返回 true（返回 step1 结果）")
-	}
-	out := rec.Body.String()
-	// Should contain step1's search results
-	if !strings.Contains(out, "web_search_tool_result") || !strings.Contains(out, "Result 3 Title") {
-		t.Errorf("step1 搜索结果缺失，输出: %s", out)
-	}
-	// Should have a message_stop ending
-	if !strings.Contains(out, "message_stop") {
-		t.Errorf("缺 message_stop 收尾")
+		for _, sub := range tc.wantAbsent {
+			if strings.Contains(s, sub) {
+				t.Errorf("%s: 不应含 %q: %s", tc.name, sub, s)
+			}
+		}
+		var m map[string]any
+		if err := json.Unmarshal(out, &m); err != nil {
+			t.Errorf("%s: 改写后不是合法 JSON: %v", tc.name, err)
+		}
 	}
 }
 
-func readAll(t *testing.T, r interface{ Read([]byte) (int, error) }) []byte {
-	t.Helper()
-	buf := make([]byte, 0, 1024)
-	tmp := make([]byte, 1024)
-	for {
-		n, err := r.Read(tmp)
-		buf = append(buf, tmp[:n]...)
-		if err != nil {
-			break
+// ---- Effective-behavior resolution (new fields beat legacy) ----
+
+// TestResolveSearchBehavior locks the precedence table: claudeSearchSummary/claudeSearchThinking win;
+// noForce hard-disables injection even with summary_mode:true; legacy summary_mode/summary_thinking map
+// to injection-at-level / thinking-low when the new fields are absent.
+func TestResolveSearchBehavior(t *testing.T) {
+	cases := []struct {
+		name       string
+		sf         *SearchRoute
+		wantInject string
+		wantThink  string
+	}{
+		{"nil route", nil, "", ""},
+		{"bare route", &SearchRoute{}, "", ""},
+		{"legacy summary mode defaults to low", &SearchRoute{SummaryMode: true}, "low", ""},
+		{"legacy summary mode with level", &SearchRoute{SummaryMode: true, SummaryLevel: "max"}, "max", ""},
+		{"legacy summary thinking", &SearchRoute{SummaryMode: true, SummaryThinking: true}, "low", "low"},
+		{"legacy summary thinking without summary mode", &SearchRoute{SummaryThinking: true}, "", "low"},
+		{"forceLow", &SearchRoute{ClaudeSearchSummary: "forceLow"}, "low", ""},
+		{"forceMid", &SearchRoute{ClaudeSearchSummary: "forceMid"}, "mid", ""},
+		{"forceHigh", &SearchRoute{ClaudeSearchSummary: "forceHigh"}, "high", ""},
+		{"new field beats legacy level", &SearchRoute{ClaudeSearchSummary: "forceMid", SummaryMode: true, SummaryLevel: "high"}, "mid", ""},
+		{"noForce suppresses summary_mode", &SearchRoute{ClaudeSearchSummary: "noForce", SummaryMode: true, SummaryLevel: "max"}, "", ""},
+		{"claudeSearchThinking off", &SearchRoute{ClaudeSearchThinking: "off"}, "", "off"},
+		{"claudeSearchThinking beats legacy summary_thinking", &SearchRoute{ClaudeSearchThinking: "high", SummaryThinking: true}, "", "high"},
+		{"both new fields", &SearchRoute{ClaudeSearchSummary: "forceHigh", ClaudeSearchThinking: "max"}, "high", "max"},
+	}
+	for _, tc := range cases {
+		inject, think := resolveSearchBehavior(tc.sf)
+		if inject != tc.wantInject || think != tc.wantThink {
+			t.Errorf("%s: resolveSearchBehavior = (%q,%q), want (%q,%q)", tc.name, inject, think, tc.wantInject, tc.wantThink)
 		}
 	}
-	return buf
 }
 
-// TestSummaryLevelConfig verifies the four summary levels return different instructions and max_tokens.
+// ---- Summary prompt wording (single-request phrasing) ----
+
+// TestSummaryLevelConfig locks the reworded single-request instruction: phrased as an order to the searching
+// model ("After performing the web search"), one per detail level; query and Beijing-time lines carried.
 func TestSummaryLevelConfig(t *testing.T) {
 	cases := []struct {
 		level   string
-		wantMax int
-		wantKey string // Keywords the instruction should contain
+		wantKey string
 	}{
-		{"low", 2048, "short"},
-		{"", 2048, "short"}, // Empty defaults to low
-		{"mid", 4096, "medium-detail"},
-		{"high", 8192, "detailed comprehensive"},
-		{"HIGH", 8192, "detailed comprehensive"}, // Case-insensitive
-		{"max", 16384, "verbatim"},               // max: full restatement of steps/methods/code/formulas
-		{"full", 16384, "verbatim"},              // full equals max
-		{"unknown", 2048, "short"},               // Unknown falls back to low
+		{"low", "short plaintext summary"},
+		{"", "short plaintext summary"}, // Empty defaults to low
+		{"mid", "medium-detail"},
+		{"high", "detailed comprehensive"},
+		{"HIGH", "detailed comprehensive"}, // Case-insensitive
+		{"max", "verbatim"},                // max: full restatement of steps/methods/code/formulas
+		{"full", "verbatim"},               // full equals max
+		{"unknown", "short plaintext"},     // Unknown falls back to low
 	}
 	for _, c := range cases {
-		instr, max := summaryLevelConfig(c.level, "test query")
-		if max != c.wantMax {
-			t.Errorf("level=%q max_tokens=%d 期望 %d", c.level, max, c.wantMax)
-		}
+		instr := summaryLevelConfig(c.level, "测试查询")
 		if !strings.Contains(instr, c.wantKey) {
 			t.Errorf("level=%q 指令缺关键词 %q: %s", c.level, c.wantKey, instr)
 		}
+		if !strings.Contains(instr, "After performing the web search") {
+			t.Errorf("level=%q 指令应为单请求语序: %s", c.level, instr)
+		}
+		if !strings.Contains(instr, "across all search results") {
+			t.Errorf("level=%q 指令应指 search results 而非第二个请求里的结果块: %s", c.level, instr)
+		}
+		if strings.Contains(instr, "web_search_tool_result above") {
+			t.Errorf("level=%q 指令残留两步模式措辞: %s", c.level, instr)
+		}
+		if !strings.Contains(instr, "测试查询") || !strings.Contains(instr, "UTC+8") {
+			t.Errorf("level=%q 指令缺 query 或北京时间行: %s", c.level, instr)
+		}
 	}
 	// The four level instructions should all differ
-	low, _ := summaryLevelConfig("low", "test query")
-	mid, _ := summaryLevelConfig("mid", "test query")
-	high, _ := summaryLevelConfig("high", "test query")
-	mx, _ := summaryLevelConfig("max", "test query")
+	low := summaryLevelConfig("low", "q")
+	mid := summaryLevelConfig("mid", "q")
+	high := summaryLevelConfig("high", "q")
+	mx := summaryLevelConfig("max", "q")
 	if low == mid || mid == high || low == high {
 		t.Error("三档指令不应相同")
 	}
 	if mx == high {
 		t.Error("max 指令应与 high 不同（须含完整复述要求）")
+	}
+}
+
+// ---- End-to-end: search_fallback handles a standalone search in ONE upstream request ----
+
+// searchSubagentReq mirrors the production Claude Code standalone-search shape (small body, forced tool_choice
+// omitted here, thinking disabled, server-side web_search tool, marker in a block-form user message).
+const searchSubagentReq = `{"model":"claude-opus-4-8","stream":true,"max_tokens":32000,"temperature":1,"thinking":{"type":"disabled"},"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],"messages":[{"role":"user","content":[{"type":"text","text":"Perform a web search for the query: 广州天气 今天 预报"}]}]}`
+
+// searchE2EMock builds a Kimi-shaped SSE upstream: it records every request body and answers with
+// server_tool_use + web_search_tool_result + summary text in one stream (the single-request shape).
+func searchE2EMock(t *testing.T) (srv *httptest.Server, bodies func() [][]byte) {
+	t.Helper()
+	var mu sync.Mutex
+	var got [][]byte
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		got = append(got, b)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"kimi-for-coding\",\"usage\":{\"output_tokens\":1}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_e2e\",\"name\":\"web_search\",\"input\":{\"query\":\"广州天气\"}}}\n\n")
+		fmt.Fprint(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srvtoolu_e2e\",\"content\":[{\"type\":\"web_search_tool_result_content\",\"url\":\"https://example.com/1\",\"title\":\"广州天气预报\"}]}}\n\n")
+		fmt.Fprint(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"text_delta\",\"text\":\"Result 1: 晴转多云\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\n")
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	return srv, func() [][]byte {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([][]byte(nil), got...)
+	}
+}
+
+// runSearchE2E wires a no_search route + the given search_fallback, posts clientBody to the proxy, and returns
+// the client's full response, the sf upstream's request bodies, and whether the original route was hit.
+func runSearchE2E(t *testing.T, sf *SearchRoute, clientBody string) (clientOut string, sfBodies [][]byte, routeCalled bool) {
+	t.Helper()
+	resetStats()
+	sfMock, bodies := searchE2EMock(t)
+	defer sfMock.Close()
+	sf.URL = sfMock.URL
+
+	routeHit := false
+	routeMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		routeHit = true
+		w.WriteHeader(200)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer routeMock.Close()
+
+	cfg.Store(&Config{
+		Upstream:           "http://no-default.example.com",
+		MaxRetries:         0,
+		TotalBudgetSec:     10,
+		RecentSampleWindow: 5,
+		Routes: []RouteRule{
+			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "ark-opus", NoSearch: true},
+		},
+		SearchFallback: sf,
+	})
+	defer cfg.Store(&Config{})
+	stats.resetSampleCap(5)
+
+	proxy := httptest.NewServer(http.HandlerFunc(handler))
+	defer proxy.Close()
+	resp, err := http.Post(proxy.URL+"/v1/messages", "application/json", strings.NewReader(clientBody))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return string(out), bodies(), routeHit
+}
+
+// checkPassthrough asserts the upstream's Kimi-shaped stream reached the client verbatim.
+func checkPassthrough(t *testing.T, out string) {
+	t.Helper()
+	for _, sub := range []string{"server_tool_use", "srvtoolu_e2e", "web_search_tool_result", "广州天气预报", "Result 1: 晴转多云", "message_stop"} {
+		if !strings.Contains(out, sub) {
+			t.Errorf("响应未逐字透传（缺 %q）: %s", sub, out)
+		}
+	}
+}
+
+// TestSearchFallbackSummarySingleRequest locks the core refactor: legacy summary_mode injects the instruction
+// into the search request itself — ONE upstream POST, response passed through, no synthesized stream.
+func TestSearchFallbackSummarySingleRequest(t *testing.T) {
+	out, bodies, routeCalled := runSearchE2E(t,
+		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", SummaryMode: true, SummaryLevel: "mid"},
+		searchSubagentReq)
+	if routeCalled {
+		t.Error("不应命中原 no_search 路由上游")
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("单请求改造：上游应只收到 1 个 POST，实收 %d", len(bodies))
+	}
+	up := string(bodies[0])
+	for _, sub := range []string{"After performing the web search", "medium-detail", "广州天气 今天 预报", `"model":"kimi-for-coding"`} {
+		if !strings.Contains(up, sub) {
+			t.Errorf("注入后的上游请求缺 %q: %s", sub, up)
+		}
+	}
+	// No thinking rewrite without configuration: the client's disabled thinking and sampling knobs survive.
+	if !strings.Contains(up, `"thinking":{"type":"disabled"}`) || !strings.Contains(up, `"temperature":1`) {
+		t.Errorf("未配置思考改写时原 thinking/temperature 应保留: %s", up)
+	}
+	checkPassthrough(t, out)
+}
+
+// TestSearchFallbackClaudeSearchFields locks the new fields: forceHigh injects the high-level instruction and
+// claudeSearchThinking:"low" rewrites thinking to enabled+2048 on a budget upstream (sampling knobs dropped).
+func TestSearchFallbackClaudeSearchFields(t *testing.T) {
+	out, bodies, _ := runSearchE2E(t,
+		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceHigh", ClaudeSearchThinking: "low"},
+		searchSubagentReq)
+	if len(bodies) != 1 {
+		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
+	}
+	up := string(bodies[0])
+	for _, sub := range []string{"detailed comprehensive", `"thinking":{"type":"enabled","budget_tokens":2048}`} {
+		if !strings.Contains(up, sub) {
+			t.Errorf("上游请求缺 %q: %s", sub, up)
+		}
+	}
+	for _, sub := range []string{`"temperature"`, `"output_config"`} {
+		if strings.Contains(up, sub) {
+			t.Errorf("开思考后不应残留 %q: %s", sub, up)
+		}
+	}
+	checkPassthrough(t, out)
+}
+
+// TestSearchFallbackNoForce locks noForce beating summary_mode: the body goes upstream byte-identical
+// except the model rewrite.
+func TestSearchFallbackNoForce(t *testing.T) {
+	_, bodies, _ := runSearchE2E(t,
+		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", SummaryMode: true, SummaryLevel: "max", ClaudeSearchSummary: "noForce"},
+		searchSubagentReq)
+	if len(bodies) != 1 {
+		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
+	}
+	want := strings.Replace(searchSubagentReq, `"model":"claude-opus-4-8"`, `"model":"kimi-for-coding"`, 1)
+	if !bytes.Equal(bodies[0], []byte(want)) {
+		t.Errorf("noForce 时请求体应仅替换 model，其余逐字节不动:\n got: %s\nwant: %s", bodies[0], want)
+	}
+}
+
+// TestSearchFallbackNoMarkerNoInjection locks the marker gate: a web_search-carrying request without the
+// standalone-search marker still reroutes to search_fallback (capability), but no instruction is injected.
+func TestSearchFallbackNoMarkerNoInjection(t *testing.T) {
+	_, bodies, routeCalled := runSearchE2E(t,
+		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", SummaryMode: true, SummaryLevel: "mid"},
+		`{"model":"claude-opus-4-8","stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"搜一下"}]}`)
+	if routeCalled {
+		t.Error("带搜索工具的请求仍应分流到 search_fallback，而不是原路由")
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
+	}
+	if strings.Contains(string(bodies[0]), "After performing the web search") {
+		t.Errorf("无标记请求不应注入摘要指令: %s", bodies[0])
+	}
+}
+
+// TestSearchFallbackLegacySummaryThinking locks legacy summary_thinking:true mapping to a low-thinking rewrite.
+func TestSearchFallbackLegacySummaryThinking(t *testing.T) {
+	_, bodies, _ := runSearchE2E(t,
+		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", SummaryThinking: true},
+		searchSubagentReq)
+	if len(bodies) != 1 {
+		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
+	}
+	up := string(bodies[0])
+	if !strings.Contains(up, `"thinking":{"type":"enabled","budget_tokens":2048}`) {
+		t.Errorf("legacy summary_thinking 应改写为 low thinking: %s", up)
+	}
+	if strings.Contains(up, `"temperature"`) {
+		t.Errorf("开思考后不应残留 temperature: %s", up)
 	}
 }

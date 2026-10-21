@@ -43,6 +43,18 @@ func TestConfigExampleMatchesStruct(t *testing.T) {
 		t.Errorf("search_fallback.summary_level=%q 不是真实档位", c.SearchFallback.SummaryLevel)
 	}
 
+	// The two claudeSearch* demo values must be enums validateConfigEnums actually accepts.
+	validSearchThink := map[string]bool{"": true, "off": true, "low": true, "mid": true, "high": true, "max": true}
+	validSearchSummary := map[string]bool{"": true, "noForce": true, "forceLow": true, "forceMid": true, "forceHigh": true}
+	if c.SearchFallback != nil {
+		if !validSearchThink[c.SearchFallback.ClaudeSearchThinking] {
+			t.Errorf("search_fallback.claudeSearchThinking=%q 不是合法枚举", c.SearchFallback.ClaudeSearchThinking)
+		}
+		if !validSearchSummary[c.SearchFallback.ClaudeSearchSummary] {
+			t.Errorf("search_fallback.claudeSearchSummary=%q 不是合法枚举", c.SearchFallback.ClaudeSearchSummary)
+		}
+	}
+
 	// The debug field is excluded from the template by convention.
 	var raw map[string]interface{}
 	if err := json.Unmarshal(configExampleBytes, &raw); err != nil {

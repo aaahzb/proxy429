@@ -4,6 +4,8 @@
 # c1/c2 interior tail-element growth (sess C), r1/r2 Responses chain. a3 = session-less control.
 # Portable: curl-based port probes (no netstat/taskkill), cleanup by PID, proxy runs with -no-tray.
 # Requires a fresh build first (bash build.sh). CI runs this on ubuntu/windows/macos; locally: bash test/smoke/smoke.sh
+# Search: s1 routes via search_fallback (new claudeSearch* fields); s2 via enhance_search (legacy summary_*). Both must reach
+# the mock exactly once (single-request summary injection, no step1/step2) and stream its search answer back untouched.
 set -u
 cd "$(dirname "$0")/../.."
 CFG="$(pwd -W 2>/dev/null || pwd)/test/smoke/config.json"
@@ -133,6 +135,19 @@ echo "anthropic k3 -> HTTP $code"
 code=$(curl -s -o "$OUT/g4.resp" -w "%{http_code}" --max-time 30 -X POST "http://127.0.0.1:18084/v1/responses" -H "Content-Type: application/json" --data-binary "@$OUT/g4.json")
 echo "responses g4 -> HTTP $code"
 
+# Search single-request smoke: s1 (id 17) hits route smoke-sf (no_search) -> search_fallback with claudeSearchSummary=forceMid
+# + claudeSearchThinking=low; s2 (id 18) hits route smoke-enh -> enhance_search legacy path (summary_level=high, summary_thinking -> low).
+cat > "$OUT/s1.json" <<'EOF'
+{"model":"smoke-sf","max_tokens":8192,"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"Perform a web search for the query: smoke weather"}]}
+EOF
+cat > "$OUT/s2.json" <<'EOF'
+{"model":"smoke-enh","max_tokens":8192,"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"Perform a web search for the query: smoke transit"}]}
+EOF
+for n in s1 s2; do
+  code=$(curl -s -o "$OUT/$n.resp" -w "%{http_code}" --max-time 30 -X POST "http://127.0.0.1:18083/v1/messages" -H "Content-Type: application/json" --data-binary "@$OUT/$n.json")
+  echo "anthropic $n -> HTTP $code"
+done
+
 sleep 1
 curl -s --max-time 10 "http://127.0.0.1:18083/__recentflights" > "$OUT/recent.json"
 curl -s --max-time 10 "http://127.0.0.1:18083/__logs" > "$OUT/page.html"
@@ -183,6 +198,33 @@ grep -q '"type":"reasoning"' "$OUT/g1.resp" && { echo "G1 REASONING NOT STRIPPED
 grep -q '"type":"reasoning"' "$OUT/g2.resp" && { echo "G2 REASONING NOT STRIPPED"; clsok=0; }
 grep -q '"type":"reasoning"' "$OUT/g3.resp" && { echo "G3 REASONING NOT STRIPPED"; clsok=0; }
 grep -qE "off-.{1,10}low" "$OUT/recent.json" || { echo "OFF->LOW BADGE MISSING in recent.json"; clsok=0; }
+# --- search single-request assertions (s1 id 17 = new claudeSearch* fields; s2 id 18 = legacy via enhance_search):
+searchok=1
+s1up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=17&side=up")
+echo "$s1up" | grep -q 'Perform a web search for the query: smoke weather' || { echo "S1 MARKER LOST upstream"; searchok=0; }
+echo "$s1up" | grep -q 'After performing the web search' || { echo "S1 INJECTION MISSING"; searchok=0; }
+echo "$s1up" | grep -q 'medium-detail plaintext summary' || { echo "S1 LEVEL NOT MID"; searchok=0; }
+echo "$s1up" | grep -q '"budget_tokens":2048' || { echo "S1 THINKING-LOW REWRITE MISSING"; searchok=0; }
+echo "$s1up" | grep -q '"model":"searchmodel"' || { echo "S1 FALLBACK MODEL SWAP MISSING"; searchok=0; }
+s2up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=18&side=up")
+echo "$s2up" | grep -q 'Perform a web search for the query: smoke transit' || { echo "S2 MARKER LOST upstream"; searchok=0; }
+echo "$s2up" | grep -q 'After performing the web search' || { echo "S2 INJECTION MISSING"; searchok=0; }
+echo "$s2up" | grep -q 'detailed comprehensive plaintext summary' || { echo "S2 LEVEL NOT HIGH"; searchok=0; }
+echo "$s2up" | grep -q 'data points, direct quotes' || { echo "S2 HIGH WORDING MISSING"; searchok=0; }
+echo "$s2up" | grep -q 'verbatim' && { echo "S2 UNEXPECTED VERBATIM (max-only wording leaked)"; searchok=0; }
+echo "$s2up" | grep -q '"budget_tokens":2048' || { echo "S2 LEGACY summary_thinking->low MISSING"; searchok=0; }
+for n in s1 s2; do
+  grep -q 'server_tool_use' "$OUT/$n.resp" || { echo "$n RESPONSE NOT A SEARCH ANSWER (server_tool_use missing)"; searchok=0; }
+  grep -q 'web_search_tool_result' "$OUT/$n.resp" || { echo "$n RESPONSE MISSING web_search_tool_result"; searchok=0; }
+  grep -q 'Result 1: smoke summary' "$OUT/$n.resp" || { echo "$n SUMMARY TEXT NOT PASSED THROUGH"; searchok=0; }
+done
+scount=$(grep -c 'mode=search' "$OUT/mock.log")
+echo "mock mode=search POST count: $scount (want 2: one per request, no step2)"
+[ "$scount" = "2" ] || { echo "SEARCH UPSTREAM POST COUNT WRONG (two-step machinery alive?)"; searchok=0; }
+slog=$(grep -o 'standalone search sub-agent request' "$OUT/data.json" | wc -l | tr -d ' ')
+echo "[searchsum] single-request log lines: $slog (want 2)"
+[ "$slog" = "2" ] || { echo "SEARCHSUM LOG LINES WRONG"; searchok=0; }
+[ "$searchok" = 1 ] && echo "SEARCH SMOKE PASS" || { echo "SEARCH SMOKE FAIL"; exit 1; }
 echo "page classifier(codex) log lines: $(grep -c 'classifier(codex)' "$OUT/data.json")"
 [ "$clsok" = 1 ] && echo "CLS SMOKE PASS" || { echo "CLS SMOKE FAIL"; exit 1; }
 if [ "$pairs" = "$want" ]; then echo "SMOKE PASS"; else echo "SMOKE FAIL (want [$want])"; exit 1; fi

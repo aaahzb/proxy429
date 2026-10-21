@@ -17,7 +17,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,7 +47,6 @@ type Config struct {
 	FastRoute                *FastRoute       `json:"fast_route,omitempty"`          // Dedicated route for fast-mode requests; non-classifier requests carrying "speed":"fast" are routed here; empty = disabled
 	MultimodalFallback       *MultimodalRoute `json:"multimodal_fallback,omitempty"` // Multimodal fallback route; requests containing images that hit a text_only model are rerouted here; empty = disabled
 	SearchFallback           *SearchRoute     `json:"search_fallback,omitempty"`     // Search fallback route; requests with search tools that hit a no_search upstream are rerouted here; empty = disabled
-	SearchDebugDir           string           `json:"search_debug_dir,omitempty"`    // Search debug directory; when set, the raw request/response of each search-summary step is written there for troubleshooting
 	ConvertAllToStream       bool             `json:"convertAlltoStream"`            // Global stream conversion: when on, all non-streaming requests are sent upstream as streams, then rebuilt into a single non-streaming JSON response (transparent to the client; the web console shows live output/first-token/tok/s)
 	ResponsesListen          string           `json:"responses_listen"`              // OpenAI Responses API listener (e.g. 127.0.0.1:8081); empty = disabled. Translates Responses-protocol requests into Anthropic and feeds the main pipeline, for Codex CLI and similar tools. Starts/stops dynamically on save/reload
 
@@ -77,19 +75,19 @@ type RouteRule struct {
 	Model          string               `json:"model"`                      // Target model name to rewrite to; empty = leave the model field unchanged
 	TextOnly       bool                 `json:"text_only"`                  // Target model is text-only; requests containing images fall back to multimodal_fallback
 	NoSearch       bool                 `json:"no_search"`                  // Target upstream does not support search; requests with search tools fall back to search_fallback
-	EnhanceSearch  *EnhanceSearchConfig `json:"enhance_search,omitempty"`   // Enhanced search: enabled when non-nil. For requests with search tools, skip the main model and use this route's own upstream in kimi summary mode
+	EnhanceSearch  *EnhanceSearchConfig `json:"enhance_search,omitempty"`   // Enhanced search: enabled when non-nil. Standalone search sub-agent requests get the summary instruction injected into the request itself, served by this route's own upstream (single-request mode)
 	URLResponseAPI string               `json:"url_response_api,omitempty"` // Native Responses API upstream base URL: when set, Responses-port requests hitting this route are passed through untranslated (affects only the Responses port; Anthropic-port traffic still uses url). Implemented but not battle-tested, hence undocumented
 	Thinking       string               `json:"thinking,omitempty"`         // Thinking shape of the target model (Responses translation only): ""/"auto" = look up by client model name; "adaptive" = force adaptive+effort; "budget" = force enabled+budget_tokens
 	ConvertOff2Low string               `json:"convertOff2Low,omitempty"`   // Per-route thinking-off conversion: ""/unset = off (requests go through untouched); "translate" = Responses translation port only; "all" = translation port + Anthropic native port. When on, an explicit downstream thinking-off is quietly sent upstream as low thinking, with thinking blocks stripped from the response (client unaware)
 }
 
-// EnhanceSearchConfig holds optional enhanced-search parameters inside a routes entry. When the route hits and the request carries search tools,
-// if EnhanceSearch is non-nil, skip the main model and use the route's own url/api/model in kimi summary mode
-// (step1 search + step2 summary + synthesized response). Equivalent to no_search via search_fallback.summary_mode,
-// except the search upstream is the route's own. The SummaryMode field only marks internal conversion to SearchRoute.
+// EnhanceSearchConfig holds optional enhanced-search parameters inside a routes entry. When the route hits and the request carries
+// search tools, standalone search sub-agent requests get the summary instruction injected into the search request itself
+// (single-request mode), served by the route's own url/api/model — the upstream's response passes through untouched.
+// Equivalent to no_search via search_fallback, except the search upstream is the route's own.
 type EnhanceSearchConfig struct {
-	SummaryThinking bool   `json:"summary_thinking"` // Whether step2 summary uses thinking (default off, faster summaries)
-	SummaryLevel    string `json:"summary_level"`    // Summary detail level: low (default) / mid / high / max
+	SummaryThinking bool   `json:"summary_thinking"` // Rewrite the injected search request's thinking to low (default off)
+	SummaryLevel    string `json:"summary_level"`    // Injected summary instruction's detail level: low (default) / mid / high / max
 }
 
 // ClassifierRoute defines the dedicated route for classifier requests: requests matching the classifier (safety check) signature
@@ -128,17 +126,17 @@ type SearchRoute struct {
 	API             string `json:"api"`                      // Target API key; empty = pass through the client's token
 	Model           string `json:"model"`                    // Target model name to rewrite to; empty = leave the model field unchanged
 	ConvertOff2Low  string `json:"convertOff2Low,omitempty"` // Same semantics as RouteRule.ConvertOff2Low
-	SummaryMode     bool   `json:"summary_mode"`             // Search sub-agent requests: step1 search + step2 detailed summary, synthesize a standard web_search response for the client (no whole-request forwarding, no main model)
-	SummaryThinking bool   `json:"summary_thinking"`         // Whether the step2 summary request uses thinking under summary_mode (default off, faster summaries)
-	SummaryLevel    string `json:"summary_level"`            // Summary detail under summary_mode: low (default, brief) / mid (medium) / high (thorough)
+	SummaryMode     bool   `json:"summary_mode"`             // Standalone search sub-agent requests: inject the summary instruction (at summary_level) into the search request itself — single request, the upstream's response passed through (legacy; claudeSearchSummary overrides)
+	SummaryThinking bool   `json:"summary_thinking"`         // Legacy thinking switch for search sub-agent requests: true rewrites thinking to low (claudeSearchThinking overrides)
+	SummaryLevel    string `json:"summary_level"`            // Summary detail under summary_mode: low (default, brief) / mid (medium) / high (thorough) / max (verbatim steps/code/formulas)
+
+	ClaudeSearchThinking string `json:"claudeSearchThinking,omitempty"` // Standalone search sub-agent requests: rewrite thinking to off / low / mid / high / max (beats summary_thinking; unset = legacy behavior)
+	ClaudeSearchSummary  string `json:"claudeSearchSummary,omitempty"`  // Standalone search sub-agent requests: forceLow / forceMid / forceHigh inject the matching summary instruction into the search request itself; noForce disables injection (beats summary_mode; unset = legacy behavior)
 }
 
 // Version is the build stamp, injected by build.sh via -ldflags "-X main.Version=...": "release vX.Y.Z.N" when
 // HEAD is exactly a version tag (CD tag builds), otherwise "beta <git-short>-<HHMM>"; bare go builds show "dev".
 var Version = "dev"
-
-// debugSearchDirOverride is injected via ldflags (debug builds): forces search-summary step raws into this directory, ignoring config.search_debug_dir.
-var debugSearchDirOverride string
 
 var cfg atomic.Pointer[Config]
 
@@ -218,6 +216,7 @@ var removedConfigKeys = []struct{ key, hint string }{
 	{"classifier_thinking_disabled", `set "classifier_thinking": "off" inside classifier_route instead`},
 	{"classifier_max_tokens", `max_tokens is no longer modified on classifier requests`},
 	{"translateNone2Low", `set "convertOff2Low": "translate" or "all" on routes[]/fast_route/multimodal_fallback/search_fallback entries instead`},
+	{"search_debug_dir", `search-summary two-step mode was removed; search requests are ordinary forwarded streams, fully inspectable in the console`},
 }
 
 // removedKeyWarningEN renders the stable English warning line for a removed key (startup log, web save rejection).
@@ -322,6 +321,16 @@ func validateConfigEnums(c *Config) error {
 	if c.SearchFallback != nil {
 		if err := checkOff2Low("search_fallback", c.SearchFallback.ConvertOff2Low); err != nil {
 			return err
+		}
+		switch c.SearchFallback.ClaudeSearchThinking {
+		case "", "off", "low", "mid", "high", "max":
+		default:
+			return fmt.Errorf("search_fallback has invalid claudeSearchThinking value %q: only off / low / mid / high / max are supported (unset = leave the request's thinking untouched)", c.SearchFallback.ClaudeSearchThinking)
+		}
+		switch c.SearchFallback.ClaudeSearchSummary {
+		case "", "noForce", "forceLow", "forceMid", "forceHigh":
+		default:
+			return fmt.Errorf("search_fallback has invalid claudeSearchSummary value %q: only noForce / forceLow / forceMid / forceHigh are supported (unset = no summary-prompt injection)", c.SearchFallback.ClaudeSearchSummary)
 		}
 	}
 	return nil
@@ -1120,14 +1129,13 @@ type flight struct {
 	contentDown      []byte           // Proxy→downstream response content (capped at flightContentCap, keeps the tail)
 	fullContentDown  []byte           // Proxy→downstream full response (recorded only with the 储存完整结构体 toggle on)
 	fullPartialDown  bool             // Downstream-side mirror of fullPartial: down bytes that flowed with the toggle off mean no complete down full copy (guarded by contentMu)
-	searchDebug      bool             // Search-summary mode: while forwarding, append the main model's response SSE to cfg.SearchDebugDir
 	inTokens         int64            // This stream's cumulative input_tokens (stored from lastInput when forward ends)
 	cacheRead        int64            // This stream's cumulative cache_read
 	cacheCreation    int64            // This stream's cumulative cache_creation (cache writes; part of the hit-rate denominator)
 	outTokens        int64            // This stream's cumulative output_tokens
 	firstByteMs      int64            // This stream's first-byte latency (ms), recorded only on the normal response path
 	tps              float64          // This stream's streaming tok/s, recorded only on the normal response path
-	searchPrompt     string           // step2 summary instruction text (non-empty only for search-summary sub-streams), shown at the very front of the status page's in-flight/finished streams
+	searchPrompt     string           // Summary instruction injected into a standalone search sub-agent request (empty when none), shown on the status page via the model cell's hover tooltip
 	translated       string           // Translation-port origin tag ("responses"=translated stream, "responses-raw"=native passthrough via a route with url_response_api); the web API column shows [translate]/[Response]
 	countTokens      bool             // count_tokens probe stream (countTokensPath); the response is just {"input_tokens":N}; the web model column shows a [count_tokens] prefix
 	searchStripped   atomic.Int32     // Total replayed search blocks stripped (conversation-watermark strip + 400-fallback strip; the web shows a red [剥N] badge, the split only goes to the log)
@@ -1561,7 +1569,7 @@ type finishedFlight struct {
 	outTokens        int64   // This stream's cumulative output_tokens
 	firstByteMs      int64   // This stream's first-byte latency (ms)
 	tps              float64 // This stream's streaming tok/s
-	searchPrompt     string  // step2 summary instruction text (non-empty only for search-summary sub-streams)
+	searchPrompt     string  // Summary instruction injected into a standalone search sub-agent request (empty when none)
 	translated       string  // Translation-port origin tag ("responses"=translated, "responses-raw"=native passthrough); the web API column shows [translate]/[Response]
 	countTokens      bool    // count_tokens probe stream; the web model column shows a [count_tokens] prefix
 	tools            string  // Tool-call tag ("[Read*1][Edit*3]", empty when no tools), appended in the web model column
@@ -3540,25 +3548,12 @@ func hasWebSearch(body []byte) bool {
 	return bytes.Contains(body, []byte(`"type":"web_search`))
 }
 
-// searchStep1Body builds the step-1 search request: copies the original body, changes model to sf.Model, forces stream to false.
-// body: original request body; sf: search route config. Returns the new request body or an error.
-func searchStep1Body(body []byte, sf *SearchRoute) ([]byte, error) {
-	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, err
-	}
-	if sf.Model != "" {
-		m["model"] = sf.Model
-	}
-	m["stream"] = false
-	return json.Marshal(m)
-}
-
-// searchStep2Body builds the step-2 summary request: messages=[user(original last user), assistant(r1.content), user(summary instruction)].
-// summaryLevelConfig returns the step-2 summary instruction and max_tokens per detail level.
-// low=brief summary (default), mid=medium detail (key facts included), high=thorough (all data points/citations/context).
-// level: the configured summary_level value; query: the user's original question (search intent), carried into the instruction so the summary focuses on relevant content. Returns (instruction text, max_tokens).
-func summaryLevelConfig(level, query string) (string, int) {
+// summaryLevelConfig returns the summary instruction injected into a standalone search sub-agent request
+// (single-request mode: the searching upstream summarizes its own results within the same request).
+// low=brief summary (default), mid=medium detail (key facts included), high=thorough (all data points/citations/context),
+// max=high plus steps/methods/code/formulas reproduced verbatim.
+// level: the configured summary level; query: the user's original question (search intent), carried into the instruction so the summary focuses on relevant content. Returns the instruction text.
+func summaryLevelConfig(level, query string) string {
 	// The instruction carries the user's original question (search intent): the summary focuses on question-relevant content while still covering each result's key information,
 	// avoiding a brainless generic summary. An empty query degrades to a generic summary.
 	q := strings.TrimSpace(query)
@@ -3569,408 +3564,196 @@ func summaryLevelConfig(level, query string) (string, int) {
 	now := time.Now().In(time.FixedZone("UTC+8", 8*60*60)).Format("2006-01-02 15:04")
 	base := "Current date and time is " + now + " (UTC+8, Beijing time).\n" +
 		"The user's original question (the search intent) is: \"%s\".\n" +
-		"Based on the web_search_tool_result above, %s IN ORDER. " +
+		"After performing the web search, %s IN ORDER. " +
 		"While summarizing each result, pay special attention to and explicitly call out information that addresses or relates to the user's question above, but still cover the other key content of each result. " +
-		"Format each as 'Result N: <summary>' where N starts at 1 and goes in order across all web_search_tool_result blocks. " +
+		"Format each as 'Result N: <summary>' where N starts at 1 and goes in order across all search results. " +
 		"Do not answer the original question, just summarize each result."
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "mid", "medium":
-		return fmt.Sprintf(base, q, "write a medium-detail plaintext summary for EACH search result, including key facts and relevant data points"), 4096
+		return fmt.Sprintf(base, q, "write a medium-detail plaintext summary for EACH search result, including key facts and relevant data points")
 	case "max", "full":
-		// max: on top of high, steps/methods/code/formulas must be reproduced verbatim in full; max_tokens is raised to fit complete code and formulas.
-		return fmt.Sprintf(base, q, "write a detailed comprehensive plaintext summary for EACH search result, including all key facts, data points, direct quotes, dates, numbers, and relevant context; be thorough. When you encounter any steps, methods, code, or formulas, you MUST reproduce them completely and verbatim in full detail"), 16384
+		// max: on top of high, steps/methods/code/formulas must be reproduced verbatim in full.
+		return fmt.Sprintf(base, q, "write a detailed comprehensive plaintext summary for EACH search result, including all key facts, data points, direct quotes, dates, numbers, and relevant context; be thorough. When you encounter any steps, methods, code, or formulas, you MUST reproduce them completely and verbatim in full detail")
 	case "high":
-		return fmt.Sprintf(base, q, "write a detailed comprehensive plaintext summary for EACH search result, including all key facts, data points, direct quotes, dates, numbers, and relevant context; be thorough"), 8192
+		return fmt.Sprintf(base, q, "write a detailed comprehensive plaintext summary for EACH search result, including all key facts, data points, direct quotes, dates, numbers, and relevant context; be thorough")
 	default: // low / empty / unknown
-		return fmt.Sprintf(base, q, "write a short plaintext summary for EACH search result"), 2048
+		return fmt.Sprintf(base, q, "write a short plaintext summary for EACH search result")
 	}
 }
 
-// searchStep2Body builds the step-2 summary request: messages=[user(original last user), assistant(r1.content), user(summary instruction)].
-// r1: step-1 response map; origBody: original request body (its last user text is taken); sf: search route config. Returns the new request body or an error.
-func searchStep2Body(r1 map[string]any, origBody []byte, sf *SearchRoute, level string, thinking bool) ([]byte, string, error) {
-	lastUser, ok := searchLastUserText(origBody)
+// searchSubagentMarker marks a standalone search sub-agent request (Claude Code spins one off per web search):
+// the request's only job is "Perform a web search for the query: ...", with a server-side web_search tool attached.
+const searchSubagentMarker = "Perform a web search for the query"
+
+// hasSearchSubagentMarker reports whether the request is a standalone search sub-agent request.
+// body: the request body. Returns whether the marker is present.
+func hasSearchSubagentMarker(body []byte) bool {
+	return bytes.Contains(body, []byte(searchSubagentMarker))
+}
+
+// searchStringEnd locates the closing quote of the JSON string containing position `from`
+// (scanning forward, backslash-escape aware). Returns -1 when the string never terminates.
+func searchStringEnd(body []byte, from int) int {
+	for i := from; i < len(body); i++ {
+		if body[i] == '\\' {
+			i++
+			continue
+		}
+		if body[i] == '"' {
+			return i
+		}
+	}
+	return -1
+}
+
+// searchMarkerQuery extracts the search intent: the text after the marker inside the same JSON string
+// (a leading colon is stripped, JSON escapes decoded). Returns "" when no marker is present or decoding fails.
+// body: the request body. Returns the query text (may be empty).
+func searchMarkerQuery(body []byte) string {
+	idx := bytes.Index(body, []byte(searchSubagentMarker))
+	if idx < 0 {
+		return ""
+	}
+	end := searchStringEnd(body, idx+len(searchSubagentMarker))
+	if end < 0 {
+		return ""
+	}
+	raw := body[idx+len(searchSubagentMarker) : end]
+	// raw contains no unescaped quote by construction, so wrapping it in quotes and unmarshalling decodes the escapes.
+	var q string
+	if err := json.Unmarshal([]byte(`"`+string(raw)+`"`), &q); err != nil {
+		return ""
+	}
+	q = strings.TrimSpace(q)
+	q = strings.TrimPrefix(q, ":")
+	return strings.TrimSpace(q)
+}
+
+// injectAfterMarker appends the instruction to the JSON string holding the search sub-agent marker (pure byte
+// surgery: the string's closing quote is located escape-aware, the JSON-escaped instruction inserted before it;
+// every other byte is preserved; content in string or block-array form alike).
+// body: the request body; instruction: the summary instruction to append. Returns (newBody, ok).
+func injectAfterMarker(body []byte, instruction string) ([]byte, bool) {
+	idx := bytes.Index(body, []byte(searchSubagentMarker))
+	if idx < 0 {
+		return body, false
+	}
+	end := searchStringEnd(body, idx+len(searchSubagentMarker))
+	if end < 0 {
+		return body, false
+	}
+	esc, err := json.Marshal("\n\n" + instruction) // A JSON string literal; the insertion lands inside the existing string, so the quotes are stripped.
+	if err != nil {
+		return body, false
+	}
+	ins := esc[1 : len(esc)-1]
+	out := make([]byte, 0, len(body)+len(ins))
+	out = append(out, body[:end]...)
+	out = append(out, ins...)
+	out = append(out, body[end:]...)
+	return out, true
+}
+
+// resolveSearchBehavior computes the effective summary-injection level and thinking-rewrite level for a standalone
+// search sub-agent request handled by sf (the real search_fallback, or one synthesized from a route's enhance_search).
+// The new claudeSearch* fields win; the legacy summary_mode/summary_level/summary_thinking triple applies only when
+// the corresponding new field is unset.
+// sf: the search route in effect (nil tolerated). Returns (injectLevel ""/low/mid/high/max, thinkLevel ""/off/low/mid/high/max).
+func resolveSearchBehavior(sf *SearchRoute) (injectLevel, thinkLevel string) {
+	if sf == nil {
+		return "", ""
+	}
+	switch sf.ClaudeSearchSummary {
+	case "forceLow":
+		injectLevel = "low"
+	case "forceMid":
+		injectLevel = "mid"
+	case "forceHigh":
+		injectLevel = "high"
+	case "noForce":
+		// Explicit opt-out: beats summary_mode, nothing injected.
+	default: // Unset: legacy summary_mode governs
+		if sf.SummaryMode {
+			injectLevel = sf.SummaryLevel
+			if injectLevel == "" {
+				injectLevel = "low"
+			}
+		}
+	}
+	if sf.ClaudeSearchThinking != "" {
+		thinkLevel = sf.ClaudeSearchThinking
+	} else if sf.SummaryThinking {
+		thinkLevel = "low"
+	}
+	return injectLevel, thinkLevel
+}
+
+// rewriteSearchThinking rewrites a standalone search sub-agent request's thinking per claudeSearchThinking:
+// "off" forces disabled (output_config dropped, sampling knobs kept); low/mid/high/max map to adaptive+effort on
+// adaptive upstream models, or enabled+budget_tokens (2048/8192/16384/24576; mid=medium) on budget ones. Turning
+// thinking on deletes temperature/top_p (thinking-on forbids sampling knobs, same rule as maybeUpgradeOffToLow) and
+// any stale output_config on the budget shape; budgets are capped at half of max_tokens, and when even the 1024
+// floor doesn't fit, the rewrite is abandoned (body untouched, ok=false). All edits are positional via
+// setTopLevelJSONValue.
+// body: the request body; level: the effective level; upstreamModel: the model the request goes to (picks the
+// adaptive/budget shape). Returns (newBody, rewritten).
+func rewriteSearchThinking(body []byte, level, upstreamModel string) ([]byte, bool) {
+	if level == "" {
+		return body, false
+	}
+	if level == "off" {
+		nb, ok := setTopLevelJSONValue(body, "thinking", []byte(`{"type":"disabled"}`))
+		if !ok {
+			return body, false
+		}
+		nb, _ = setTopLevelJSONValue(nb, "output_config", nil)
+		return nb, true
+	}
+	if level == "mid" { // The user-facing enum says mid; the effort tables say medium.
+		level = "medium"
+	}
+	budget := effortToThinkingBudget(level)
+	effort := codexEffortToAnthropic(level)
+	if budget == 0 || effort == "" {
+		return body, false // Unknown level (config validation should have caught it): leave the body alone
+	}
+	// Read max_tokens for the budget ceiling (absent/unparseable = no ceiling).
+	var maxTokens int64
+	if spans, ok := locateTopFields(body); ok {
+		for _, s := range spans {
+			if s.name == "max_tokens" {
+				mt, _ := strconv.ParseInt(strings.TrimSpace(string(body[s.valStart:s.valEnd])), 10, 64)
+				maxTokens = mt
+			}
+		}
+	}
+	var thinkingJSON, outputConfigJSON []byte
+	if usesAdaptiveThinking(upstreamModel) {
+		thinkingJSON = []byte(`{"type":"adaptive"}`)
+		outputConfigJSON = []byte(fmt.Sprintf(`{"effort":%q}`, effort))
+	} else {
+		if maxTokens > 0 {
+			if ceiling := maxTokens / 2; budget > ceiling {
+				budget = ceiling
+			}
+		}
+		if budget < lowBudgetFloor {
+			return body, false // max_tokens too small for the 1024 budget floor: abandon, keep the request as sent
+		}
+		thinkingJSON = []byte(fmt.Sprintf(`{"type":"enabled","budget_tokens":%d}`, budget))
+	}
+	nb, ok := setTopLevelJSONValue(body, "thinking", thinkingJSON)
 	if !ok {
-		lastUser = "search"
+		return body, false
 	}
-	content, _ := r1["content"].([]any)
-	instr, maxTokens := summaryLevelConfig(level, lastUser)
-	m := map[string]any{
-		"model":      sf.Model,
-		"max_tokens": maxTokens,
-		"stream":     true,
-		"messages": []map[string]any{
-			{"role": "user", "content": lastUser},
-			{"role": "assistant", "content": content},
-			{"role": "user", "content": instr},
-		},
+	if outputConfigJSON != nil {
+		nb, _ = setTopLevelJSONValue(nb, "output_config", outputConfigJSON)
+	} else {
+		nb, _ = setTopLevelJSONValue(nb, "output_config", nil) // Budget shape: a stale output_config would contradict it
 	}
-	if thinking {
-		m["thinking"] = map[string]any{"type": "enabled", "budget_tokens": 2048}
-	}
-	body, err := json.Marshal(m)
-	return body, instr, err
-}
-
-// searchLastUserText takes the text content of the last user message in the request body.
-// body: the request body. Returns the text and whether it was found.
-func searchLastUserText(body []byte) (string, bool) {
-	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
-		return "", false
-	}
-	msgs, _ := m["messages"].([]any)
-	for i := len(msgs) - 1; i >= 0; i-- {
-		mm, _ := msgs[i].(map[string]any)
-		if mm == nil || mm["role"] != "user" {
-			continue
-		}
-		switch c := mm["content"].(type) {
-		case string:
-			return c, true
-		case []any:
-			var sb strings.Builder
-			for _, b := range c {
-				bb, _ := b.(map[string]any)
-				if bb != nil && bb["type"] == "text" {
-					if t, ok := bb["text"].(string); ok {
-						sb.WriteString(t)
-					}
-				}
-			}
-			if sb.Len() > 0 {
-				return sb.String(), true
-			}
-		}
-	}
-	return "", false
-}
-
-// searchPostFlight sends a search/summary internal request and registers its progress on the flight (visible on the status page).
-// stream=false reads the whole response at once (step-1 search); stream=true reads SSE streaming and tees to the flight (step-2 summary).
-// Streaming mode accumulates a minimal response map (model/stop_reason/content[text]).
-// url/api: upstream address and key; reqBody: request body; f: the associated flight; stream: whether to stream.
-// Returns (minimal response map, raw bytes, error).
-func searchPostFlight(url, api string, reqBody []byte, f *flight, stream bool, modelHint string) (map[string]any, []byte, error) {
-	req, err := http.NewRequest("POST", url+"/v1/messages", bytes.NewReader(reqBody))
-	if err != nil {
-		return nil, nil, err
-	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("anthropic-version", "2023-06-01")
-	req.Header.Set("Authorization", "Bearer "+api)
-	tSend := time.Now()
-	// Counted into the tray status light: yellow while awaiting the upstream's first byte (waiting++), consistent with the main forwarding path.
-	stats.mu.Lock()
-	stats.waiting++
-	stats.mu.Unlock()
-	resp, err := client.Do(req)
-	stats.mu.Lock()
-	stats.waiting--
-	stats.mu.Unlock()
-	if err != nil {
-		return nil, nil, err
-	}
-	defer resp.Body.Close()
-	if f != nil {
-		f.status = resp.StatusCode
-		f.phase.Store(1)
-		f.setStage(stageForward)
-	}
-	if resp.StatusCode >= 400 {
-		data, _ := io.ReadAll(resp.Body)
-		if f != nil {
-			f.appendContent(data)
-			f.bytes.Add(int64(len(data)))
-		}
-		return nil, data, fmt.Errorf("upstream %d: %s", resp.StatusCode, string(data))
-	}
-	// Started reading the response (step1 whole / step2 streaming): the status light turns green, returning to idle when done or on error.
-	// Fixes search-summary mode showing grey the whole time (active/waiting previously went uncounted, so it looked idle even while the summary model was streaming).
-	stats.mu.Lock()
-	stats.active++
-	stats.mu.Unlock()
-	defer func() {
-		stats.mu.Lock()
-		stats.active--
-		stats.mu.Unlock()
-	}()
-	if !stream {
-		tFirstByte := time.Now()
-		data, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, nil, err
-		}
-		if f != nil {
-			f.appendContent(data)
-			f.bytes.Add(int64(len(data)))
-		}
-		var m map[string]any
-		if err := json.Unmarshal(data, &m); err != nil {
-			return nil, data, fmt.Errorf("parse response: %w (body=%s)", err, string(data))
-		}
-		if f != nil {
-			if in, cr, cc, out, ok := parseNonStreamUsage(data); ok {
-				f.inTokens = in
-				f.cacheRead = cr
-				f.cacheCreation = cc
-				f.outTokens = out
-				stats.mu.Lock()
-				stats.inputTokens += in
-				stats.cacheRead += cr
-				stats.cacheCreation += cc
-				stats.outputTokens += out
-				stats.mu.Unlock()
-			}
-			realModel := modelHint
-			if mm, ok := m["model"].(string); ok && mm != "" {
-				realModel = mm
-			}
-			stats.addModelUsage(realModel, f.inTokens, f.cacheRead, f.cacheCreation, f.outTokens)
-			f.firstByteMs = tFirstByte.Sub(tSend).Milliseconds()
-			log.Printf("[flight] #%d search step1 TTFT %.2fs %d+%d/%d tok",
-				f.id, float64(f.firstByteMs)/1000, f.inTokens, f.cacheRead, f.outTokens)
-		}
-		return m, data, nil
-	}
-	// Streaming: read SSE while teeing to the flight, accumulating the minimal response map in parallel.
-	var raw bytes.Buffer
-	var model, stopReason string
-	var textBuf strings.Builder
-	var lastOutput, lastInput, lastCacheRead, lastCacheCreation int64
-	var sawDeltaUsage bool // A message_delta with usage has been seen (the real usage breakdown has arrived)
-	var tFirstByte time.Time
-	br := bufio.NewReader(resp.Body)
-	for {
-		line, err := br.ReadBytes('\n')
-		if len(line) > 0 {
-			if tFirstByte.IsZero() {
-				tFirstByte = time.Now()
-			}
-			raw.Write(line)
-			if f != nil {
-				f.appendContent(line)
-				f.bytes.Add(int64(len(line)))
-				parseSSEStats(line, &lastOutput, &lastInput, &lastCacheRead, &lastCacheCreation, &sawDeltaUsage)
-			}
-			t := bytes.TrimSpace(line)
-			if bytes.HasPrefix(t, []byte("data:")) {
-				payload := bytes.TrimSpace(t[5:])
-				if len(payload) > 0 {
-					var ev map[string]any
-					if json.Unmarshal(payload, &ev) == nil {
-						switch ev["type"] {
-						case "message_start":
-							if msg, ok := ev["message"].(map[string]any); ok {
-								if mm, ok := msg["model"].(string); ok && model == "" {
-									model = mm
-								}
-							}
-						case "content_block_delta":
-							if d, ok := ev["delta"].(map[string]any); ok {
-								if d["type"] == "text_delta" {
-									if s, ok := d["text"].(string); ok {
-										textBuf.WriteString(s)
-									}
-								}
-							}
-						case "message_delta":
-							if d, ok := ev["delta"].(map[string]any); ok {
-								if s, ok := d["stop_reason"].(string); ok {
-									stopReason = s
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
-	if f != nil {
-		if sawDeltaUsage {
-			f.inTokens = lastInput
-			f.cacheRead = lastCacheRead
-			f.cacheCreation = lastCacheCreation
-			f.outTokens = lastOutput
-		} else {
-			// Interrupted stream: roll back the counted message_start estimated usage; the aggregation counts only complete responses
-			rollbackUsageStats(lastInput, lastCacheRead, lastCacheCreation, lastOutput)
-		}
-		tEnd := time.Now()
-		if !tFirstByte.IsZero() {
-			f.firstByteMs = tFirstByte.Sub(tSend).Milliseconds()
-			streamMs := tEnd.Sub(tFirstByte).Milliseconds()
-			if streamMs > 0 {
-				f.tps = float64(lastOutput) / (float64(streamMs) / 1000.0)
-			}
-			log.Printf("[flight] #%d search step2 TTFT %.2fs stream %.2fs %d tok %.1f tok/s",
-				f.id, float64(f.firstByteMs)/1000, float64(streamMs)/1000, lastOutput, f.tps)
-		}
-		realModel := model
-		if realModel == "" {
-			realModel = modelHint
-		}
-		stats.addModelUsage(realModel, f.inTokens, f.cacheRead, f.cacheCreation, f.outTokens)
-	}
-	m := map[string]any{
-		"model":       model,
-		"stop_reason": stopReason,
-		"content":     []any{map[string]any{"type": "text", "text": textBuf.String()}},
-	}
-	return m, raw.Bytes(), nil
-}
-
-// searchExtractResults extracts the server_tool_use id and all web_search_tool_result result entries from the step-1 response.
-// r1: step-1 response map. Returns (toolUseID, results, error).
-func searchExtractResults(r1 map[string]any) (string, []map[string]any, error) {
-	content, _ := r1["content"].([]any)
-	toolUseID := ""
-	var results []map[string]any
-	for _, b := range content {
-		bb, _ := b.(map[string]any)
-		if bb == nil {
-			continue
-		}
-		t, _ := bb["type"].(string)
-		if t == "server_tool_use" && toolUseID == "" {
-			if id, ok := bb["id"].(string); ok {
-				toolUseID = id
-			}
-		}
-		if t == "web_search_tool_result" {
-			items, _ := bb["content"].([]any)
-			for _, it := range items {
-				im, _ := it.(map[string]any)
-				if im != nil {
-					results = append(results, im)
-				}
-			}
-		}
-	}
-	if toolUseID == "" {
-		toolUseID = "srvtoolu_proxy_search"
-	}
-	return toolUseID, results, nil
-}
-
-// searchParseSummaries splits the step-2 response text into summaries by "Result N:", returning n of them.
-// r2: step-2 response map; n: expected count. Returns the summary slice in order (unmatched positions are empty strings).
-func searchParseSummaries(r2 map[string]any, n int) []string {
-	out := make([]string, n)
-	text := ""
-	if content, ok := r2["content"].([]any); ok {
-		for _, b := range content {
-			bb, _ := b.(map[string]any)
-			if bb != nil && bb["type"] == "text" {
-				if t, ok := bb["text"].(string); ok {
-					text += t
-				}
-			}
-		}
-	}
-	re := regexp.MustCompile(`(?im)^\s*\**\s*Result\s*(\d+)\s*[:\.\)]\s*\**\s*`)
-	idx := re.FindAllStringSubmatchIndex(text, -1)
-	if len(idx) == 0 {
-		if n > 0 {
-			out[0] = strings.TrimSpace(text)
-		}
-		return out
-	}
-	for i, m := range idx {
-		numStart, numEnd := m[2], m[3]
-		num, _ := strconv.Atoi(text[numStart:numEnd])
-		start := m[1]
-		var end int
-		if i+1 < len(idx) {
-			end = idx[i+1][0]
-		} else {
-			end = len(text)
-		}
-		s := strings.TrimSpace(text[start:end])
-		if num >= 1 && num <= n {
-			out[num-1] = s
-		}
-	}
-	return out
-}
-
-// logSearchResponse prints a search response's model/stop_reason/block types/text preview.
-// fid: stream ID; tag: stage label; r: response map.
-func logSearchResponse(fid uint64, tag string, r map[string]any) {
-	if e, ok := r["error"]; ok {
-		log.Printf("[searchsum-debug] #%d %s response contains error=%v", fid, tag, e)
-	}
-	stop, _ := r["stop_reason"].(string)
-	model, _ := r["model"].(string)
-	var blockTypes []string
-	var text string
-	if content, ok := r["content"].([]any); ok {
-		for _, b := range content {
-			bb, _ := b.(map[string]any)
-			if bb == nil {
-				continue
-			}
-			t, _ := bb["type"].(string)
-			blockTypes = append(blockTypes, t)
-			if t == "text" {
-				if s, ok := bb["text"].(string); ok {
-					text += s
-				}
-			}
-		}
-	}
-	log.Printf("[searchsum-debug] #%d %s model=%s stop=%s blocks=%v", fid, tag, model, stop, blockTypes)
-	if text != "" {
-		preview := text
-		if len(preview) > 500 {
-			preview = preview[:500] + "...(truncated)"
-		}
-		log.Printf("[searchsum-debug] #%d %s text:\n%s", fid, tag, preview)
-	}
-}
-
-// searchDebugWrite writes a raw blob to <search debug dir>/#<fid>_<tag>; skipped when the dir is empty.
-// fid: stream ID; tag: file tag; data: raw bytes.
-func searchDebugWrite(fid uint64, tag string, data []byte) {
-	dir := debugSearchDirOverride
-	if dir == "" {
-		if c := cfg.Load(); c != nil {
-			dir = c.SearchDebugDir
-		}
-	}
-	if dir == "" || len(data) == 0 {
-		return
-	}
-	os.MkdirAll(dir, 0755)
-	fname := fmt.Sprintf("%s%c#%d_%s", dir, os.PathSeparator, fid, tag)
-	if err := os.WriteFile(fname, data, 0644); err != nil {
-		log.Printf("[searchsum-debug] #%d failed to write %s: %v", fid, tag, err)
-	}
-}
-
-// searchDebugAppend appends a raw blob to <search debug dir>/#<fid>_<tag>.
-// fid: stream ID; tag: file tag; data: raw bytes.
-func searchDebugAppend(fid uint64, tag string, data []byte) {
-	dir := debugSearchDirOverride
-	if dir == "" {
-		if c := cfg.Load(); c != nil {
-			dir = c.SearchDebugDir
-		}
-	}
-	if dir == "" || len(data) == 0 {
-		return
-	}
-	os.MkdirAll(dir, 0755)
-	fname := fmt.Sprintf("%s%c#%d_%s", dir, os.PathSeparator, fid, tag)
-	f, err := os.OpenFile(fname, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	f.Write(data)
+	nb, _ = setTopLevelJSONValue(nb, "temperature", nil) // Thinking-on forbids sampling knobs upstream-side
+	nb, _ = setTopLevelJSONValue(nb, "top_p", nil)
+	return nb, true
 }
 
 // rewriteResponseModel rewrites the "model" field value in SSE data: lines back to origModel.
@@ -4154,261 +3937,6 @@ func sleepWithPing(ctx context.Context, w http.ResponseWriter, flusher http.Flus
 	}
 }
 
-// newSearchSubFlight builds a sub-flight for search-summary step1/step2 and registers it on the status page (visible among in-flight streams).
-// label: the tag shown in the model column. Returns the new, already-registered flight (the caller owns unregister+addFinished).
-func newSearchSubFlight(label string) *flight {
-	f := &flight{
-		id:        flights.nextID.Add(1),
-		start:     time.Now(),
-		origModel: label,
-	}
-	f.routeReason.Store(routeSearch)
-	f.stageStart.Store(f.start.UnixNano())   // Light-color timing starts at stream creation
-	f.attemptStart.Store(f.start.UnixNano()) // A sub-flight is about to send upstream the moment it's created; [尝试N] timing shares that start
-	f.setStage(stageAttempt)
-	flights.register(f)
-	return f
-}
-
-// searchAndRespond runs summary mode: step1 search (non-streaming, fetching web_search results) + step2 summary (streaming, producing the detailed summary),
-// building a Kimi-format SSE response (server_tool_use + web_search_tool_result + summary text) streamed back to the client.
-// The main upstream is not called. Returns true on success (the handler should return directly); false on failure (the handler degrades to plain forwarding).
-// w: client response; body: original request body; sf: search route config; f: current flight; origModel: original model name (backfilled into the model field).
-func searchAndRespond(w http.ResponseWriter, body []byte, sf *SearchRoute, f *flight, origModel string) bool {
-	fid := f.id
-	f.routeReason.Store(routeSearch)
-	f.setStage(stageForward)
-	f.phase.Store(1)
-
-	// step1: search (non-streaming), yielding server_tool_use + web_search_tool_result.
-	step1Body, err := searchStep1Body(body, sf)
-	if err != nil {
-		log.Printf("[searchsum] #%d step1 build failed: %v", fid, err)
-		return false
-	}
-	searchDebugWrite(fid, "step1_req.json", step1Body)
-	step1F := newSearchSubFlight("search-step1·" + sf.Model)
-	step1F.think = extractThinkMode(step1Body) // Status page 「API」 column thinking value = the config actually sent upstream
-	r1, r1Raw, err := searchPostFlight(sf.URL, sf.API, step1Body, step1F, false, sf.Model)
-	flights.unregister(step1F.id)
-	addFinished(step1F)
-	if err != nil {
-		log.Printf("[searchsum] #%d step1 failed: %v", fid, err)
-		return false
-	}
-	searchDebugWrite(fid, "step1_resp.json", r1Raw)
-	logSearchResponse(fid, "step1", r1)
-	toolUseID, results, err := searchExtractResults(r1)
-	if err != nil || len(results) == 0 {
-		log.Printf("[searchsum] #%d step1 no search results (results=%d err=%v)", fid, len(results), err)
-		return false
-	}
-
-	// step1 succeeded: immediately send 200 + SSE headers and start ping keepalive, so a slow step2 summary (especially max+thinking)
-	// doesn't leave the client dataless long enough to time out. A failed step1 still returns false and degrades to the fallback; a failure after headers can only send an SSE error.
-	h := w.Header()
-	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	f.status = http.StatusOK
-	flusher, canFlush := w.(http.Flusher)
-	pingInterval := 5 * time.Second
-	if cc := cfg.Load(); cc != nil && cc.PingIntervalSec > 0 {
-		pingInterval = time.Duration(cc.PingIntervalSec * float64(time.Second))
-	}
-	pingStop := make(chan struct{})
-	pingDone := make(chan struct{})
-	go func() {
-		defer close(pingDone)
-		// The synthesized stream is Anthropic-shaped (in this function f.translated is at most a "responses" translation, never passthrough),
-		// so passing f makes writeSSEPing take the Anthropic ping branch automatically.
-		writeSSEPing(w, flusher, f) // Send the first ping immediately so the client sees the connection is alive as early as possible
-		ticker := time.NewTicker(pingInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-pingStop:
-				return
-			case <-ticker.C:
-				writeSSEPing(w, flusher, f)
-			}
-		}
-	}()
-	pingStopped := false
-	stopPing := func() {
-		if pingStopped {
-			return
-		}
-		pingStopped = true
-		close(pingStop)
-		<-pingDone // Wait for the goroutine to exit, avoiding concurrent writes to w later
-	}
-	defer stopPing() // Fallback: make sure pings are stopped before any return
-
-	// step2: graded summary attempts. step1's results are cached, so even if every summary attempt fails, the search results can be returned directly (only descriptions are missing).
-	// Attempt 1: configured level+thinking; on failure attempt 2: mid+thinking-off; on further failure summaryText stays empty (step1 results are returned).
-	summaryText := ""
-	for _, att := range []struct {
-		level    string
-		thinking bool
-		label    string
-	}{
-		{sf.SummaryLevel, sf.SummaryThinking, "summary-step2"},
-		{"mid", false, "summary-step2-fallback-mid"},
-	} {
-		step2Body, instr, err := searchStep2Body(r1, body, sf, att.level, att.thinking)
-		if err != nil {
-			log.Printf("[searchsum] #%d %s build failed: %v", fid, att.label, err)
-			continue
-		}
-		searchDebugWrite(fid, att.label+"_req.json", step2Body)
-		step2F := newSearchSubFlight(att.label + "·" + sf.Model)
-		step2F.searchPrompt = instr
-		step2F.think = extractThinkMode(step2Body) // Status page 「API」 column thinking value = the config actually sent upstream
-		r2, r2Raw, err := searchPostFlight(sf.URL, sf.API, step2Body, step2F, true, sf.Model)
-		flights.unregister(step2F.id)
-		addFinished(step2F)
-		if err != nil {
-			log.Printf("[searchsum] #%d %s failed: %v", fid, att.label, err)
-			continue
-		}
-		searchDebugWrite(fid, att.label+"_resp.sse", r2Raw)
-		logSearchResponse(fid, att.label, r2)
-		if content, ok := r2["content"].([]any); ok {
-			for _, b := range content {
-				bb, _ := b.(map[string]any)
-				if bb != nil && bb["type"] == "text" {
-					if t, ok := bb["text"].(string); ok {
-						summaryText += t
-					}
-				}
-			}
-		}
-		if summaryText != "" {
-			break
-		}
-		log.Printf("[searchsum] #%d %s empty summary; trying next level", fid, att.label)
-	}
-
-	// Send the real content: stop pings, take exclusive ownership of w. An empty summary returns only step1's search results (no text block).
-	stopPing()
-	if summaryText == "" {
-		log.Printf("[searchsum] #%d all summary attempts failed; returning step1 search results (no summary text)", fid)
-	}
-	msgID := fmt.Sprintf("msg_proxy_%d", fid)
-	// writeSSE writes one SSE event and flushes, teeing to the flight + global traffic stats in passing.
-	writeSSE := func(event string, data map[string]any) {
-		payload, _ := json.Marshal(data)
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, payload)
-		line := make([]byte, 0, len(event)+len(payload)+12)
-		line = append(line, []byte("event: ")...)
-		line = append(line, event...)
-		line = append(line, []byte("\ndata: ")...)
-		line = append(line, payload...)
-		line = append(line, '\n', '\n')
-		f.appendContent(line)
-		f.bytes.Add(int64(len(line)))
-		if canFlush {
-			flusher.Flush()
-		}
-	}
-	// 1) message_start
-	writeSSE("message_start", map[string]any{
-		"type": "message_start",
-		"message": map[string]any{
-			"id":            msgID,
-			"type":          "message",
-			"role":          "assistant",
-			"model":         origModel,
-			"content":       []any{},
-			"stop_reason":   nil,
-			"stop_sequence": nil,
-			"usage":         map[string]any{"input_tokens": 1, "output_tokens": 1},
-		},
-	})
-	// 2) server_tool_use (index 0)
-	f.noteToolCall("web_search") // The synthesized stream is self-built and doesn't go through writeAndCount parsing, so count directly
-	writeSSE("content_block_start", map[string]any{
-		"type":  "content_block_start",
-		"index": 0,
-		"content_block": map[string]any{
-			"type":  "server_tool_use",
-			"id":    toolUseID,
-			"name":  "web_search",
-			"input": map[string]any{},
-		},
-	})
-	writeSSE("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
-	// 3) web_search_tool_result (index 1; the raw results are backfilled, the dropdown shows title/url)
-	writeSSE("content_block_start", map[string]any{
-		"type":  "content_block_start",
-		"index": 1,
-		"content_block": map[string]any{
-			"type":        "web_search_tool_result",
-			"tool_use_id": toolUseID,
-			"content":     results,
-		},
-	})
-	writeSSE("content_block_stop", map[string]any{"type": "content_block_stop", "index": 1})
-	// 4) Summary text (index 2): sent only when the summary succeeded; skipped when all summary attempts failed, so the client receives just the search results.
-	if summaryText != "" {
-		writeSSE("content_block_start", map[string]any{
-			"type":          "content_block_start",
-			"index":         2,
-			"content_block": map[string]any{"type": "text", "text": ""},
-		})
-		for _, ch := range splitSummaryChunks(summaryText, 200) {
-			writeSSE("content_block_delta", map[string]any{
-				"type":  "content_block_delta",
-				"index": 2,
-				"delta": map[string]any{"type": "text_delta", "text": ch},
-			})
-		}
-		writeSSE("content_block_stop", map[string]any{"type": "content_block_stop", "index": 2})
-	}
-	// 5) message_delta + message_stop to close
-	writeSSE("message_delta", map[string]any{
-		"type":  "message_delta",
-		"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
-		"usage": map[string]any{"output_tokens": estimateTokens(summaryText)},
-	})
-	writeSSE("message_stop", map[string]any{"type": "message_stop"})
-	f.delivered.Store(true) // The synthesized stream has been fully written
-	log.Printf("[searchsum] #%d done: results=%d summary=%d bytes", fid, len(results), len(summaryText))
-	return true
-}
-
-// splitSummaryChunks cuts text into segments of at most maxLen (breaking at newline/period boundaries where possible), for streaming text_deltas.
-// text: the original text; maxLen: per-segment byte cap. Returns the segments.
-func splitSummaryChunks(text string, maxLen int) []string {
-	if len(text) <= maxLen {
-		return []string{text}
-	}
-	var out []string
-	for len(text) > maxLen {
-		cut := maxLen
-		for i := maxLen; i > maxLen/2 && i < len(text); i-- {
-			if text[i] == '\n' {
-				cut = i + 1
-				break
-			}
-		}
-		out = append(out, text[:cut])
-		text = text[cut:]
-	}
-	if text != "" {
-		out = append(out, text)
-	}
-	return out
-}
-
-// estimateTokens roughly estimates the token count (3 chars/token, a compromise between Chinese and English).
-// text: the original text. Returns the estimated token count.
-func estimateTokens(text string) int {
-	return len(text)/3 + 1
-}
-
 // forward passes the response through to the client: first puts back the peeked head, then streams the rest.
 // While forwarding, it parses the SSE usage fields line by line, accumulating into the global stats for the status row;
 // the forwarded bytes are simultaneously added to flight.bytes for the upper-half icon display, and phase=1 is marked.
@@ -4516,9 +4044,6 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 			return
 		}
 		f.appendContent(data) // Tee a copy for the web upstream side (the exact upstream bytes, before model write-back and stripping)
-		if f.searchDebug {
-			searchDebugAppend(f.id, "main_resp.sse", data) // Record the main model's raw response when search-summary degrades
-		}
 		out := data
 		if f.targetModel != "" && f.targetModel != f.origModel {
 			lines := bytes.Split(data, []byte("\n"))
@@ -4705,9 +4230,6 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 			}
 			f.bytes.Add(int64(len(line)))
 			f.appendContent(line)
-			if f.searchDebug {
-				searchDebugAppend(f.id, "main_resp.sse", line)
-			}
 			parseSSEStats(line, &lastOutput, &lastInput, &lastCacheRead, &lastCacheCreation, nil)
 
 			s := bytes.TrimRight(line, "\r\n")
@@ -5076,9 +4598,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	authToken := ""
 	var targetModel string
 	fastRouteHit := false
-	searchSummaryMode := false // Search-summary mode: step1+step2 self-built response, bypassing the main upstream.
-	convFlag := ""             // The effective route's convertOff2Low value, captured where routing settles ("" = feature off)
-	var summarySF *SearchRoute // Built from the matched RouteRule when enhance-search triggers; otherwise c.SearchFallback is used
+	convFlag := "" // The effective route's convertOff2Low value, captured where routing settles ("" = feature off)
+	// Standalone search sub-agent handling (single-request search+summary): the effective levels are resolved
+	// where routing settles; the request body is transformed after the routing block.
+	searchInjectLevel := "" // ""/low/mid/high/max: inject the summary instruction into the search request itself
+	searchThinkLevel := ""  // ""/off/low/mid/high/max: rewrite the search request's thinking
 	if clsKind != classifierNone && c.ClassifierRoute != nil && c.ClassifierRoute.URL != "" {
 		// Classifier route: shunt safety-check requests to the designated upstream, saving main-model quota.
 		// (url empty = no reroute: a bare {"classifier_thinking":"off"} configures the thinking rewrite only.)
@@ -5156,16 +4680,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					sf := c.SearchFallback
 					mf := c.MultimodalFallback
 					// Search: hand the whole request to search_fallback, images or not (no evidence multimodal+search ever co-occur).
-					//    summary_mode takes priority (step1 search + step2 summary); otherwise forward the whole request.
+					//    The standalone search sub-agent behavior (summary injection / thinking rewrite, single-request mode)
+					//    is resolved here and applied to the request body after the routing block.
 					if needSearch && sf != nil {
-						if sf.SummaryMode {
-							searchSummaryMode = true
-							f.routeReason.Store(routeSearch)
-							log.Printf("[route] #%d search-summary mode %s -> %s (model %s -> %s)", f.id, origModel, sf.URL, origModel, sf.Model)
-							break
-						}
 						applyFB(sf.URL, sf.API, sf.Model, "search-fallback", routeSearch)
 						convFlag = sf.ConvertOff2Low // The fallback's own flag overwrites the matched route's
+						searchInjectLevel, searchThinkLevel = resolveSearchBehavior(sf)
 						break
 					}
 					// Pure images (no search): use multimodal_fallback when configured; search requests never land on mf (degrade to passthrough when there's no sf).
@@ -5185,20 +4705,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.id, origModel, rr.URL, origModel, rr.Model)
 				f.routeReason.Store(routePattern)
 				convFlag = rr.ConvertOff2Low
-				// Enhance search: when the route supports search (no_search:false) and has enhance_search configured, a request carrying search tools
-				// skips the main model and uses this route's own upstream in kimi summary mode (equivalent to no_search going through search_fallback.summary_mode,
-				// except the search upstream is the route's own url/api/model and the summary parameters come from the route's enhance_search).
+				// Enhance search: when the route supports search (no_search:false) and has enhance_search configured, a standalone
+				// search sub-agent request gets the legacy summary behavior (instruction injected into the search request itself,
+				// single-request mode), served by the route's own upstream — the request forwards to the route as usual;
+				// only the body transform after the routing block applies.
 				if rr.EnhanceSearch != nil && hasWebSearch(body) && !rr.NoSearch && !(rr.TextOnly && hasImage(body)) {
-					searchSummaryMode = true
-					summarySF = &SearchRoute{
-						URL:             rr.URL,
-						API:             rr.API,
-						Model:           rr.Model,
-						ConvertOff2Low:  rr.ConvertOff2Low,
+					searchInjectLevel, searchThinkLevel = resolveSearchBehavior(&SearchRoute{
 						SummaryMode:     true,
 						SummaryLevel:    rr.EnhanceSearch.SummaryLevel,
 						SummaryThinking: rr.EnhanceSearch.SummaryThinking,
-					}
+					})
 					log.Printf("[route] #%d enhanced search %s -> %s (model %s)", f.id, origModel, rr.URL, rr.Model)
 				}
 				break // Ordered: stop at the first hit
@@ -5209,32 +4725,31 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	f.origModel = origModel
 	f.targetModel = targetModel
 
-	// Search-summary mode: step1 search + step2 summary + self-built Kimi-format response, bypassing the main upstream.
-	// On success, return directly; on failure, degrade to search_fallback whole-request forwarding (Kimi mode).
-	if searchSummaryMode {
-		sf := summarySF
-		if sf == nil {
-			sf = c.SearchFallback
-		}
-		if sf != nil && searchAndRespond(w, body, sf, f, origModel) {
-			return
-		}
-		log.Printf("[searchsum] #%d failed; falling back to routing the whole request to %s", f.id, func() string {
-			if sf != nil {
-				return sf.URL
+	// Standalone search sub-agent request (single-request search+summary): inject the summary instruction into the
+	// search request itself and/or rewrite its thinking, then the normal forward path takes over — the upstream
+	// searches and answers in one request and its response streams through untouched (no proxy-side synthesis).
+	if (searchInjectLevel != "" || searchThinkLevel != "") && hasSearchSubagentMarker(body) {
+		if searchThinkLevel != "" {
+			effModel := targetModel
+			if effModel == "" {
+				effModel = origModel
 			}
-			return upstream
-		}())
-		if sf != nil {
-			upstream = sf.URL
-			authToken = sf.API
-			if sf.Model != "" && sf.Model != origModel {
-				body = replaceModelValue(body, sf.Model)
-				targetModel = sf.Model
+			if nb, ok := rewriteSearchThinking(body, searchThinkLevel, effModel); ok {
+				body = nb
+			} else {
+				log.Printf("[searchsum] #%d thinking rewrite to %q abandoned (max_tokens too small or body unparsable); request kept as sent", f.id, searchThinkLevel)
+				searchThinkLevel = ""
 			}
-			convFlag = sf.ConvertOff2Low // The degraded whole-request forwarding answers to the fallback route's own flag
-			f.searchDebug = true         // When degrading to Kimi whole-request forwarding, record the main model's raw response for comparison
 		}
+		if searchInjectLevel != "" {
+			instr := summaryLevelConfig(searchInjectLevel, searchMarkerQuery(body))
+			if nb, ok := injectAfterMarker(body, instr); ok {
+				body = nb
+				f.searchPrompt = instr // The status page shows the injected instruction on hover over the model cell
+			}
+		}
+		f.think = extractThinkMode(body) // The status page's 「API」 column reflects the rewritten thinking
+		log.Printf("[searchsum] #%d standalone search sub-agent request: summary-level=%q thinking=%q (single-request)", f.id, searchInjectLevel, searchThinkLevel)
 	}
 
 	// upstream may be left empty (with a pattern:"*" catch-all, the default upstream goes unused); still empty here
@@ -5246,7 +4761,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The upstream grouping key is recorded once with the route's final values (the grouping dimension for observed cache lifetime: url+model, other parameters ignored).
-	// A successful search-summary mode returns early, never reaching here; the degraded-forwarding branch has already rewritten upstream/targetModel to their final values.
 	{
 		m := targetModel
 		if m == "" {
@@ -5308,9 +4822,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// 1.7 Global stream-conversion (convertAlltoStream): when on, all non-streaming requests are sent upstream as streams;
 	// the complete SSE stream is collected and rebuilt into a non-streaming JSON returned to the client in one shot (transparent to the client; the web monitors streaming/first-byte/tok/s).
 	// Only the Anthropic Messages API (/v1/messages) is converted: OpenAI-compatible paths have a different SSE format and can't be rebuilt.
-	// Search-summary mode builds its own response and never touches the main upstream; already-streaming requests stream back anyway — neither is affected.
 	convertToStream := false
-	if c.ConvertAllToStream && !searchSummaryMode && r.URL.Path == "/v1/messages" {
+	if c.ConvertAllToStream && r.URL.Path == "/v1/messages" {
 		if stream, ok := getBoolField(body, "stream"); !ok || !stream {
 			body = forceStreamTrue(body)
 			convertToStream = true

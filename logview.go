@@ -2732,7 +2732,7 @@ window.prompt = function(s, d){ return __prompt(t(String(s)), d); };
 // When adding doc sections, write Chinese here and English in logViewerDocEN — both sides must be updated.
 const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <p>顶层配置 <code>convertAlltoStream</code>（默认 false）开启后，所有非流式请求（<code>stream:false</code> 或省略）都被代理悄悄改为流式发给上游：在途流页面实时可见吐字、统计首字与 tok/s。请求方无感知——代理把上游流完整收完后，<b>原样重建</b>非流式 JSON（所有内容块按流里原样拼回，含搜索结果 encrypted_content）一次性返回，调用方拿到的仍是它预期的非流式响应。流中途断开（未见 message_stop）时未向客户端写任何内容，代理整体重试。</p>
-      <p>仅作用于 Anthropic Messages 请求（/v1/messages）；已是流式的请求、搜索摘要模式不受影响。重试等待期间不发 SSE 保活 ping（会污染非流式响应），静默等待。</p>
+      <p>仅作用于 Anthropic Messages 请求（/v1/messages）；已是流式的请求不受影响。重试等待期间不发 SSE 保活 ping（会污染非流式响应），静默等待。</p>
       <h3>Responses API 监听口 responses_listen</h3>
       <p>顶层配置 <code>responses_listen</code>（空 = 不启用；配置模板默认演示 <code>127.0.0.1:8081</code>）设为如 <code>127.0.0.1:8081</code> 后，代理在该地址额外开一个 OpenAI Responses API 端点（<code>/v1/responses</code>）：把 Codex CLI 等只说 Responses 协议的工具接到 Anthropic 上游。请求被翻译成 Anthropic Messages 走主管线（路由/重试/本控制台监控照常生效），响应翻译回 Responses（客户端 stream:true 拿 SSE 事件流，false 拿一次性 JSON）。</p>
       <p>工具里的 model 名照常参与路由匹配：在 routes 加一条如 <code>gpt-5*</code> 即可指定上游与改写模型。改动保存重载即生效（监听口随配置动态启停）；与主端口一样永远仅本机可连。</p>
@@ -2742,7 +2742,7 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <h3>路由与能力兜底</h3>
       <p>请求按顺序匹配上游：classifier_route（分类器分流）→ fast_route（快速直连）→ routes（按 model pattern 匹配）。命中 route 后，若该上游能力不足（text_only 缺图片 / no_search 缺搜索）按以下处理：</p>
       <ul>
-      <li>搜索请求（带 web_search）→ 走 search_fallback：开了 summary_mode 则代理做 step1 搜索 + step2 摘要两步自构响应，否则整请求转发给 search_fallback 上游自己搜索回答。两种都是同一个 search_fallback 配置，不是独立路由。</li>
+      <li>搜索请求（带 web_search）→ 走 search_fallback：整请求转发给 search_fallback 上游，由它自己搜索回答。对独立搜索子代理请求（体含 "Perform a web search for the query"），还可按 claudeSearchSummary 把摘要指令注入该请求、按 claudeSearchThinking 改写其思考档位——单请求完成搜索+摘要，响应原样透传（控制台完整可见）。</li>
       <li>纯图片请求（无搜索）→ 走 multimodal_fallback；没配则透传原 route。</li>
       <li>搜索没配 search_fallback、或纯图片没配 multimodal_fallback → 降级透传原 route（上游可能报错）。</li>
       </ul>
@@ -2769,7 +2769,7 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <tr style="border-bottom:1px solid #333">
       <td style="padding:6px 8px;vertical-align:top"><code>enhance_search</code></td>
       <td style="padding:6px 8px;vertical-align:top">routes[] 条目</td>
-      <td style="padding:6px 8px;vertical-align:top">支持搜索时主动改走 kimi 摘要模式</td>
+      <td style="padding:6px 8px;vertical-align:top">支持搜索时对独立搜索子代理请求注入摘要指令（单请求模式）</td>
       <td style="padding:6px 8px;vertical-align:top">仅该 route 未标 no_search 时生效；与 search_fallback 互斥</td>
       </tr>
       <tr style="border-bottom:1px solid #333">
@@ -2803,7 +2803,7 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <td style="padding:6px 8px;vertical-align:top"><code>search_fallback</code></td>
       <td style="padding:6px 8px;vertical-align:top">顶层</td>
       <td style="padding:6px 8px;vertical-align:top">搜索兜底上游</td>
-      <td style="padding:6px 8px;vertical-align:top">route 标 no_search 且请求含搜索时走它；summary_mode=true 代理做 step1+step2 自构响应，=false 整请求转发给上游自己搜索回答</td>
+      <td style="padding:6px 8px;vertical-align:top">route 标 no_search 且请求含搜索时走它；整请求转发给上游自己搜索回答。独立搜索子代理请求还可被 claudeSearchSummary 注入摘要指令 / claudeSearchThinking 改写思考（单请求，优先于 legacy 的 summary_mode/summary_thinking）</td>
       </tr>
       </table>
       <h3>pattern 顺序</h3>
@@ -2816,13 +2816,9 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       </ul>
       <p>搜索请求（带 web_search）一律走 search_fallback，不管请求体是否含图片--没有证据表明会同时出现多模态+搜索。</p>
       <h3>增强搜索 enhance_search</h3>
-      <p>route 配 <code>enhance_search</code> 后，<b>仅当该 route 支持搜索（未标 <code>no_search</code>）</b>时生效：收到带 web_search 的请求不调主力，改走两步：</p>
-      <ul>
-      <li>step1：用本 route 上游做非流式搜索，拿到 web_search_tool_result。</li>
-      <li>step2：搜索结果 + 用户原始问题（搜索意图）组合成指令，流式生成逐条摘要（Result N: ...）。</li>
-      </ul>
+      <p>route 配 <code>enhance_search</code> 后，<b>仅当该 route 支持搜索（未标 <code>no_search</code>）</b>时生效：对独立搜索子代理请求（体含 "Perform a web search for the query"），把摘要指令注入该请求的用户消息，仍走本 route 自己的上游，一次请求完成搜索+逐条摘要（Result N: ...），上游响应原样透传给客户端（控制台完整可见）。</p>
       <p>与 <code>search_fallback</code> 互斥：route 支持搜索（未标 <code>no_search</code>）走 enhance_search；route 标 <code>no_search</code> 缺搜索才走 <code>search_fallback</code>。</p>
-      <p><code>summary_level</code>：low（简短）/ mid（中等）/ high（详尽）/ max（含代码公式逐字复述），控制详细度与 max_tokens。<code>summary_thinking</code>：step2 是否开 thinking。</p>
+      <p><code>summary_level</code>：low（简短）/ mid（中等）/ high（详尽）/ max（含代码公式逐字复述），控制注入指令的详细度。<code>summary_thinking</code>：是否把该请求的思考改写为 low。search_fallback 上另有新字段 <code>claudeSearchSummary</code>（forceLow/forceMid/forceHigh 按档注入 / noForce 不注入）与 <code>claudeSearchThinking</code>（off/low/mid/high/max 改写思考），优先于这两个 legacy 字段。</p>
       <h3>缓存命中</h3>
       <p>命中率 = cache_read / (input + cache_read + cache_creation)，与 Claude Code 的 cache hit 算法一致：缓存写入不算命中、但计入总输入。高命中率（90%+）主要来自上游模型（DeepSeek/Kimi）的原生 context caching，代理只透传 usage，不做额外缓存优化。点击状态页「缓存命中」卡片可看按真实上游模型分组的明细（含写入量），弹窗底部另有「实测缓存时间」表（按上游 URL+模型归组，规则见「统计字段」的「缓存年龄」条目）。中途断开的流（按 Esc、网络掉线）不计入聚合：它们只有 message_start 的预估 usage（部分上游的 start.input 含 cache_read 且 start.cr=0），计入会污染命中率，日志里标 [中断]。</p>
       <h3>统计字段</h3>
@@ -2862,7 +2858,7 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
 // write Chinese into logViewerDocZH and English here — both sides must be updated.
 const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h3>
       <p>With the top-level <code>convertAlltoStream</code> (default false) on, every non-streaming request (<code>stream:false</code> or omitted) is silently sent upstream as streaming: the in-flight view shows token output live, with TTFT and tok/s stats. The caller notices nothing — after collecting the full upstream stream, the proxy <b>rebuilds</b> the non-streaming JSON exactly (all content blocks reassembled as they arrived, including search-result encrypted_content) and returns it in one piece. If the stream breaks midway (no message_stop), nothing has been written to the client and the proxy retries the whole request.</p>
-      <p>Only applies to Anthropic Messages requests (/v1/messages); already-streaming requests and search summary mode are unaffected. No SSE keep-alive pings during retry waits (they would pollute a non-streaming response) — waits are silent.</p>
+      <p>Only applies to Anthropic Messages requests (/v1/messages); already-streaming requests are unaffected. No SSE keep-alive pings during retry waits (they would pollute a non-streaming response) — waits are silent.</p>
       <h3>Responses API listener: responses_listen</h3>
       <p>Set the top-level <code>responses_listen</code> (empty = off; the config template demonstrates <code>127.0.0.1:8081</code>) and the proxy opens an extra OpenAI Responses API endpoint (<code>/v1/responses</code>) at that address: tools that only speak the Responses protocol (Codex CLI etc.) are bridged to Anthropic upstreams. Requests are translated to Anthropic Messages and run through the main pipeline (routing/retries/this console's monitoring all apply); responses are translated back to Responses (SSE event stream for stream:true, one-shot JSON for false).</p>
       <p>Model names from the tool still join route matching: add a route like <code>gpt-5*</code> to pick the upstream and rewrite the model. Changes apply on save/reload (the listener starts/stops with config); like the main port, it is only ever reachable from this machine.</p>
@@ -2871,7 +2867,7 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <p><b>Codex CLI setup</b>: easiest — the Config tab of this console shows two one-line commands for Windows / macOS·Linux (same format as DeepSeek docs, generated live from the editor: address from <code>responses_listen</code>; every routes pattern's representative name is written into the Codex <code>/model</code> menu, the dropdown selection being the default model). Copy into the matching terminal and press Enter; the script is baked and served by this proxy in real time. The repo root also has interactive versions <code>codex-setup.ps1</code> (Windows) and <code>codex-setup.sh</code> (macOS/Linux): pick a model, back up then rewrite config.toml, write the model catalog, one-command restore. Manual: edit <code>~/.codex/config.toml</code> — top-level <code>model_provider = "proxy429"</code>, <code>model = "gpt-5-codex"</code>, <code>preferred_auth_method = "apikey"</code> + <code>forced_login_method = "api"</code> (no official login), plus a <code>[model_providers.proxy429]</code> section (<code>base_url = "http://127.0.0.1:8081/v1"</code>, <code>wire_api = "responses"</code>, <code>experimental_bearer_token</code> = any placeholder string). Restart Codex after editing. <b>503 with zero proxy-side logs</b>: a system proxy or terminal proxy variables hijack 127.0.0.1 requests to a proxy server that returns 503 — the Windows one-line installer already writes a user-level NO_PROXY (including 127.0.0.1) to bypass; the macOS script writes NO_PROXY into the launchd environment (applies to GUI apps and new terminals) and installs a login item for persistence (choose "restore" in the script to undo); the Linux script only checks and suggests <code>export NO_PROXY="localhost,127.0.0.1,::1"</code>; for manual setup run <code>setx NO_PROXY "localhost,127.0.0.1,::1"</code> (Windows) then restart Codex. Step-by-step guide: docs/USAGE.md, section Run Codex CLI through the proxy.</p>
       <h3>Routing & capability fallbacks</h3>
       <p>Requests match upstreams in order: classifier_route (classifier rerouting) → fast_route (fast direct) → routes (by model pattern). After a route hits, if that upstream lacks a capability (text_only = no images / no_search = no search), the following applies:</p>
-      <li>Search requests (with web_search) → search_fallback: with summary_mode on, the proxy builds the response itself in two steps (step1 search + step2 summary); otherwise the whole request is forwarded to the search_fallback upstream to search and answer by itself. Both use the same search_fallback config — not independent routes.</li>
+      <li>Search requests (with web_search) → search_fallback: the whole request is forwarded to the search_fallback upstream, which searches and answers by itself. For standalone search sub-agent requests (body carries "Perform a web search for the query"), claudeSearchSummary can inject the summary instruction into that very request and claudeSearchThinking can rewrite its thinking level — search+summary complete in a single request, the response passing through untouched (fully visible in this console).</li>
       <li>Image-only requests (no search) → multimodal_fallback; if unset, pass through to the original route.</li>
       <li>Search without search_fallback, or image-only without multimodal_fallback → degrade to passing through the original route (the upstream may error).</li>
       <h3>Parameter cheat sheet</h3>
@@ -2898,7 +2894,7 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <tr style="border-bottom:1px solid #2a2a2a">
       <td style="padding:6px 8px;vertical-align:top"><code>enhance_search</code></td>
       <td style="padding:6px 8px;vertical-align:top">routes[] entry</td>
-      <td style="padding:6px 8px;vertical-align:top">When search is supported, proactively switch to kimi summary mode</td>
+      <td style="padding:6px 8px;vertical-align:top">When search is supported, inject the summary instruction into standalone search sub-agent requests (single-request mode)</td>
       <td style="padding:6px 8px;vertical-align:top">Only applies when the route is NOT marked no_search; mutually exclusive with search_fallback</td>
       </tr>
       <tr style="border-bottom:1px solid #2a2a2a">
@@ -2929,7 +2925,7 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <td style="padding:6px 8px;vertical-align:top"><code>search_fallback</code></td>
       <td style="padding:6px 8px;vertical-align:top">Top level</td>
       <td style="padding:6px 8px;vertical-align:top">Search fallback upstream</td>
-      <td style="padding:6px 8px;vertical-align:top">Used when a route is marked no_search and the request contains search; summary_mode=true: the proxy builds step1+step2 itself, =false: the whole request is forwarded to the upstream to search and answer</td>
+      <td style="padding:6px 8px;vertical-align:top">Used when a route is marked no_search and the request contains search; the whole request is forwarded to the upstream to search and answer. Standalone search sub-agent requests may additionally get an injected summary instruction (claudeSearchSummary) / a thinking rewrite (claudeSearchThinking) — single request, taking precedence over the legacy summary_mode/summary_thinking</td>
       </tr>
       </tbody>
       </table>
@@ -2941,11 +2937,9 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <li>Without multimodal_fallback: pass through to the original route's model (the upstream will error if it can't take images; the proxy passes the error through).</li>
       <p>Search requests (with web_search) always go to search_fallback regardless of whether the body contains images — there is no evidence multimodal+search ever co-occur.</p>
       <h3>Enhanced search: enhance_search</h3>
-      <p>With <code>enhance_search</code> on a route, it applies <b>only when that route supports search (not marked <code>no_search</code>)</b>: a request with web_search doesn't call the main model; instead two steps run:</p>
-      <li>step1: non-streaming search against this route's upstream, yielding web_search_tool_result.</li>
-      <li>step2: the search results + the user's original question (search intent) are composed into an instruction, generating per-result summaries (Result N: ...) as a stream.</li>
+      <p>With <code>enhance_search</code> on a route, it applies <b>only when that route supports search (not marked <code>no_search</code>)</b>: for a standalone search sub-agent request (body carries "Perform a web search for the query"), the summary instruction is injected into that request's user message, which still goes to the route's own upstream — search + per-result summaries (Result N: ...) complete in a single request, the upstream response streaming through untouched (fully visible in this console).</p>
       <p>Mutually exclusive with <code>search_fallback</code>: a route that supports search (not marked <code>no_search</code>) uses enhance_search; a route marked <code>no_search</code> uses <code>search_fallback</code> when search is missing.</p>
-      <p><code>summary_level</code>: low (brief) / mid / high (detailed) / max (verbatim with code & formulas) — controls verbosity and max_tokens. <code>summary_thinking</code>: whether step2 enables thinking.</p>
+      <p><code>summary_level</code>: low (brief) / mid / high (detailed) / max (verbatim with code & formulas) — controls the injected instruction's verbosity. <code>summary_thinking</code>: whether to rewrite the request's thinking to low. search_fallback additionally offers <code>claudeSearchSummary</code> (forceLow/forceMid/forceHigh inject at level / noForce disables) and <code>claudeSearchThinking</code> (off/low/mid/high/max rewrite thinking), taking precedence over these legacy fields.</p>
       <h3>Cache hit</h3>
       <p>Hit rate = cache_read / (input + cache_read + cache_creation), same as Claude Code's cache-hit algorithm: cache writes don't count as hits but do count into total input. High hit rates (90%+) mainly come from upstream models' (DeepSeek/Kimi) native context caching — the proxy only forwards usage, with no extra cache optimization. Click the Status tab's "Cache hit" card for details grouped by real upstream model (including write volume); the modal's bottom also has a "Measured cache lifetime" table (grouped by upstream URL+model; rules in "Stats fields" → "Cache age"). Streams cut off midway (Esc, network drops) don't count into aggregates: they only have message_start's estimated usage (some upstreams include cache_read in start.input with start.cr=0), which would pollute the hit rate; they're marked [interrupted] in the log.</p>
       <h3>Stats fields</h3>
@@ -3076,7 +3070,7 @@ var enHTMLRepl = [][2]string{
 	{`routes[] 条目`, `routes[] entry`},
 	{`标记上游不支持图片`, `Marks the upstream as image-incapable`},
 	{`标记上游不支持搜索`, `Marks the upstream as search-incapable`},
-	{`支持搜索时主动改走 kimi 摘要模式`, `When search is supported, proactively switch to kimi summary mode`},
+	{`支持搜索时对独立搜索子代理请求注入摘要指令（单请求模式）`, `When search is supported, inject the summary instruction into standalone search sub-agent requests (single-request mode)`},
 	{`声明目标模型的思考形态：auto（默认，按客户端 model 名查表）/ adaptive / budget`, `Declares the target model's thinking shape: auto (default, looked up by client model name) / adaptive / budget`},
 	{`图片兜底上游`, `Image fallback upstream`},
 	{`搜索兜底上游`, `Search fallback upstream`},

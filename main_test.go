@@ -2746,48 +2746,31 @@ func TestSearchFallbackNotNoSearch(t *testing.T) {
 	}
 }
 
-// TestEnhanceSearchRoute end-to-end: route.EnhanceSearch non-nil + search tool present + no_search:false
-// should take enhanced search (searchAndRespond uses the route's url/api/model), not calling the main default upstream.
+// TestEnhanceSearchRoute end-to-end: route.EnhanceSearch non-nil + a standalone search sub-agent request
+// (marker + search tool) gets the legacy summary instruction injected into the search request itself and is
+// forwarded ONCE to the route's own upstream (single-request mode), whose SSE passes through untouched.
 func TestEnhanceSearchRoute(t *testing.T) {
 	resetStats()
 	var rg struct {
 		mu     sync.Mutex
-		called bool
+		called int
+		body   []byte
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
-		rg.mu.Lock()
-		rg.called = true
-		rg.mu.Unlock()
-		var m map[string]any
 		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &m)
-		stream, _ := m["stream"].(bool)
-		if !stream {
-			// step1: non-streaming JSON returning server_tool_use + web_search_tool_result.
-			resp := map[string]any{
-				"id":          "msg_step1",
-				"model":       "deepseek-V4-pro",
-				"stop_reason": "end_turn",
-				"content": []map[string]any{
-					{"type": "server_tool_use", "id": "srvtoolu_enh", "name": "web_search", "input": map[string]any{}},
-					{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_enh", "content": []map[string]any{
-						{"type": "web_search_tool_result_content", "url": "https://example.com/1", "title": "Enh Result"},
-					}},
-				},
-			}
-			b, _ := json.Marshal(resp)
-			w.Header().Set("content-type", "application/json")
-			w.Write(b)
-			return
-		}
-		// step2: streaming summary.
+		rg.mu.Lock()
+		rg.called++
+		rg.body = body
+		rg.mu.Unlock()
 		w.Header().Set("content-type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "event: message_start\ndata: %s\n\n", `{"type":"message_start","message":{"model":"deepseek-V4-pro"}}`)
-		fmt.Fprintf(w, "event: content_block_start\ndata: %s\n\n", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
-		fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Enh Result: summary"}}`)
+		fmt.Fprintf(w, "event: content_block_start\ndata: %s\n\n", `{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_enh","name":"web_search"}}`)
 		fmt.Fprintf(w, "event: content_block_stop\ndata: %s\n\n", `{"type":"content_block_stop","index":0}`)
+		fmt.Fprintf(w, "event: content_block_start\ndata: %s\n\n", `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`)
+		fmt.Fprintf(w, "event: content_block_delta\ndata: %s\n\n", `{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Result 1: summary"}}`)
+		fmt.Fprintf(w, "event: content_block_stop\ndata: %s\n\n", `{"type":"content_block_stop","index":1}`)
 		fmt.Fprintf(w, "event: message_delta\ndata: %s\n\n", `{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`)
 		fmt.Fprintf(w, "event: message_stop\ndata: %s\n\n", `{"type":"message_stop"}`)
 	})
@@ -2810,7 +2793,7 @@ func TestEnhanceSearchRoute(t *testing.T) {
 	defer proxy.Close()
 
 	resp, err := http.Post(proxy.URL+"/v1/messages", "application/json",
-		strings.NewReader(`{"model":"claude-haiku-4-5","stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"搜一下"}]}`))
+		strings.NewReader(`{"model":"claude-haiku-4-5","stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"Perform a web search for the query: 广州天气"}]}`))
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)
 	}
@@ -2819,18 +2802,22 @@ func TestEnhanceSearchRoute(t *testing.T) {
 
 	rg.mu.Lock()
 	defer rg.mu.Unlock()
-	if !rg.called {
-		t.Fatalf("应命中 route 上游做 step1/step2（增强搜索）")
+	if rg.called != 1 {
+		t.Fatalf("单请求模式应只打 1 次上游，实际 %d 次", rg.called)
+	}
+	sb := string(rg.body)
+	if !strings.Contains(sb, `Perform a web search for the query: 广州天气\n\nCurrent date and time is`) {
+		t.Errorf("摘要指令应注入到标记所在字符串内，实际请求体: %s", sb)
+	}
+	if !strings.Contains(sb, "medium-detail plaintext summary") {
+		t.Errorf("enhance_search 的 mid 档指令未注入")
 	}
 	s := string(out)
 	if !strings.Contains(s, "server_tool_use") {
-		t.Errorf("响应缺 server_tool_use 块")
+		t.Errorf("响应缺 server_tool_use 块（上游 SSE 应原样透传）")
 	}
-	if !strings.Contains(s, "web_search_tool_result") {
-		t.Errorf("响应缺 web_search_tool_result 块")
-	}
-	if !strings.Contains(s, "Enh Result: summary") {
-		t.Errorf("响应缺摘要文本")
+	if !strings.Contains(s, "Result 1: summary") {
+		t.Errorf("响应缺上游摘要文本（上游 SSE 应原样透传）")
 	}
 }
 
