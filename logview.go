@@ -1128,9 +1128,9 @@ const logViewerHTML = `<!DOCTYPE html>
     <button class="ghost" style="position:absolute;top:10px;right:12px" onclick="document.getElementById('heatModal').style.display='none'">关闭</button>
     <div style="font-size:15px;margin-bottom:8px;color:#d4d4d4;padding-right:70px">活跃度</div>
     <div id="heatMetricRow" style="margin-bottom:12px">
-      <button id="heatM0" class="ghost" style="padding:1px 8px;font-size:12px;border-color:#39d353" onclick="heatSetMetric(0)">请求次数</button>
+      <button id="heatM0" class="ghost" style="padding:1px 8px;font-size:12px" onclick="heatSetMetric(0)">请求次数</button>
       <button id="heatM1" class="ghost" style="margin-left:4px;padding:1px 8px;font-size:12px" onclick="heatSetMetric(1)">输入+输出</button>
-      <button id="heatM2" class="ghost" style="margin-left:4px;padding:1px 8px;font-size:12px" onclick="heatSetMetric(2)">输出</button>
+      <button id="heatM2" class="ghost" style="margin-left:4px;padding:1px 8px;font-size:12px;border-color:#39d353" onclick="heatSetMetric(2)">输出</button>
     </div>
     <div id="heatModalBody"></div>
   </div>
@@ -2551,7 +2551,7 @@ var latestModelStats = [];
 var latestCacheObs = [];
 var latestHeat = [];
 var latestHeatBase = 0;
-var heatMetric = 0; // 活跃度着色口径：0=请求次数 1=输入+输出 2=输出
+var heatMetric = 2; // 活跃度着色口径：0=请求次数 1=输入+输出 2=输出（默认）
 var latestClsHits = 0;    // 分类器命中总量（classifiers：无论是否分流/改写都计）
 var latestClsNoThink = 0; // 其中实际改写思考配置的次数（classifierNoThink：off 或 low）
 var latestClsHitsCC = 0, latestClsHitsCodex = 0; // 分源命中：Claude Code / Codex

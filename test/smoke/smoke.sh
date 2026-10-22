@@ -175,6 +175,7 @@ echo "--- upstream traffic counters: bytesUp=$up bytesDown=$down (want both >0)"
 [ "${up:-0}" -gt 0 ] && [ "${down:-0}" -gt 0 ] || { echo "TRAFFIC COUNTER MISSING/ZERO"; clsok=0; }
 grep -q '"heatBase":' "$OUT/data.json" || { echo "HEAT heatBase MISSING"; clsok=0; }
 grep -q '"heat":\[\[' "$OUT/data.json" || { echo "HEAT heat ARRAY MISSING"; clsok=0; }
+grep -qF 'var heatMetric = 2;' "$OUT/page.html" || { echo "HEAT DEFAULT METRIC NOT OUTPUT"; clsok=0; }
 g1up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=10&side=up")
 echo "$g1up" | grep -q '"type":"adaptive"' && echo "$g1up" | grep -q '"effort":"low"' || { echo "G1 LOW REWRITE MISSING"; clsok=0; }
 k1up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=12&side=up")

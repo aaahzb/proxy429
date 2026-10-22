@@ -471,6 +471,17 @@ func TestLogViewerHeatmap(t *testing.T) {
 			t.Errorf("活跃度热图缺少 %q", want)
 		}
 	}
+	// The coloring metric defaults to output tokens: the JS var defaults to 2 and the active
+	// border sits on 输出 (not 请求次数).
+	if !strings.Contains(logViewerHTML, "var heatMetric = 2;") {
+		t.Errorf("活跃度默认口径应为输出（缺 var heatMetric = 2;）")
+	}
+	if !strings.Contains(logViewerHTML, `<button id="heatM2" class="ghost" style="margin-left:4px;padding:1px 8px;font-size:12px;border-color:#39d353"`) {
+		t.Errorf("输出按钮应带默认高亮边框")
+	}
+	if strings.Contains(logViewerHTML, `<button id="heatM0" class="ghost" style="padding:1px 8px;font-size:12px;border-color:#39d353"`) {
+		t.Errorf("请求次数按钮不应再带默认高亮边框")
+	}
 	// The window must roll continuously (one cell out per 15 minutes), never flip a whole day at midnight.
 	if strings.Contains(logViewerHTML, "ydaySlot") {
 		t.Errorf("热图窗口应按当前时刻滚动，不应再按日历日对齐（发现 ydaySlot）")
