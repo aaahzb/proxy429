@@ -96,6 +96,8 @@ func main() {
 		case "search":
 			// One-request search answer (the shape a real search upstream produces when the summary instruction rides
 			// inside the search request): server_tool_use + web_search_tool_result + per-result summary text, one SSE stream.
+			// A leading thinking block (index 0) rides along so the smoke can prove the response-side strip: a client that
+			// never asked for thinking (s1, disabled) gets it stripped; a thinking-on client (s2, adaptive) keeps it.
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(200)
 			flusher, _ := w.(http.Flusher)
@@ -104,13 +106,17 @@ func main() {
 				msgStart = fmt.Sprintf(`{"type":"message_start","message":{"model":%q,"usage":{"input_tokens":10,"output_tokens":1}}}`, reqModel)
 			}
 			w.Write([]byte("event: message_start\ndata: " + msgStart + "\n\n"))
-			w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_smoke\",\"name\":\"web_search\",\"input\":{\"query\":\"smoke\"}}}\n\n"))
+			w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n"))
+			w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"smoke think\"}}\n\n"))
+			w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\n"))
 			w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
-			w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srvtoolu_smoke\",\"content\":[{\"type\":\"web_search_result\",\"title\":\"Smoke Result\",\"url\":\"https://example.com/smoke\"}]}}\n\n"))
+			w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_smoke\",\"name\":\"web_search\",\"input\":{\"query\":\"smoke\"}}}\n\n"))
 			w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n"))
-			w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
-			w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"text_delta\",\"text\":\"Result 1: smoke summary\"}}\n\n"))
+			w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srvtoolu_smoke\",\"content\":[{\"type\":\"web_search_result\",\"title\":\"Smoke Result\",\"url\":\"https://example.com/smoke\"}]}}\n\n"))
 			w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\n"))
+			w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
+			w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":3,\"delta\":{\"type\":\"text_delta\",\"text\":\"Result 1: smoke summary\"}}\n\n"))
+			w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":3}\n\n"))
 			w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":10}}\n\n"))
 			w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
 			if flusher != nil {

@@ -138,12 +138,14 @@ echo "responses g4 -> HTTP $code"
 
 # Search single-request smoke: s1 (id 17) hits route smoke-sf (no_search) -> search_fallback; the route's own
 # claudeSearchSummary=forceHigh overrides sf's forceMid per field, while sf's claudeSearchThinking=low still applies.
-# s2 (id 18) hits route smoke-enh -> enhance_search legacy path (summary_level=high, summary_thinking -> low).
+# s1 asks thinking off (disabled), so the mock thinking block must be stripped from its response; s2 (id 18) hits
+# route smoke-enh -> enhance_search legacy path (summary_level=high, summary_thinking -> low) and carries adaptive
+# high, so its thinking blocks must pass through untouched.
 cat > "$OUT/s1.json" <<'EOF'
-{"model":"smoke-sf","max_tokens":8192,"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"Perform a web search for the query: smoke weather"}]}
+{"model":"smoke-sf","max_tokens":8192,"stream":true,"thinking":{"type":"disabled"},"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"Perform a web search for the query: smoke weather"}]}
 EOF
 cat > "$OUT/s2.json" <<'EOF'
-{"model":"smoke-enh","max_tokens":8192,"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"Perform a web search for the query: smoke transit"}]}
+{"model":"smoke-enh","max_tokens":8192,"stream":true,"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"Perform a web search for the query: smoke transit"}]}
 EOF
 for n in s1 s2; do
   code=$(curl -s -o "$OUT/$n.resp" -w "%{http_code}" --max-time 30 -X POST "http://127.0.0.1:18083/v1/messages" -H "Content-Type: application/json" --data-binary "@$OUT/$n.json")
@@ -208,7 +210,7 @@ echo "$s1up" | grep -q 'Perform a web search for the query: smoke weather' || { 
 echo "$s1up" | grep -q 'After performing the web search' || { echo "S1 INJECTION MISSING"; searchok=0; }
 echo "$s1up" | grep -q 'detailed comprehensive plaintext summary' || { echo "S1 ROUTE OVERRIDE NOT HIGH"; searchok=0; }
 echo "$s1up" | grep -q 'medium-detail' && { echo "S1 SF FORCEMID LEAKED (route override lost)"; searchok=0; }
-echo "$s1up" | grep -q '"budget_tokens":2048' || { echo "S1 THINKING-LOW REWRITE MISSING"; searchok=0; }
+echo "$s1up" | grep -q '"type":"adaptive"' && echo "$s1up" | grep -q '"effort":"low"' || { echo "S1 THINKING-LOW REWRITE MISSING (want adaptive+low)"; searchok=0; }
 echo "$s1up" | grep -q '"model":"searchmodel"' || { echo "S1 FALLBACK MODEL SWAP MISSING"; searchok=0; }
 s2up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=18&side=up")
 echo "$s2up" | grep -q 'Perform a web search for the query: smoke transit' || { echo "S2 MARKER LOST upstream"; searchok=0; }
@@ -216,12 +218,14 @@ echo "$s2up" | grep -q 'After performing the web search' || { echo "S2 INJECTION
 echo "$s2up" | grep -q 'detailed comprehensive plaintext summary' || { echo "S2 LEVEL NOT HIGH"; searchok=0; }
 echo "$s2up" | grep -q 'data points, direct quotes' || { echo "S2 HIGH WORDING MISSING"; searchok=0; }
 echo "$s2up" | grep -q 'verbatim' && { echo "S2 UNEXPECTED VERBATIM (max-only wording leaked)"; searchok=0; }
-echo "$s2up" | grep -q '"budget_tokens":2048' || { echo "S2 LEGACY summary_thinking->low MISSING"; searchok=0; }
+echo "$s2up" | grep -q '"type":"adaptive"' && echo "$s2up" | grep -q '"effort":"low"' || { echo "S2 LEGACY summary_thinking->low MISSING (want adaptive+low)"; searchok=0; }
 for n in s1 s2; do
   grep -q 'server_tool_use' "$OUT/$n.resp" || { echo "$n RESPONSE NOT A SEARCH ANSWER (server_tool_use missing)"; searchok=0; }
   grep -q 'web_search_tool_result' "$OUT/$n.resp" || { echo "$n RESPONSE MISSING web_search_tool_result"; searchok=0; }
   grep -q 'Result 1: smoke summary' "$OUT/$n.resp" || { echo "$n SUMMARY TEXT NOT PASSED THROUGH"; searchok=0; }
 done
+! grep -q 'thinking_delta' "$OUT/s1.resp" || { echo "S1 THINKING NOT STRIPPED (its client asked thinking off)"; searchok=0; }
+grep -q 'thinking_delta' "$OUT/s2.resp" || { echo "S2 THINKING MISSING (its client carries adaptive: must pass through)"; searchok=0; }
 scount=$(grep -c 'mode=search' "$OUT/mock.log")
 echo "mock mode=search POST count: $scount (want 2: one per request, no step2)"
 [ "$scount" = "2" ] || { echo "SEARCH UPSTREAM POST COUNT WRONG (two-step machinery alive?)"; searchok=0; }

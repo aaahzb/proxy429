@@ -119,48 +119,49 @@ func TestInjectAfterMarkerNoMarker(t *testing.T) {
 
 // ---- Thinking rewrite ----
 
-// TestRewriteSearchThinking locks the claudeSearchThinking mapping: off stays disabled; low/mid/high/max pick
-// adaptive+effort or enabled+budget_tokens by the upstream model; sampling knobs die when thinking turns on;
-// a max_tokens too small for the budget floor abandons the rewrite.
+// TestRewriteSearchThinking locks the claudeSearchThinking mapping, convertOff2Low-style: whatever shape the
+// request carried, off stays disabled (sampling knobs kept) and low/mid/high/max always rewrite to the adaptive
+// shape (adaptive + output_config.effort; mid=medium; sampling knobs die when thinking turns on). Neither the
+// request thinking shape nor any model name is consulted, and the adaptive shape has no budget, so a tiny
+// max_tokens never blocks the rewrite. (A field the request did not have is appended pretty-spaced by
+// setTopLevelJSONValue, so effort assertions match the inner pair only.)
 func TestRewriteSearchThinking(t *testing.T) {
 	base := `{"model":"M","max_tokens":64000,"temperature":1,"top_p":0.9,"thinking":{"type":"disabled"},"output_config":{"effort":"low"},"messages":[]}`
 	cases := []struct {
-		name          string
-		body          string
-		level         string
-		upstreamModel string
-		wantOK        bool
-		wantContains  []string
-		wantAbsent    []string
+		name         string
+		body         string
+		level        string
+		wantOK       bool
+		wantContains []string
+		wantAbsent   []string
 	}{
-		{"off keeps disabled, drops output_config, keeps sampling", base, "off", "kimi-for-coding", true,
+		{"off keeps disabled, drops output_config, keeps sampling", base, "off", true,
 			[]string{`"thinking":{"type":"disabled"}`, `"temperature":1`, `"top_p":0.9`},
 			[]string{`"output_config"`, `"budget_tokens"`}},
-		{"low budget model", base, "low", "kimi-for-coding", true,
-			[]string{`"thinking":{"type":"enabled","budget_tokens":2048}`},
-			[]string{`"output_config"`, `"temperature"`, `"top_p"`}},
-		{"mid budget model", base, "mid", "kimi-for-coding", true,
-			[]string{`"budget_tokens":8192`}, nil},
-		{"high budget model", base, "high", "kimi-for-coding", true,
-			[]string{`"budget_tokens":16384`}, nil},
-		{"max budget model", base, "max", "kimi-for-coding", true,
-			[]string{`"budget_tokens":24576`}, nil},
-		{"max adaptive model rewrites effort", base, "max", "claude-fable-5", true,
-			[]string{`"thinking":{"type":"adaptive"}`, `"output_config":{"effort":"max"}`},
+		{"low rewrites to adaptive low", base, "low", true,
+			[]string{`"thinking":{"type":"adaptive"}`, `"effort":"low"`},
+			[]string{`"temperature"`, `"top_p"`, `"budget_tokens"`}},
+		{"mid maps to medium", base, "mid", true,
+			[]string{`"effort":"medium"`}, nil},
+		{"high rewrites to adaptive high", base, "high", true,
+			[]string{`"effort":"high"`}, nil},
+		{"max rewrites to adaptive max", base, "max", true,
+			[]string{`"thinking":{"type":"adaptive"}`, `"effort":"max"`},
 			[]string{`"budget_tokens"`, `"temperature"`}},
-		{"mid maps to medium on adaptive", base, "mid", "claude-fable-5", true,
-			[]string{`"output_config":{"effort":"medium"}`}, nil},
-		{"low adaptive model", base, "low", "claude-fable-5", true,
-			[]string{`"thinking":{"type":"adaptive"}`, `"output_config":{"effort":"low"}`},
+		{"an enabled+budget request still gets the adaptive shape", `{"model":"M","max_tokens":64000,"thinking":{"type":"enabled","budget_tokens":4096},"messages":[]}`, "max", true,
+			[]string{`"thinking":{"type":"adaptive"}`, `"effort":"max"`},
 			[]string{`"budget_tokens"`}},
-		{"budget capped at half of small max_tokens", `{"model":"M","max_tokens":4096,"thinking":{"type":"disabled"},"messages":[]}`, "high", "kimi-for-coding", true,
-			[]string{`"budget_tokens":2048`}, nil},
-		{"max_tokens below the floor abandons the rewrite", `{"model":"M","max_tokens":1000,"thinking":{"type":"disabled"},"messages":[]}`, "low", "kimi-for-coding", false,
-			nil, nil},
-		{"empty level is a no-op", base, "", "kimi-for-coding", false, nil, nil},
+		{"an adaptive request only changes level", `{"model":"M","max_tokens":64000,"thinking":{"type":"adaptive"},"output_config":{"effort":"low"},"messages":[]}`, "high", true,
+			[]string{`"thinking":{"type":"adaptive"}`, `"effort":"high"`},
+			[]string{`"budget_tokens"`}},
+		{"tiny max_tokens no longer blocks the rewrite", `{"model":"M","max_tokens":64,"thinking":{"type":"disabled"},"messages":[]}`, "low", true,
+			[]string{`"thinking":{"type":"adaptive"}`, `"effort":"low"`}, nil},
+		{"empty level is a no-op", base, "", false, nil, nil},
+		{"unknown level is a no-op", base, "banana", false, nil, nil},
 	}
 	for _, tc := range cases {
-		out, ok := rewriteSearchThinking([]byte(tc.body), tc.level, tc.upstreamModel)
+		out, ok := rewriteSearchThinking([]byte(tc.body), tc.level)
+
 		if ok != tc.wantOK {
 			t.Errorf("%s: ok = %v, want %v (out=%s)", tc.name, ok, tc.wantOK, out)
 			continue
@@ -279,8 +280,9 @@ func TestSummaryLevelConfig(t *testing.T) {
 // omitted here, thinking disabled, server-side web_search tool, marker in a block-form user message).
 const searchSubagentReq = `{"model":"claude-opus-4-8","stream":true,"max_tokens":32000,"temperature":1,"thinking":{"type":"disabled"},"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],"messages":[{"role":"user","content":[{"type":"text","text":"Perform a web search for the query: 广州天气 今天 预报"}]}]}`
 
-// searchE2EMock builds a Kimi-shaped SSE upstream: it records every request body and answers with
-// server_tool_use + web_search_tool_result + summary text in one stream (the single-request shape).
+// searchE2EMock builds a Kimi-shaped SSE upstream: it records every request body and answers with a leading
+// thinking block + server_tool_use + web_search_tool_result + summary text in one stream (the single-request
+// shape; the thinking block makes the strip differential visible: thinking-off clients get it stripped away).
 func searchE2EMock(t *testing.T) (srv *httptest.Server, bodies func() [][]byte) {
 	t.Helper()
 	var mu sync.Mutex
@@ -293,14 +295,19 @@ func searchE2EMock(t *testing.T) (srv *httptest.Server, bodies func() [][]byte) 
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"kimi-for-coding\",\"usage\":{\"output_tokens\":1}}}\n\n")
-		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_e2e\",\"name\":\"web_search\",\"input\":{\"query\":\"广州天气\"}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"e2e think\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\n")
 		fmt.Fprint(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
-		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srvtoolu_e2e\",\"content\":[{\"type\":\"web_search_tool_result_content\",\"url\":\"https://example.com/1\",\"title\":\"广州天气预报\"}]}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_e2e\",\"name\":\"web_search\",\"input\":{\"query\":\"广州天气\"}}}\n\n")
 		fmt.Fprint(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n")
-		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
-		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"text_delta\",\"text\":\"Result 1: 晴转多云\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srvtoolu_e2e\",\"content\":[{\"type\":\"web_search_tool_result_content\",\"url\":\"https://example.com/1\",\"title\":\"广州天气预报\"}]}}\n\n")
 		fmt.Fprint(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\n")
-		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":3,\"delta\":{\"type\":\"text_delta\",\"text\":\"Result 1: 晴转多云\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":3}\n\n")
+
+		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":11}}\n\n")
 		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 	}))
 	return srv, func() [][]byte {
@@ -387,7 +394,8 @@ func TestSearchFallbackSummarySingleRequest(t *testing.T) {
 }
 
 // TestSearchFallbackClaudeSearchFields locks the new fields: forceHigh injects the high-level instruction and
-// claudeSearchThinking:"low" rewrites thinking to enabled+2048 on a budget upstream (sampling knobs dropped).
+// claudeSearchThinking:"low" rewrites thinking to adaptive+effort low (sampling knobs dropped); since the
+// client asked thinking off, the mock thinking block is stripped from the response it sees.
 func TestSearchFallbackClaudeSearchFields(t *testing.T) {
 	out, bodies, _ := runSearchE2E(t,
 		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceHigh", ClaudeSearchThinking: "low"},
@@ -396,17 +404,21 @@ func TestSearchFallbackClaudeSearchFields(t *testing.T) {
 		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
 	}
 	up := string(bodies[0])
-	for _, sub := range []string{"detailed comprehensive", `"thinking":{"type":"enabled","budget_tokens":2048}`} {
+	for _, sub := range []string{"detailed comprehensive", `"thinking":{"type":"adaptive"}`, `"effort":"low"`} {
 		if !strings.Contains(up, sub) {
 			t.Errorf("上游请求缺 %q: %s", sub, up)
 		}
 	}
-	for _, sub := range []string{`"temperature"`, `"output_config"`} {
+	for _, sub := range []string{`"temperature"`, `"budget_tokens"`} {
 		if strings.Contains(up, sub) {
 			t.Errorf("开思考后不应残留 %q: %s", sub, up)
 		}
 	}
+	if strings.Contains(out, "thinking_delta") {
+		t.Errorf("客户端本来关思考：回程思考块应被剥离: %s", out)
+	}
 	checkPassthrough(t, out)
+
 }
 
 // TestSearchFallbackNoForce locks noForce beating summary_mode: the body goes upstream byte-identical
@@ -450,18 +462,19 @@ func TestSearchFallbackLegacySummaryThinking(t *testing.T) {
 		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
 	}
 	up := string(bodies[0])
-	if !strings.Contains(up, `"thinking":{"type":"enabled","budget_tokens":2048}`) {
-		t.Errorf("legacy summary_thinking 应改写为 low thinking: %s", up)
+	if !strings.Contains(up, `"thinking":{"type":"adaptive"}`) || !strings.Contains(up, `"effort":"low"`) {
+		t.Errorf("legacy summary_thinking 应改写为 adaptive low: %s", up)
 	}
-	if strings.Contains(up, `"temperature"`) {
-		t.Errorf("开思考后不应残留 temperature: %s", up)
+	if strings.Contains(up, `"temperature"`) || strings.Contains(up, `"budget_tokens"`) {
+		t.Errorf("开思考后不应残留 temperature/budget_tokens: %s", up)
+
 	}
 }
 
 // ---- Per-route claudeSearch* fields (routes[] entries) ----
 
-// bigMaxSearchReq mirrors searchSubagentReq with max_tokens raised so a max-level budget (24576) fits under
-// the max_tokens/2 cap without truncation.
+// bigMaxSearchReq mirrors searchSubagentReq with max_tokens doubled (a leftover from the budget-shape days;
+// the adaptive shape has no budget to fit, the bigger ceiling simply keeps the fixture varied).
 var bigMaxSearchReq = strings.Replace(searchSubagentReq, `"max_tokens":32000`, `"max_tokens":64000`, 1)
 
 // runSearchE2EFull generalizes runSearchE2E: the route rule is caller-supplied (per-route claudeSearch* fields);
@@ -541,7 +554,7 @@ func TestRouteSearchFieldsOverrideSearchFallback(t *testing.T) {
 		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
 	}
 	up := string(bodies[0])
-	for _, sub := range []string{"detailed comprehensive", `"budget_tokens":24576`, `"model":"kimi-for-coding"`} {
+	for _, sub := range []string{"detailed comprehensive", `"thinking":{"type":"adaptive"}`, `"effort":"max"`, `"model":"kimi-for-coding"`} {
 		if !strings.Contains(up, sub) {
 			t.Errorf("路由字段应逐字段压过 search_fallback（缺 %q）: %s", sub, up)
 		}
@@ -573,8 +586,9 @@ func TestRouteSearchFieldsPartialOverride(t *testing.T) {
 	if strings.Contains(up, "After performing the web search") {
 		t.Errorf("路由的 noForce 应压过 sf 的 forceMid（不注入）: %s", up)
 	}
-	if !strings.Contains(up, `"thinking":{"type":"enabled","budget_tokens":2048}`) {
+	if !strings.Contains(up, `"thinking":{"type":"adaptive"}`) || !strings.Contains(up, `"effort":"low"`) {
 		t.Errorf("路由未设 thinking 时应回落 sf 的 claudeSearchThinking:low: %s", up)
+
 	}
 	// Badges: noForce kills the injection (level stays empty), the thinking rewrite still shows from->to.
 	for _, sub := range []string{`"searchMarker":true`, `"searchLevel":""`, `"searchThinkFrom":"off"`, `"searchThinkTo":"low"`} {
@@ -596,13 +610,65 @@ func TestRouteSearchFieldsOnSearchCapableRoute(t *testing.T) {
 		t.Fatalf("路由上游应只收到 1 个 POST，实收 %d", len(bodies))
 	}
 	up := string(bodies[0])
-	for _, sub := range []string{"After performing the web search", "medium-detail", `"budget_tokens":2048`, `"model":"kimi-for-coding"`} {
+	for _, sub := range []string{"After performing the web search", "medium-detail", `"thinking":{"type":"adaptive"}`, `"effort":"low"`, `"model":"kimi-for-coding"`} {
 		if !strings.Contains(up, sub) {
 			t.Errorf("路由自身服务时其 claudeSearch* 字段应生效（缺 %q）: %s", sub, up)
 		}
 	}
 	checkPassthrough(t, out)
 	for _, sub := range []string{`"searchMarker":true`, `"searchLevel":"mid"`, `"searchThinkFrom":"off"`, `"searchThinkTo":"low"`} {
+		if !strings.Contains(recent, sub) {
+			t.Errorf("recentflights 徽标字段（缺 %q）: %s", sub, recent)
+		}
+	}
+}
+
+// TestSearchRewriteStripsThinkingForOffClient locks the convertOff2Low-style response side: the client never
+// asked for thinking (explicitly disabled here, plus the no-thinking-field variant), the rewrite turned thinking
+// on upstream (adaptive low), so the returning thinking block is stripped and the surviving blocks renumber
+// gapless — the client sees a thinking-off answer while the upstream request shows what really went out.
+func TestSearchRewriteStripsThinkingForOffClient(t *testing.T) {
+	noThinkingReq := strings.Replace(searchSubagentReq, `"thinking":{"type":"disabled"},`, ``, 1)
+	for name, body := range map[string]string{"explicit disabled": searchSubagentReq, "no thinking field": noThinkingReq} {
+		out, bodies, _ := runSearchE2E(t,
+			&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchThinking: "low"},
+			body)
+		if len(bodies) != 1 {
+			t.Fatalf("%s: 上游应只收到 1 个 POST，实收 %d", name, len(bodies))
+		}
+		if !strings.Contains(string(bodies[0]), `"effort":"low"`) {
+			t.Errorf("%s: 上游应收到 adaptive low: %s", name, bodies[0])
+		}
+		if strings.Contains(out, "thinking_delta") || strings.Contains(out, `"type":"thinking"`) {
+			t.Errorf("%s: 没主动要思考的客户端不应看到思考块: %s", name, out)
+		}
+		// The surviving first block must be renumbered to index 0 (a gapless stream; re-marshaled key order).
+		if !strings.Contains(out, `"index":0,"type":"content_block_start"`) {
+			t.Errorf("%s: 剥离后块序号应无缝重排: %s", name, out)
+		}
+		checkPassthrough(t, out)
+	}
+}
+
+// TestSearchRewriteKeepsThinkingForThinkingClient locks the other half of the differential: a client whose
+// request already had thinking on (adaptive high) still gets the rewrite to low upstream but keeps seeing the
+// thinking blocks — only the level changed, never the response shape the client asked for.
+func TestSearchRewriteKeepsThinkingForThinkingClient(t *testing.T) {
+	adaptiveReq := strings.Replace(searchSubagentReq, `"thinking":{"type":"disabled"}`, `"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}`, 1)
+	out, bodies, _, recent := runSearchE2EFull(t,
+		RouteRule{Pattern: "claude-opus*", API: "sk-route-xxx", Model: "ark-opus", NoSearch: true},
+		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceLow", ClaudeSearchThinking: "low"},
+		false, adaptiveReq)
+	if len(bodies) != 1 {
+		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
+	}
+	if !strings.Contains(string(bodies[0]), `"effort":"low"`) {
+		t.Errorf("上游应收到改写后的 adaptive low: %s", bodies[0])
+	}
+	if !strings.Contains(out, "thinking_delta") {
+		t.Errorf("开思考客户端应照常看到思考块（不剥离）: %s", out)
+	}
+	for _, sub := range []string{`"searchThinkFrom":"high"`, `"searchThinkTo":"low"`} {
 		if !strings.Contains(recent, sub) {
 			t.Errorf("recentflights 徽标字段（缺 %q）: %s", sub, recent)
 		}

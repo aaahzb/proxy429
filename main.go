@@ -3714,16 +3714,16 @@ func resolveSearchBehavior(sf *SearchRoute) (injectLevel, thinkLevel string) {
 	return injectLevel, thinkLevel
 }
 
-// rewriteSearchThinking rewrites a standalone search sub-agent request's thinking per claudeSearchThinking:
-// "off" forces disabled (output_config dropped, sampling knobs kept); low/mid/high/max map to adaptive+effort on
-// adaptive upstream models, or enabled+budget_tokens (2048/8192/16384/24576; mid=medium) on budget ones. Turning
-// thinking on deletes temperature/top_p (thinking-on forbids sampling knobs, same rule as maybeUpgradeOffToLow) and
-// any stale output_config on the budget shape; budgets are capped at half of max_tokens, and when even the 1024
-// floor doesn't fit, the rewrite is abandoned (body untouched, ok=false). All edits are positional via
-// setTopLevelJSONValue.
-// body: the request body; level: the effective level; upstreamModel: the model the request goes to (picks the
-// adaptive/budget shape). Returns (newBody, rewritten).
-func rewriteSearchThinking(body []byte, level, upstreamModel string) ([]byte, bool) {
+// rewriteSearchThinking rewrites a standalone search sub-agent request's thinking per claudeSearchThinking,
+// convertOff2Low-style: whatever shape the request carried, the upstream gets the configured level in the
+// adaptive shape — "off" forces {"type":"disabled"} (output_config dropped, sampling knobs kept);
+// low/mid/high/max set {"type":"adaptive"} + output_config {"effort":low|medium|high|max} (mid=medium),
+// deleting temperature/top_p (thinking-on forbids sampling knobs, same rule as maybeUpgradeOffToLow). The
+// response side lives with the caller: when the client never asked for thinking it flags stripThinking so the
+// returning thinking blocks are stripped and the client keeps seeing a thinking-off response. All edits are
+// positional via setTopLevelJSONValue.
+// body: the request body; level: the effective level. Returns (newBody, rewritten).
+func rewriteSearchThinking(body []byte, level string) ([]byte, bool) {
 	if level == "" {
 		return body, false
 	}
@@ -3738,45 +3738,15 @@ func rewriteSearchThinking(body []byte, level, upstreamModel string) ([]byte, bo
 	if level == "mid" { // The user-facing enum says mid; the effort tables say medium.
 		level = "medium"
 	}
-	budget := effortToThinkingBudget(level)
 	effort := codexEffortToAnthropic(level)
-	if budget == 0 || effort == "" {
+	if effort == "" {
 		return body, false // Unknown level (config validation should have caught it): leave the body alone
 	}
-	// Read max_tokens for the budget ceiling (absent/unparseable = no ceiling).
-	var maxTokens int64
-	if spans, ok := locateTopFields(body); ok {
-		for _, s := range spans {
-			if s.name == "max_tokens" {
-				mt, _ := strconv.ParseInt(strings.TrimSpace(string(body[s.valStart:s.valEnd])), 10, 64)
-				maxTokens = mt
-			}
-		}
-	}
-	var thinkingJSON, outputConfigJSON []byte
-	if usesAdaptiveThinking(upstreamModel) {
-		thinkingJSON = []byte(`{"type":"adaptive"}`)
-		outputConfigJSON = []byte(fmt.Sprintf(`{"effort":%q}`, effort))
-	} else {
-		if maxTokens > 0 {
-			if ceiling := maxTokens / 2; budget > ceiling {
-				budget = ceiling
-			}
-		}
-		if budget < lowBudgetFloor {
-			return body, false // max_tokens too small for the 1024 budget floor: abandon, keep the request as sent
-		}
-		thinkingJSON = []byte(fmt.Sprintf(`{"type":"enabled","budget_tokens":%d}`, budget))
-	}
-	nb, ok := setTopLevelJSONValue(body, "thinking", thinkingJSON)
+	nb, ok := setTopLevelJSONValue(body, "thinking", []byte(`{"type":"adaptive"}`))
 	if !ok {
 		return body, false
 	}
-	if outputConfigJSON != nil {
-		nb, _ = setTopLevelJSONValue(nb, "output_config", outputConfigJSON)
-	} else {
-		nb, _ = setTopLevelJSONValue(nb, "output_config", nil) // Budget shape: a stale output_config would contradict it
-	}
+	nb, _ = setTopLevelJSONValue(nb, "output_config", []byte(fmt.Sprintf(`{"effort":%q}`, effort)))
 	nb, _ = setTopLevelJSONValue(nb, "temperature", nil) // Thinking-on forbids sampling knobs upstream-side
 	nb, _ = setTopLevelJSONValue(nb, "top_p", nil)
 	return nb, true
@@ -4770,23 +4740,27 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	// Standalone search sub-agent request (single-request search+summary): inject the summary instruction into the
 	// search request itself and/or rewrite its thinking, then the normal forward path takes over — the upstream
-	// searches and answers in one request and its response streams through untouched (no proxy-side synthesis).
+	// searches and answers in one request and its response streams through untouched (no proxy-side synthesis; only
+	// when a thinking rewrite turned thinking on for a client that never asked for it are the returning thinking
+	// blocks stripped, convertOff2Low-style, so that client keeps seeing a thinking-off response).
 	// Badge every marker hit ([Search] in the model column), even when no injection/rewrite applies.
 	if hasSearchSubagentMarker(body) {
 		f.searchMarker = true
 		if searchThinkLevel != "" {
-			effModel := targetModel
-			if effModel == "" {
-				effModel = origModel
-			}
 			thinkFrom := f.think
-			if nb, ok := rewriteSearchThinking(body, searchThinkLevel, effModel); ok {
+			if nb, ok := rewriteSearchThinking(body, searchThinkLevel); ok {
 				body = nb
 				f.searchThinkFrom = thinkFrom // Empty from renders as auto in the API column's [from->to] badge
 				f.searchThinkTo = searchThinkLevel
+				if searchThinkLevel != "off" && (thinkFrom == "" || thinkFrom == "off") {
+					// The client never asked for thinking (absent or explicitly off) but the rewrite turned it on:
+					// strip the returning thinking blocks (the convertOff2Low machinery) so the client stays unaware.
+					f.stripThinking.Store(true)
+				}
 			} else {
-				log.Printf("[searchsum] #%d thinking rewrite to %q abandoned (max_tokens too small or body unparsable); request kept as sent", f.id, searchThinkLevel)
+				log.Printf("[searchsum] #%d thinking rewrite to %q abandoned (body unparsable or unknown level); request kept as sent", f.id, searchThinkLevel)
 				searchThinkLevel = ""
+
 			}
 		}
 		if searchInjectLevel != "" {
