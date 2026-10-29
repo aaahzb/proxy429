@@ -7,6 +7,8 @@
 # Search: s1 routes via search_fallback (the smoke-sf route's own claudeSearchSummary=forceHigh overrides sf's forceMid
 # per field; sf's thinking=low still applies); s2 via enhance_search (legacy summary_*). Both must reach the mock exactly
 # once (single-request summary injection, no step1/step2) and stream its search answer back untouched.
+# Vars: the config resolves $SMOKE_KEY from the top-level vars section (search_fallback uses it; routes keep a
+# literal key) — a green run proves variable expansion works end to end on the real startup path.
 set -u
 cd "$(dirname "$0")/../.."
 CFG="$(pwd -W 2>/dev/null || pwd)/test/smoke/config.json"

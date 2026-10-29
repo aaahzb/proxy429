@@ -10,8 +10,9 @@
   "respect_retry_after": false,
   "log_request_detail": false,
   "recent_sample_window": 20,
+  "vars": { "SMOKE_KEY": "smoke" },
   "classifier_route": { "url": "http://127.0.0.1:9099/think", "classifier_thinking_cc": "off", "classifier_thinking_codex": "low" },
-  "search_fallback": { "url": "http://127.0.0.1:9099/search", "api": "smoke", "model": "searchmodel", "claudeSearchThinking": "low", "claudeSearchSummary": "forceMid" },
+  "search_fallback": { "url": "http://127.0.0.1:9099/search", "api": "$SMOKE_KEY", "model": "searchmodel", "claudeSearchThinking": "low", "claudeSearchSummary": "forceMid" },
   "routes": [
     { "pattern": "smoke-sf", "url": "http://127.0.0.1:9099/ok", "api": "smoke", "no_search": true, "claudeSearchSummary": "forceHigh" },
     { "pattern": "smoke-enh", "url": "http://127.0.0.1:9099/search", "api": "smoke", "enhance_search": { "summary_level": "high", "summary_thinking": true } }
