@@ -160,6 +160,8 @@ Both the forwarding channel and the management endpoints are **always localhost-
 ]
 ```
 
+Shared keys can be defined once in a top-level `"vars"` object and referenced from any string value as `$NAME` or `${NAME}` — `"vars": {"KIMI_KEY": "sk-..."}` plus `"api": "$KIMI_KEY"` in N routes means rotating the key edits one place. Resolution happens at load; the file keeps the references. An undefined reference refuses to load/save with the config path (e.g. `undefined variable "KIMI_KET" in routes[0].api`); a `$` not forming a reference (e.g. `$5`) stays literal.
+
 Matches in array order, first hit wins — a wide wildcard intercepts a narrow one, so more specific patterns go earlier (e.g. `*opus-4*` before `*opus*`), with the `*` catch-all last.
 
 **Capability fallbacks** (when a request needs a capability the hit upstream doesn't support, automatically reroute to the fallback upstream):

@@ -2822,7 +2822,13 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <td style="padding:6px 8px;vertical-align:top"><b>工具续轮历史缺可回放的签名思考块时怎么办</b>（仅 Responses 翻译口；真 Anthropic 对开着思考的这种历史报 400）：true = 按所请思考档位照发，真被 400 拒了自动关思考重试一次（思考块不剥离、随回传带签名让下轮历史自愈）；false = cc-switch 式直接关思考</td>
       <td style="padding:6px 8px;vertical-align:top"><b>不写 = true（先试模式）</b>。false 优先于 convertOff2Low 的历史兜底门；显式关思考的请求不受影响（convertOff2Low 的 low 升级照常）；fable-5/mythos-5 这种关不掉思考的模型仍直接报错；本就没打算思考的请求不空跑兜底</td>
       </tr>
-      <tr style="border-bottom:1px solid #333">
+            <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>vars</code></td>
+      <td style="padding:6px 8px;vertical-align:top">顶层</td>
+      <td style="padding:6px 8px;vertical-align:top">命名字符串变量：文件里任意字符串值可写 <code>$NAME</code> 或 <code>${NAME}</code> 引用（key、url 都行），换 key 只改 vars 一处</td>
+      <td style="padding:6px 8px;vertical-align:top">加载时解析、文件保留引用原文；引用未定义变量 = 加载/保存报错并指明位置（如 routes[0].api）；值必须是字符串（空串允许）；变量可再引用变量（单层）；$ 后不是合法名字（如 $5）原样保留</td>
+      </tr>
+<tr style="border-bottom:1px solid #333">
       <td style="padding:6px 8px;vertical-align:top"><code>multimodal_fallback</code></td>
       <td style="padding:6px 8px;vertical-align:top">顶层</td>
       <td style="padding:6px 8px;vertical-align:top">图片兜底上游</td>
@@ -2956,7 +2962,13 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <td style="padding:6px 8px;vertical-align:top"><b>What to do when a tool continuation's history has no replayable signed thinking block</b> (Responses translation port only; real Anthropic 400s on such histories with thinking on): true = send the requested thinking mode as-is, one automatic thinking-off retry if really rejected (blocks are NOT stripped — they ride the return carrying signatures, so next-turn history heals); false = cc-switch-style preemptive thinking-off</td>
       <td style="padding:6px 8px;vertical-align:top"><b>Unset = true (try-first mode)</b>. false wins over convertOff2Low's history door; explicit thinking-off requests are unaffected (convertOff2Low's low upgrade still applies); models that cannot disable thinking (fable-5/mythos-5) still error; requests that wouldn't think anyway don't waste the fallback round trip</td>
       </tr>
-      <tr style="border-bottom:1px solid #2a2a2a">
+            <tr style="border-bottom:1px solid #2a2a2a">
+      <td style="padding:6px 8px;vertical-align:top"><code>vars</code></td>
+      <td style="padding:6px 8px;vertical-align:top">Top level</td>
+      <td style="padding:6px 8px;vertical-align:top">Named string variables: any string value in the file can reference them as <code>$NAME</code> / <code>${NAME}</code> (api, url, anything) — rotating a key edits one place instead of N</td>
+      <td style="padding:6px 8px;vertical-align:top">Resolved at load, the file keeps the references; an undefined reference fails load/save with the config path (e.g. routes[0].api); values must be strings (empty allowed); vars may reference vars (one level); a $ not forming a reference (e.g. $5) stays literal</td>
+      </tr>
+<tr style="border-bottom:1px solid #2a2a2a">
       <td style="padding:6px 8px;vertical-align:top"><code>multimodal_fallback</code></td>
       <td style="padding:6px 8px;vertical-align:top">Top level</td>
       <td style="padding:6px 8px;vertical-align:top">Image fallback upstream</td>
