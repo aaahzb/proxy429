@@ -29,26 +29,27 @@ import (
 
 // Config is the proxy's configuration, mirroring config.json.
 type Config struct {
-	Listen                   string           `json:"listen"`
-	Upstream                 string           `json:"upstream"`
-	MaxRetries               int              `json:"max_retries"`
-	BaseDelaySec             float64          `json:"base_delay_s"`
-	MaxDelaySec              float64          `json:"max_delay_s"`
-	TotalBudgetSec           float64          `json:"total_budget_s"`
-	RetryStatusCodes         []int            `json:"retry_status_codes"`
-	RespectRetryAfter        bool             `json:"respect_retry_after"`
-	UpstreamHeaderTimeoutSec float64          `json:"upstream_header_timeout_s"` // Max seconds to wait for the upstream's first byte; on timeout the request is considered stuck and resent internally. 0 = default 70s
-	PingIntervalSec          float64          `json:"ping_interval_s"`           // Interval (seconds) for SSE ping keep-alives sent to the client during 429 retries; 0 = default 5s
-	LogRequestDetail         bool             `json:"log_request_detail"`
-	LogFile                  string           `json:"log_file"`                      // Log file path; when set, logs are also appended to this file so they can be viewed/copied without a console (e.g. RemoteApp)
-	RecentSampleWindow       int              `json:"recent_sample_window"`          // Window size for the status row's "last X" latency/throughput stats; 0 = default 20
-	Routes                   []RouteRule      `json:"routes"`                        // Model routing rules; empty = no routing, use the default upstream
-	ClassifierRoute          *ClassifierRoute `json:"classifier_route,omitempty"`    // Dedicated route for classifier requests; classifier hits are routed here regardless of the original model; empty = disabled
-	FastRoute                *FastRoute       `json:"fast_route,omitempty"`          // Dedicated route for fast-mode requests; non-classifier requests carrying "speed":"fast" are routed here; empty = disabled
-	MultimodalFallback       *MultimodalRoute `json:"multimodal_fallback,omitempty"` // Multimodal fallback route; requests containing images that hit a text_only model are rerouted here; empty = disabled
-	SearchFallback           *SearchRoute     `json:"search_fallback,omitempty"`     // Search fallback route; requests with search tools that hit a no_search upstream are rerouted here; empty = disabled
-	ConvertAllToStream       bool             `json:"convertAlltoStream"`            // Global stream conversion: when on, all non-streaming requests are sent upstream as streams, then rebuilt into a single non-streaming JSON response (transparent to the client; the web console shows live output/first-token/tok/s)
-	ResponsesListen          string           `json:"responses_listen"`              // OpenAI Responses API listener (e.g. 127.0.0.1:8081); empty = disabled. Translates Responses-protocol requests into Anthropic and feeds the main pipeline, for Codex CLI and similar tools. Starts/stops dynamically on save/reload
+	Listen                   string            `json:"listen"`
+	Upstream                 string            `json:"upstream"`
+	Vars                     map[string]string `json:"vars,omitempty"` // Named string variables: any string value in this file can reference them as $NAME / ${NAME}; resolved at load (the file keeps the references)
+	MaxRetries               int               `json:"max_retries"`
+	BaseDelaySec             float64           `json:"base_delay_s"`
+	MaxDelaySec              float64           `json:"max_delay_s"`
+	TotalBudgetSec           float64           `json:"total_budget_s"`
+	RetryStatusCodes         []int             `json:"retry_status_codes"`
+	RespectRetryAfter        bool              `json:"respect_retry_after"`
+	UpstreamHeaderTimeoutSec float64           `json:"upstream_header_timeout_s"` // Max seconds to wait for the upstream's first byte; on timeout the request is considered stuck and resent internally. 0 = default 70s
+	PingIntervalSec          float64           `json:"ping_interval_s"`           // Interval (seconds) for SSE ping keep-alives sent to the client during 429 retries; 0 = default 5s
+	LogRequestDetail         bool              `json:"log_request_detail"`
+	LogFile                  string            `json:"log_file"`                      // Log file path; when set, logs are also appended to this file so they can be viewed/copied without a console (e.g. RemoteApp)
+	RecentSampleWindow       int               `json:"recent_sample_window"`          // Window size for the status row's "last X" latency/throughput stats; 0 = default 20
+	Routes                   []RouteRule       `json:"routes"`                        // Model routing rules; empty = no routing, use the default upstream
+	ClassifierRoute          *ClassifierRoute  `json:"classifier_route,omitempty"`    // Dedicated route for classifier requests; classifier hits are routed here regardless of the original model; empty = disabled
+	FastRoute                *FastRoute        `json:"fast_route,omitempty"`          // Dedicated route for fast-mode requests; non-classifier requests carrying "speed":"fast" are routed here; empty = disabled
+	MultimodalFallback       *MultimodalRoute  `json:"multimodal_fallback,omitempty"` // Multimodal fallback route; requests containing images that hit a text_only model are rerouted here; empty = disabled
+	SearchFallback           *SearchRoute      `json:"search_fallback,omitempty"`     // Search fallback route; requests with search tools that hit a no_search upstream are rerouted here; empty = disabled
+	ConvertAllToStream       bool              `json:"convertAlltoStream"`            // Global stream conversion: when on, all non-streaming requests are sent upstream as streams, then rebuilt into a single non-streaming JSON response (transparent to the client; the web console shows live output/first-token/tok/s)
+	ResponsesListen          string            `json:"responses_listen"`              // OpenAI Responses API listener (e.g. 127.0.0.1:8081); empty = disabled. Translates Responses-protocol requests into Anthropic and feeds the main pipeline, for Codex CLI and similar tools. Starts/stops dynamically on save/reload
 
 	// AllowNoThinkBlock4Anthropic (Responses translation port only; nil/unset = true): a tool-continuation whose history has no
 	// replayable signed thinking block gets 400'd by real Anthropic when thinking is on. true (default) = send the requested thinking
@@ -211,6 +212,199 @@ func loadConfig(path string) (*Config, []string, error) {
 	return parseConfig(data)
 }
 
+// expandConfigVars resolves $NAME / ${NAME} references inside every JSON string value of the top-level config
+// object against the top-level "vars" object (whose own values expand too, one level — replacement text is never
+// re-scanned, so reference cycles are impossible). Object keys are never touched. A well-formed reference to an
+// undefined name fails with the config path; "vars" members must be strings.
+func expandConfigVars(top map[string]json.RawMessage) error {
+	final := map[string]string{}
+	if raw, ok := top["vars"]; ok {
+		base, err := varStringMap(raw)
+		if err != nil {
+			return err
+		}
+		if base != nil {
+			expanded, err := expandVarsInJSON(raw, "vars", func(name string) (string, bool) {
+				v, ok := base[name]
+				return v, ok
+			})
+			if err != nil {
+				return err
+			}
+			final, err = varStringMap(expanded) // Values already validated as strings; cannot fail
+			if err != nil {
+				return err
+			}
+		}
+	}
+	lookup := func(name string) (string, bool) {
+		v, ok := final[name]
+		return v, ok
+	}
+	return expandVarsInMap(top, "", lookup)
+}
+
+// varStringMap decodes a "vars" object into name -> value. Returns nil for an absent/null object; anything that
+// is not an object of strings is an error naming the offending member.
+func varStringMap(raw json.RawMessage) (map[string]string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &m); err != nil {
+		return nil, fmt.Errorf("vars must be an object of string values: %v", err)
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return nil, fmt.Errorf("vars.%s must be a string", k)
+		}
+		out[k] = s
+	}
+	return out, nil
+}
+
+// expandVarsInMap expands every value of m in place; path is the dotted/bracketed location prefix for errors.
+func expandVarsInMap(m map[string]json.RawMessage, path string, lookup func(string) (string, bool)) error {
+	for k, v := range m {
+		ev, err := expandVarsInJSON(v, joinConfigPath(path, k), lookup)
+		if err != nil {
+			return err
+		}
+		m[k] = ev
+	}
+	return nil
+}
+
+// joinConfigPath appends a key to a dotted/bracketed config path ("routes" -> "routes[0]" -> "routes[0].api").
+func joinConfigPath(path, key string) string {
+	if path == "" {
+		return key
+	}
+	return path + "." + key
+}
+
+// expandVarsInJSON expands references in every string value reachable from node (object values and array
+// elements). Non-string scalars pass through as their original bytes; containers holding them re-marshal with
+// each RawMessage embedded verbatim, so numeric text is never round-tripped.
+func expandVarsInJSON(node json.RawMessage, path string, lookup func(string) (string, bool)) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(node)
+	if len(trimmed) == 0 {
+		return node, nil
+	}
+	switch trimmed[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return node, nil
+		}
+		out, err := expandVarRefs(s, path, lookup)
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.Marshal(out)
+		return json.RawMessage(b), nil
+	case '{':
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(trimmed, &m); err != nil {
+			return node, nil
+		}
+		if err := expandVarsInMap(m, path, lookup); err != nil {
+			return nil, err
+		}
+		b, _ := json.Marshal(m)
+		return json.RawMessage(b), nil
+	case '[':
+		var a []json.RawMessage
+		if err := json.Unmarshal(trimmed, &a); err != nil {
+			return node, nil
+		}
+		for i, v := range a {
+			ev, err := expandVarsInJSON(v, fmt.Sprintf("%s[%d]", path, i), lookup)
+			if err != nil {
+				return nil, err
+			}
+			a[i] = ev
+		}
+		b, _ := json.Marshal(a)
+		return json.RawMessage(b), nil
+	default:
+		return node, nil
+	}
+}
+
+// expandVarRefs replaces $NAME and ${NAME} references using lookup. A name is ASCII letters/digits/underscore
+// starting with a letter or underscore. '$' not introducing a well-formed reference stays literal; a well-formed
+// reference to an undefined name is an error naming the config path.
+func expandVarRefs(s, path string, lookup func(string) (string, bool)) (string, error) {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] != '$' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		var name string
+		var n int // length of the whole "$name" token consumed
+		if s[i+1] == '{' {
+			rest := s[i+2:]
+			end := strings.IndexByte(rest, '}')
+			if end < 0 {
+				b.WriteByte(s[i])
+				i++
+				continue // Unclosed brace: literal
+			}
+			if !isVarName(rest[:end]) {
+				b.WriteByte(s[i])
+				i++
+				continue // Malformed braced name: literal
+			}
+			name, n = rest[:end], end+3
+		} else {
+			j := i + 1
+			for j < len(s) && isVarNameChar(s[j]) {
+				j++
+			}
+			if j == i+1 || !isVarNameStart(s[i+1]) {
+				b.WriteByte(s[i])
+				i++
+				continue // Not a well-formed reference: literal
+			}
+			name, n = s[i+1:j], j-i
+		}
+		v, ok := lookup(name)
+		if !ok {
+			return "", fmt.Errorf("undefined variable %q in %s", name, path)
+		}
+		b.WriteString(v)
+		i += n
+	}
+	return b.String(), nil
+}
+
+func isVarNameStart(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isVarNameChar(c byte) bool {
+	return isVarNameStart(c) || (c >= '0' && c <= '9')
+}
+
+func isVarName(s string) bool {
+	if s == "" || !isVarNameStart(s[0]) {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if !isVarNameChar(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 // removedConfigKeys lists top-level config keys removed in this version, each with its migration hint. A config
 // containing them still loads and runs (the removed keys stay inert — their old behavior is NOT emulated); they surface
 // as warnings (startup log lines naming the key, red tray icon; the console Docs describe the migration). Only the web
@@ -246,8 +440,17 @@ func parseConfig(data []byte) (*Config, []string, error) {
 			warnings = append(warnings, rk.key)
 		}
 	}
+	// Resolve $VAR references before struct decoding: the in-memory Config carries final values while the file
+	// (and the web console, which edits raw text) keeps the references verbatim.
+	if err := expandConfigVars(top); err != nil {
+		return nil, nil, err
+	}
+	full, err := json.Marshal(top)
+	if err != nil {
+		return nil, nil, err
+	}
 	var c Config
-	if err := json.Unmarshal(data, &c); err != nil {
+	if err := json.Unmarshal(full, &c); err != nil {
 		return nil, nil, err
 	}
 	if err := validateConfigEnums(&c); err != nil {

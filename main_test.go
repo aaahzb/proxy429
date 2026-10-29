@@ -1397,6 +1397,102 @@ func TestLoadConfigRemovedKeys(t *testing.T) {
 // TestLoadConfigEnumValidation locks the new enums: classifier_route.classifier_thinking accepts only ""/"off"/"low",
 // and convertOff2Low on all four route kinds (routes[]/fast_route/multimodal_fallback/search_fallback) accepts
 // only ""/"translate"/"all" — anything else fails at load instead of silently degrading to off.
+// TestParseConfigVars locks the config vars feature: a top-level "vars" object defines named strings that any
+// string value in the file can reference as $NAME or ${NAME}. Resolution happens at load inside parseConfig;
+// a well-formed reference to an undefined name fails with the config path; $ not introducing a well-formed
+// reference stays literal; vars values must be strings and may reference other vars (one level).
+func TestParseConfigVars(t *testing.T) {
+	mustParse := func(t *testing.T, body string) *Config {
+		t.Helper()
+		c, _, err := parseConfig([]byte(body))
+		if err != nil {
+			t.Fatalf("parseConfig: %v", err)
+		}
+		return c
+	}
+
+	t.Run("basic braced and url", func(t *testing.T) {
+		c := mustParse(t, `{"vars": {"KIMI_KEY": "sk-real", "KIMI_BASE": "https://api.moonshot.cn"},
+			"routes": [{"pattern": "kimi*", "url": "$KIMI_BASE", "api": "${KIMI_KEY}"}]}`)
+		if got := c.Routes[0].API; got != "sk-real" {
+			t.Errorf("routes[0].api = %q, want sk-real", got)
+		}
+		if got := c.Routes[0].URL; got != "https://api.moonshot.cn" {
+			t.Errorf("routes[0].url = %q, want https://api.moonshot.cn", got)
+		}
+	})
+
+	t.Run("shared reference and nesting", func(t *testing.T) {
+		c := mustParse(t, `{"vars": {"A": "$B-x", "B": "sk", "K": "smoke"},
+			"search_fallback": {"url": "http://h", "api": "$K"},
+			"routes": [{"pattern": "a", "url": "http://h", "api": "$A"},
+				{"pattern": "b", "url": "http://h", "api": "$K"}]}`)
+		if got := c.Routes[0].API; got != "sk-x" {
+			t.Errorf("routes[0].api = %q, want sk-x (var referencing a var)", got)
+		}
+		if got := c.Routes[1].API; got != "smoke" {
+			t.Errorf("routes[1].api = %q, want smoke", got)
+		}
+		if c.SearchFallback == nil || c.SearchFallback.API != "smoke" {
+			t.Errorf("search_fallback.api = %v, want smoke", c.SearchFallback)
+		}
+		if got := c.Vars["A"]; got != "sk-x" {
+			t.Errorf("c.Vars[A] = %q, want sk-x", got)
+		}
+	})
+
+	t.Run("undefined variable names the path", func(t *testing.T) {
+		_, _, err := parseConfig([]byte(`{"routes": [{"pattern": "a", "url": "http://h", "api": "$KIMI_KET"}]}`))
+		if err == nil {
+			t.Fatal("want error for undefined variable")
+		}
+		for _, sub := range []string{`undefined variable "KIMI_KET"`, "routes[0].api"} {
+			if !strings.Contains(err.Error(), sub) {
+				t.Errorf("error %q missing %q", err.Error(), sub)
+			}
+		}
+	})
+
+	t.Run("undefined inside vars names vars path", func(t *testing.T) {
+		_, _, err := parseConfig([]byte(`{"vars": {"A": "$NOPE"}, "routes": []}`))
+		if err == nil || !strings.Contains(err.Error(), "vars.A") {
+			t.Fatalf("want error naming vars.A, got %v", err)
+		}
+	})
+
+	t.Run("non-string var value", func(t *testing.T) {
+		_, _, err := parseConfig([]byte(`{"vars": {"KIMI_KEY": 123}, "routes": []}`))
+		if err == nil || !strings.Contains(err.Error(), "vars.KIMI_KEY must be a string") {
+			t.Fatalf("want vars.KIMI_KEY must be a string, got %v", err)
+		}
+	})
+
+	t.Run("literal dollar preserved", func(t *testing.T) {
+		c := mustParse(t, `{"vars": {}, "upstream": "http://u/$5/x$",
+			"routes": [{"pattern": "a", "url": "http://h?a=$ x", "api": "sk"}]}`)
+		if got := c.Upstream; got != "http://u/$5/x$" {
+			t.Errorf("upstream = %q, want literal $ preserved", got)
+		}
+		if got := c.Routes[0].URL; got != "http://h?a=$ x" {
+			t.Errorf("routes[0].url = %q, want literal $ preserved", got)
+		}
+	})
+
+	t.Run("empty var value", func(t *testing.T) {
+		c := mustParse(t, `{"vars": {"E": ""}, "routes": [{"pattern": "a", "url": "http://h", "api": "$E"}]}`)
+		if got := c.Routes[0].API; got != "" {
+			t.Errorf("routes[0].api = %q, want empty", got)
+		}
+	})
+
+	t.Run("vars absent leaves values alone", func(t *testing.T) {
+		c := mustParse(t, `{"upstream": "http://u", "routes": [{"pattern": "a", "url": "http://h", "api": "sk-plain"}]}`)
+		if got := c.Routes[0].API; got != "sk-plain" {
+			t.Errorf("routes[0].api = %q, want sk-plain", got)
+		}
+	})
+}
+
 func TestLoadConfigEnumValidation(t *testing.T) {
 	writeCfg := func(t *testing.T, body string) string {
 		p := filepath.Join(t.TempDir(), "config.json")
