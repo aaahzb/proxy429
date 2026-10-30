@@ -58,6 +58,16 @@ Everything downstream is untouched by design: the handler route loop
 checks, enum validation, cache anchors (`convAnchor = "route:" + rr.Pattern`), and all
 log/warning messages keep operating on plain string patterns.
 
+### Console Codex menu (one non-Go consumer, found during planning)
+
+The Config tab derives the Codex `/model` menu in browser JavaScript from the editor's
+raw JSON (`deriveCodexModels`, logview.go:~2065), independent of `parseConfig`. It
+skips non-string patterns, so without a change array-pattern routes would silently
+vanish from the menu. The JS must flatten arrays exactly like the Go desugar: each
+array member contributes its own representative name, in array order (duplicates
+deduped by name as today). The reserved-name warning in `genCodexCmds`
+(logview.go:~2143) likewise checks every array member and names the offending member.
+
 ### Consequences of the copy semantics (intended, not accidental)
 
 - Route priority: an array entry occupies its original slot; its copies match in array
@@ -119,7 +129,8 @@ test/smoke/exe-watchdog.sh`; user accepts the new exe and pushes.
 
 - `docs/usage.md`: array form documented next to the existing pattern/wildcard text.
 - `docs/DESIGN.md`: one bullet describing the desugar semantics.
-- `logview.go`: console quick-reference `pattern` row (zh + en) gains the array form.
+- `logview.go`: console routing-help paragraphs (the "routes match in array order"
+  pair, zh + en) gain the array form; the Codex menu JS flattens arrays (above).
 - `config.example.json`: unchanged (single-pattern entries stay the norm; the docs
   carry the array demo).
 
