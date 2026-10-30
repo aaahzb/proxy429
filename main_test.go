@@ -1493,6 +1493,132 @@ func TestParseConfigVars(t *testing.T) {
 	})
 }
 
+func TestParseConfigPatternArray(t *testing.T) {
+	t.Run("array expands in place preserving order and fields", func(t *testing.T) {
+		data := []byte(`{
+				"upstream": "http://default",
+				"routes": [
+						{"pattern": "pre*", "url": "http://pre"},
+						{"pattern": ["*fable*", "*opus*"], "url": "http://kimi", "api": "k", "model": "k3"},
+						{"pattern": "post*", "url": "http://post"}
+				]
+		}`)
+		c, _, err := parseConfig(data)
+		if err != nil {
+			t.Fatalf("parseConfig: %v", err)
+		}
+		if len(c.Routes) != 4 {
+			t.Fatalf("want 4 routes after expansion, got %d", len(c.Routes))
+		}
+		want := []string{"pre*", "*fable*", "*opus*", "post*"}
+		for i, p := range want {
+			if c.Routes[i].Pattern != p {
+				t.Errorf("route #%d pattern = %q, want %q", i+1, c.Routes[i].Pattern, p)
+			}
+		}
+		for _, i := range []int{1, 2} {
+			if c.Routes[i].URL != "http://kimi" || c.Routes[i].API != "k" || c.Routes[i].Model != "k3" {
+				t.Errorf("copy %d lost fields: %+v", i, c.Routes[i])
+			}
+		}
+	})
+
+	t.Run("both patterns match the same upstream", func(t *testing.T) {
+		data := []byte(`{
+				"upstream": "http://default",
+				"routes": [{"pattern": ["*fable*", "*opus*"], "url": "http://kimi", "api": "k"}]
+		}`)
+		c, _, err := parseConfig(data)
+		if err != nil {
+			t.Fatalf("parseConfig: %v", err)
+		}
+		for _, model := range []string{"claude-fable-5", "claude-opus-4-8"} {
+			rr := matchRouteRule(c, model)
+			if rr == nil || rr.URL != "http://kimi" {
+				t.Errorf("matchRouteRule(%q) = %+v, want http://kimi route", model, rr)
+			}
+		}
+		if rr := matchRouteRule(c, "gpt-5"); rr != nil {
+			t.Errorf("unrelated model unexpectedly matched: %+v", rr)
+		}
+	})
+
+	t.Run("empty array rejected", func(t *testing.T) {
+		data := []byte(`{"upstream": "http://d", "routes": [{"pattern": [], "url": "http://x"}]}`)
+		_, _, err := parseConfig(data)
+		if err == nil || !strings.Contains(err.Error(), "route #1 pattern array is empty") {
+			t.Fatalf("want empty-array error, got %v", err)
+		}
+	})
+
+	t.Run("non-string member rejected", func(t *testing.T) {
+		for _, bad := range []string{`["a", 5]`, `["a", null]`, `["a", ["b"]]`, `["a", true]`} {
+			data := []byte(`{"upstream": "http://d", "routes": [{"pattern": ` + bad + `, "url": "http://x"}]}`)
+			_, _, err := parseConfig(data)
+			if err == nil || !strings.Contains(err.Error(), "route #1 pattern must be a string or an array of strings") {
+				t.Fatalf("pattern %s: want member-type error, got %v", bad, err)
+			}
+		}
+	})
+
+	t.Run("single missing and null patterns untouched", func(t *testing.T) {
+		data := []byte(`{
+				"upstream": "http://d",
+				"routes": [{"pattern": "a", "url": "http://x"}, {"url": "http://y"}, {"pattern": null, "url": "http://z"}]
+		}`)
+		c, _, err := parseConfig(data)
+		if err != nil {
+			t.Fatalf("parseConfig: %v", err)
+		}
+		if len(c.Routes) != 3 || c.Routes[0].Pattern != "a" || c.Routes[1].Pattern != "" || c.Routes[2].Pattern != "" {
+			t.Fatalf("unexpected routes: %+v", c.Routes)
+		}
+	})
+
+	t.Run("catch-all inside array counts", func(t *testing.T) {
+		data := []byte(`{"routes": [{"pattern": ["a", "*"], "url": "http://x"}]}`)
+		c, _, err := parseConfig(data)
+		if err != nil {
+			t.Fatalf("parseConfig: %v", err)
+		}
+		if !hasCatchAllRoute(c.Routes) {
+			t.Fatal("array member * should satisfy hasCatchAllRoute")
+		}
+	})
+
+	t.Run("reserved name disables only that copy", func(t *testing.T) {
+		data := []byte(`{"upstream": "http://d", "routes": [{"pattern": ["Fallback", "*opus*"], "url": "http://kimi"}]}`)
+		c, _, err := parseConfig(data)
+		if err != nil {
+			t.Fatalf("parseConfig: %v", err)
+		}
+		if len(c.Routes) != 2 {
+			t.Fatalf("want 2 copies, got %d", len(c.Routes))
+		}
+		if rr := matchRouteRule(c, "Fallback"); rr != nil {
+			t.Errorf("reserved copy should be skipped, got %+v", rr)
+		}
+		if rr := matchRouteRule(c, "claude-opus-4"); rr == nil || rr.URL != "http://kimi" {
+			t.Errorf("sibling copy should still match, got %+v", rr)
+		}
+	})
+
+	t.Run("vars inside pattern array resolved before expansion", func(t *testing.T) {
+		data := []byte(`{
+				"vars": {"P1": "*fable*"},
+				"upstream": "http://d",
+				"routes": [{"pattern": ["$P1", "*opus*"], "url": "http://kimi"}]
+		}`)
+		c, _, err := parseConfig(data)
+		if err != nil {
+			t.Fatalf("parseConfig: %v", err)
+		}
+		if len(c.Routes) != 2 || c.Routes[0].Pattern != "*fable*" || c.Routes[1].Pattern != "*opus*" {
+			t.Fatalf("vars not resolved in pattern array: %+v", c.Routes)
+		}
+	})
+}
+
 func TestLoadConfigEnumValidation(t *testing.T) {
 	writeCfg := func(t *testing.T, body string) string {
 		p := filepath.Join(t.TempDir(), "config.json")

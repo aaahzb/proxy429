@@ -405,6 +405,77 @@ func isVarName(s string) bool {
 	return true
 }
 
+// expandRoutePatterns desugars routes[] entries whose pattern is an array into N adjacent copies (one pattern per
+// copy, every other field identical): an array entry is exactly equivalent to hand-written duplicate routes, so all
+// matchers, cache anchors, and validations keep seeing plain string patterns. Runs on the raw JSON tree after vars
+// expansion, so $VAR references inside pattern arrays are already resolved. Single-string, missing, and null patterns
+// pass through untouched; an empty array or a non-string member is an error naming the route (1-based).
+func expandRoutePatterns(top map[string]json.RawMessage) error {
+	raw, ok := top["routes"]
+	if !ok {
+		return nil
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil // Not an array: leave it for the final struct decode to report
+	}
+	out := make([]json.RawMessage, 0, len(entries))
+	for i, entry := range entries {
+		trimmed := bytes.TrimSpace(entry)
+		if len(trimmed) == 0 || trimmed[0] != '{' {
+			out = append(out, entry)
+			continue
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(trimmed, &m); err != nil {
+			out = append(out, entry)
+			continue
+		}
+		pr, ok := m["pattern"]
+		if !ok {
+			out = append(out, entry)
+			continue
+		}
+		pr = bytes.TrimSpace(pr)
+		if len(pr) == 0 || pr[0] != '[' {
+			out = append(out, entry) // String / null / anything non-array: keep today's behavior
+			continue
+		}
+		var pats []json.RawMessage
+		if err := json.Unmarshal(pr, &pats); err != nil {
+			out = append(out, entry)
+			continue
+		}
+		if len(pats) == 0 {
+			return fmt.Errorf("route #%d pattern array is empty", i+1)
+		}
+		for _, p := range pats {
+			pt := bytes.TrimSpace(p)
+			// First-byte check instead of unmarshaling into a string: Go's unmarshal of null into a string
+			// succeeds silently, which would let [null] through.
+			if len(pt) == 0 || pt[0] != '"' {
+				return fmt.Errorf("route #%d pattern must be a string or an array of strings", i+1)
+			}
+			cp := make(map[string]json.RawMessage, len(m))
+			for k, v := range m {
+				cp[k] = v
+			}
+			cp["pattern"] = p
+			b, err := json.Marshal(cp)
+			if err != nil {
+				return err
+			}
+			out = append(out, b)
+		}
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return err
+	}
+	top["routes"] = b
+	return nil
+}
+
 // removedConfigKeys lists top-level config keys removed in this version, each with its migration hint. A config
 // containing them still loads and runs (the removed keys stay inert — their old behavior is NOT emulated); they surface
 // as warnings (startup log lines naming the key, red tray icon; the console Docs describe the migration). Only the web
@@ -443,6 +514,9 @@ func parseConfig(data []byte) (*Config, []string, error) {
 	// Resolve $VAR references before struct decoding: the in-memory Config carries final values while the file
 	// (and the web console, which edits raw text) keeps the references verbatim.
 	if err := expandConfigVars(top); err != nil {
+		return nil, nil, err
+	}
+	if err := expandRoutePatterns(top); err != nil {
 		return nil, nil, err
 	}
 	full, err := json.Marshal(top)
