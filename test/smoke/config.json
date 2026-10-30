@@ -14,7 +14,7 @@
   "classifier_route": { "url": "http://127.0.0.1:9099/think", "classifier_thinking_cc": "off", "classifier_thinking_codex": "low" },
   "search_fallback": { "url": "http://127.0.0.1:9099/search", "api": "$SMOKE_KEY", "model": "searchmodel", "claudeSearchThinking": "low", "claudeSearchSummary": "forceMid" },
   "routes": [
-    { "pattern": "smoke-sf", "url": "http://127.0.0.1:9099/ok", "api": "smoke", "no_search": true, "claudeSearchSummary": "forceHigh" },
+    { "pattern": ["smoke-sf", "smoke-sf-alt"], "url": "http://127.0.0.1:9099/ok", "api": "smoke", "no_search": true, "claudeSearchSummary": "forceHigh" },
     { "pattern": "smoke-enh", "url": "http://127.0.0.1:9099/search", "api": "smoke", "enhance_search": { "summary_level": "high", "summary_thinking": true } }
   ]
 }

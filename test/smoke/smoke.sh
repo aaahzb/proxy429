@@ -9,6 +9,8 @@
 # once (single-request summary injection, no step1/step2) and stream its search answer back untouched.
 # Vars: the config resolves $SMOKE_KEY from the top-level vars section (search_fallback uses it; routes keep a
 # literal key) — a green run proves variable expansion works end to end on the real startup path.
+# Pattern arrays: smoke-sf is written as "pattern": ["smoke-sf", "smoke-sf-alt"] (desugared into two route copies at
+# load) — a green run proves array expansion works end to end alongside vars.
 set -u
 cd "$(dirname "$0")/../.."
 CFG="$(pwd -W 2>/dev/null || pwd)/test/smoke/config.json"
