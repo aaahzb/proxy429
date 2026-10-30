@@ -164,6 +164,8 @@ Shared keys can be defined once in a top-level `"vars"` object and referenced fr
 
 Matches in array order, first hit wins — a wide wildcard intercepts a narrow one, so more specific patterns go earlier (e.g. `*opus-4*` before `*opus*`), with the `*` catch-all last.
 
+`pattern` also accepts an array of patterns (OR): `{"pattern": ["*fable*", "*opus*"], ...}` is exactly equivalent to writing the same route twice, once per pattern — the copies keep the entry's position, match in array order, and share every other field. A `*` member counts as a catch-all; reserved names (`Fallback`, `fast_route`) disable just that member; an empty array or a non-string member fails load (and the console save probe) with `route #N ...`.
+
 **Capability fallbacks** (when a request needs a capability the hit upstream doesn't support, automatically reroute to the fallback upstream):
 
 - `text_only: true` — the model is text-only; requests **carrying an image** reroute to `multimodal_fallback` (unconfigured = pass through to the original model).

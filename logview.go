@@ -2066,12 +2066,16 @@ function deriveCodexModels(){
   try{ c = JSON.parse(document.getElementById('cfg').value); }catch(e){ return null; }
   const out = [];
   for(const r of (c.routes || [])){
-    if(!r || typeof r.pattern !== 'string' || !r.pattern) continue;
-    if(r.pattern === 'Fallback' || r.pattern === 'fast_route') continue; // 保留名（* 兜底 / fast 通道在菜单里的名字）：全字撞名的路由不生效也不进菜单
-    const m = (typeof r.model === 'string') ? r.model.trim() : '';
-    const name = (r.pattern === '*') ? 'Fallback' : ((m && matchPat(r.pattern, m)) ? m : (r.pattern.replace(/\*/g, '') || m));
-    // 名字要过服务端 slug 白名单（烤进脚本单引号串 + URL query 都不能有特殊字符）：不合规的跳过
-    if(name && /^[A-Za-z0-9._*/:+-]+$/.test(name) && !out.some(o => o.name === name)) out.push({name: name, src: r.pattern});
+    if(!r) continue;
+    // pattern 可为数组（OR，等价于复制多份路由）：每个成员各出一个代表名，顺序与服务端展开一致
+    for(const p of (Array.isArray(r.pattern) ? r.pattern : [r.pattern])){
+      if(typeof p !== 'string' || !p) continue;
+      if(p === 'Fallback' || p === 'fast_route') continue; // 保留名（* 兜底 / fast 通道在菜单里的名字）：全字撞名的路由不生效也不进菜单
+      const m = (typeof r.model === 'string') ? r.model.trim() : '';
+      const name = (p === '*') ? 'Fallback' : ((m && matchPat(p, m)) ? m : (p.replace(/\*/g, '') || m));
+      // 名字要过服务端 slug 白名单（烤进脚本单引号串 + URL query 都不能有特殊字符）：不合规的跳过
+      if(name && /^[A-Za-z0-9._*/:+-]+$/.test(name) && !out.some(o => o.name === name)) out.push({name: name, src: p});
+    }
   }
   // fast_route 也进菜单：条目名就是字面名 "fast_route"（翻译层认这个名字注入 speed:"fast" 走 fast 通道）；
   // 没配 model 不列——fast 分支要把 model 改写成 fast_route.model 发给上游
@@ -2139,9 +2143,16 @@ function genCodexCmds(){
   document.getElementById('codexMsg').textContent = '';
   setCodexUiEnabled(true);
   // 保留名检查：pattern 全字撞 "Fallback"/"fast_route" 的路由不生效（服务端路由时直接跳过），点名提醒改名
-  const reservedHit = (c.routes || []).find(r => r && (r.pattern === 'Fallback' || r.pattern === 'fast_route'));
-  if(reservedHit){
-    document.getElementById('codexMsg').innerHTML = '<span class="err">⚠ pattern 不允许全字叫 "' + reservedHit.pattern + '"（Codex 菜单的保留名：* 兜底路由=Fallback、fast 通道=fast_route），撞名的路由不生效，请改名</span>';
+  let reservedName = '';
+  for(const r of (c.routes || [])){
+    if(!r) continue;
+    for(const p of (Array.isArray(r.pattern) ? r.pattern : [r.pattern])){
+      if(p === 'Fallback' || p === 'fast_route'){ reservedName = p; break; }
+    }
+    if(reservedName) break;
+  }
+  if(reservedName){
+    document.getElementById('codexMsg').innerHTML = '<span class="err">⚠ pattern 不允许全字叫 "' + reservedName + '"（Codex 菜单的保留名：* 兜底路由=Fallback、fast 通道=fast_route），撞名的路由不生效，请改名</span>';
   }
   const derived = deriveCodexModels();
   if(derived !== null && derived.length &&
@@ -2842,7 +2853,7 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       </tr>
       </table>
       <h3>pattern 顺序</h3>
-      <p>routes 按数组顺序匹配，第一个命中的生效，无"更具体优先"排序。宽通配会截胡窄通配--<code>*opus*</code> 写在 <code>*opus-4*</code> 前面时，<code>claude-opus-4-8</code> 先命中 <code>*opus*</code>，<code>*opus-4*</code> 永不触发；要让更具体的 pattern 生效，写在前面。</p>
+      <p>routes 按数组顺序匹配，第一个命中的生效，无"更具体优先"排序。宽通配会截胡窄通配--<code>*opus*</code> 写在 <code>*opus-4*</code> 前面时，<code>claude-opus-4-8</code> 先命中 <code>*opus*</code>，<code>*opus-4*</code> 永不触发；要让更具体的 pattern 生效，写在前面。另外 <code>pattern</code> 可以写成数组表示"或"：<code>"pattern": ["*fable*", "*opus*"]</code> 等价于把同一条路由复制多份、每份一个 pattern（其余字段共享，位置与数组顺序即匹配顺序）；数组成员里的 <code>*</code> 同样算兜底，保留名只废掉对应那一项；空数组或非字符串成员会在加载/保存时报错。</p>
       <h3>图片多模态</h3>
       <p>route 标了 <code>text_only</code> 且请求含图片时触发兜底。route 本身支持图片（未标 text_only）则直接走，不触发。</p>
       <ul>
@@ -2983,7 +2994,7 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       </tbody>
       </table>
       <h3>Pattern order</h3>
-      <p>routes match in array order — the first hit wins; there is no "more specific first" sorting. A wide wildcard can hijack a narrow one: with <code>*opus*</code> before <code>*opus-4*</code>, <code>claude-opus-4-8</code> hits <code>*opus*</code> first and <code>*opus-4*</code> never fires; put more specific patterns earlier.</p>
+      <p>routes match in array order — the first hit wins; there is no "more specific first" sorting. A wide wildcard can hijack a narrow one: with <code>*opus*</code> before <code>*opus-4*</code>, <code>claude-opus-4-8</code> hits <code>*opus*</code> first and <code>*opus-4*</code> never fires; put more specific patterns earlier. <code>pattern</code> also accepts an array (OR): <code>"pattern": ["*fable*", "*opus*"]</code> is exactly equivalent to duplicating the route once per pattern (other fields shared; the entry position and array order are the match order). A <code>*</code> member counts as a catch-all; a reserved name disables only that member; an empty array or a non-string member fails load/save.</p>
       <h3>Image multimodality</h3>
       <p>The fallback triggers when a route is marked <code>text_only</code> and the request contains images. A route that supports images (not marked text_only) is used directly without triggering it.</p>
       <li>With multimodal_fallback set: go to mf (normal multimodal fallback).</li>
@@ -3268,7 +3279,7 @@ var enHTMLRepl = [][2]string{
 	{`(isArr?' 项':' 键')`, `(isArr?' items':' keys')`},
 	{`'<div style="color:#9a9a9a;margin-bottom:2px">流 #'`, `'<div style="color:#9a9a9a;margin-bottom:2px">Stream #'`},
 	{`>配置 JSON 暂无法解析，命令保持上次有效内容</span>`, `>Config JSON is temporarily unparseable; commands keep the last valid content</span>`},
-	{`⚠ pattern 不允许全字叫 "' + reservedHit.pattern + '"（Codex 菜单的保留名：* 兜底路由=Fallback、fast 通道=fast_route），撞名的路由不生效，请改名`, `⚠ A pattern must not be exactly "' + reservedHit.pattern + '" (reserved names in the Codex menu: * catch-all = Fallback, fast lane = fast_route) — a colliding route does not take effect; please rename it`},
+	{`⚠ pattern 不允许全字叫 "' + reservedName + '"（Codex 菜单的保留名：* 兜底路由=Fallback、fast 通道=fast_route），撞名的路由不生效，请改名`, `⚠ A pattern must not be exactly "' + reservedName + '" (reserved names in the Codex menu: * catch-all = Fallback, fast lane = fast_route) — a colliding route does not take effect; please rename it`},
 	{`已添加并保存 responses_listen（端口可在上方 JSON 改），监听口已随保存启动，现在就能用下面的命令`, `responses_listen added & saved (port editable in the JSON above); the listener started on save — the commands below are ready to use`},
 	{`找不到插入位置，请手动在配置 JSON 里加一行 "responses_listen": "127.0.0.1:8081",`, `Insertion point not found; please add a line "responses_listen": "127.0.0.1:8081", to the config JSON manually`},
 	{`'（文件不存在，保存将创建）'`, `'(file does not exist; saving will create it)'`},
