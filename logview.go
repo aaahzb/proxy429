@@ -844,6 +844,8 @@ func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 	// While a same-key in-flight stream is streaming (stage=3 forwarding), that key's cache was actually just refreshed by the upstream — the previous finished row
 	// freezes showing the old anchor's age at the moment the refresh happened (the in-flight stream's start), like [4:32]; the new anchor officially takes effect
 	// once that in-flight stream finishes archiving. With multiple concurrent same-key streaming streams, the earliest-started one wins (the first refresh moment).
+	// Exception: an in-flight stream that started BEFORE the newest finished row (concurrent same-key streams) does not freeze the row —
+	// the finished row is already the newer refresh, so plain counting age shows (freezing would print a negative bracket like [-9:00]).
 	streaming := make(map[string]time.Time)
 	for _, f := range flights.snapshot() {
 		if f.stage.Load() == 3 {
@@ -869,7 +871,7 @@ func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 		ff := finished[i]
 		cacheAge := "-"
 		if ff.convKey != "" && latest[ff.convKey] == i {
-			if ts, ok := streaming[ff.convKey]; ok {
+			if ts, ok := streaming[ff.convKey]; ok && ts.After(ff.start) {
 				cacheAge = "[" + fmtCacheAge(ts.Sub(ff.start)) + "]"
 			} else {
 				cacheAge = fmtCacheAge(now.Sub(ff.start))

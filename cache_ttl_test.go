@@ -172,6 +172,47 @@ func TestRecentFlightsCacheRefreshed(t *testing.T) {
 	}
 }
 
+// TestRecentFlightsCacheAgeNoNegative covers concurrent same-key streams: an in-flight stream that started BEFORE the
+// key's newest finished row must not freeze the cache age (the finished row is already the newer cache refresh) — the
+// frozen bracket used to go negative (e.g. [-9:00]) because it subtracted the newer anchor's start from the older
+// in-flight start. The row shows the plain counting age instead.
+func TestRecentFlightsCacheAgeNoNegative(t *testing.T) {
+	resetStats()
+	oldFinished := finished
+	defer func() { finished = oldFinished }()
+
+	t0 := time.Now()
+	finished = []finishedFlight{{id: 1, convKey: "s1|route:a", start: t0.Add(-1 * time.Minute)}}
+	// An older same-key stream is still forwarding (started 10 minutes ago, long response).
+	f := &flight{id: 93, convID: "s1", convAnchor: "route:a", start: t0.Add(-10 * time.Minute)}
+	f.stage.Store(3)
+	flights.register(f)
+	defer flights.unregister(93)
+
+	req := httptest.NewRequest("GET", "/__recentflights", nil)
+	req.RemoteAddr = "127.0.0.1:1"
+	rec := httptest.NewRecorder()
+	recentFlightsHandler(rec, req)
+	var d struct {
+		List []struct {
+			CacheAge string `json:"cacheAge"`
+		} `json:"list"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatalf("响应非 JSON: %v", err)
+	}
+	if len(d.List) != 1 {
+		t.Fatalf("期望 1 行，实际 %d", len(d.List))
+	}
+	got := d.List[0].CacheAge
+	if strings.Contains(got, "-") || strings.Contains(got, "[") {
+		t.Errorf("在途流早于锚行开始时不应冻结（更不能为负），实际 %q", got)
+	}
+	if !strings.Contains(got, ":") {
+		t.Errorf("应显示实时年龄（约 1:0x），实际 %q", got)
+	}
+}
+
 // TestTrimFinishedLocked verifies finished-stream trimming: the eviction window is the oldest len-cap rows; within the window,
 // rows that are "the newest of their anchor key and still inside the protection window (start + defaultCacheTTL)" are protected from eviction (no compensating extension; row count may exceed cap);
 // rows past the window, rows superseded by a newer same-key row, and keyless rows are evicted FIFO as usual.
