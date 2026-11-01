@@ -1493,7 +1493,70 @@ func TestParseConfigVars(t *testing.T) {
 	})
 }
 
+// TestForwardNoStopBadge: a 200 SSE stream that ends without a terminal event (message_stop on the Anthropic port)
+// sets f.noStop — the web status column shows a red [无stop] badge as direct evidence of an upstream-side cutoff.
+// Complete streams, non-SSE JSON responses, and client disconnects (cancelled upstream request context = the 499
+// scenario) must NOT set it.
+func TestForwardNoStopBadge(t *testing.T) {
+	resetStats()
+	sseHead := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"output_tokens\":1}}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n"
+	sseStop := "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+
+	run := func(body, contentType string, cancel bool) *flight {
+		f := &flight{id: flights.nextID.Add(1), start: time.Now()}
+		req := httptest.NewRequest("POST", "http://upstream.test/v1/messages", nil)
+		if cancel {
+			ctx, stop := context.WithCancel(req.Context())
+			stop()
+			req = req.WithContext(ctx)
+		}
+		resp := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{contentType}}, Body: io.NopCloser(strings.NewReader(body)), Request: req}
+		rec := httptest.NewRecorder()
+		forward(rec, resp, nil, bufio.NewReader(resp.Body), f, false)
+		return f
+	}
+
+	if f := run(sseHead, "text/event-stream", false); !f.noStop {
+		t.Error("200 SSE 流结束但没收到 message_stop 应置 noStop")
+	}
+	if f := run(sseHead+sseStop, "text/event-stream", false); f.noStop {
+		t.Error("含 message_stop 的完整流不应置 noStop")
+	}
+	if f := run(`{"usage":{"input_tokens":1,"output_tokens":2}}`, "application/json", false); f.noStop {
+		t.Error("非 SSE JSON 响应没有 message_stop 概念，不应置 noStop")
+	}
+	if f := run(sseHead, "text/event-stream", true); f.noStop {
+		t.Error("下游取消导致的断流（499 场景）不应置 noStop")
+	}
+}
+
+// TestRecentFlightsNoStopField verifies the finished-streams JSON carries the noStop flag for the web badge.
+func TestRecentFlightsNoStopField(t *testing.T) {
+	resetStats()
+	oldFinished := finished
+	defer func() { finished = oldFinished }()
+	finished = []finishedFlight{{id: 1, noStop: true}}
+
+	req := httptest.NewRequest("GET", "/__recentflights", nil)
+	req.RemoteAddr = "127.0.0.1:1"
+	rec := httptest.NewRecorder()
+	recentFlightsHandler(rec, req)
+	var d struct {
+		List []struct {
+			NoStop bool `json:"noStop"`
+		} `json:"list"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatalf("响应非 JSON: %v", err)
+	}
+	if len(d.List) != 1 || !d.List[0].NoStop {
+		t.Errorf("recentFlights 应带 noStop:true，实际 %s", rec.Body.String())
+	}
+}
+
 func TestParseConfigPatternArray(t *testing.T) {
+
 	t.Run("array expands in place preserving order and fields", func(t *testing.T) {
 		data := []byte(`{
 				"upstream": "http://default",

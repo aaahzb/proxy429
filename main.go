@@ -1434,6 +1434,7 @@ type flight struct {
 	countTokens      bool             // count_tokens probe stream (countTokensPath); the response is just {"input_tokens":N}; the web model column shows a [count_tokens] prefix
 	searchStripped   atomic.Int32     // Total replayed search blocks stripped (conversation-watermark strip + 400-fallback strip; the web shows a red [剥N] badge, the split only goes to the log)
 	stripThinking    atomic.Bool      // convertOff2Low upgrade (off->low): thinking blocks are stripped from the response before writing downstream (the client keeps seeing a thinking-off response)
+	noStop           bool             // Upstream 200 SSE stream ended without a terminal event (message_stop / response.completed|failed|incomplete) while the client stayed connected; the web status column shows a red [无stop] badge
 	searchReplay     *searchReplayCtx // Search-restore context of the Responses translation port (carried via ctx, read/written only by the handler goroutine); the 400-fallback strip learns the conversation watermark from restore timestamps
 
 	// Session cache tracking (the status page's "缓存年龄" column): written once during routing, read by addFinished in the same goroutine.
@@ -1843,6 +1844,7 @@ type finishedFlight struct {
 	routeReason   int32  // Route reason (route*); the web model column shows it as a [tag] prefix
 	status        int    // HTTP status code
 	gaveUp        bool   // Retries/budget exhausted and a fallback error event has been passed through (status is 0 at this point); the web status column shows [重试尽]
+	noStop        bool   // Upstream 200 SSE stream ended without a terminal event while the client stayed connected; the web status column shows a red [无stop] badge
 	attempts      int32  // Attempt count (=retries+1; 1 = succeeded first try); the web status column appends [重试N次] when >1
 	bytes         int64
 	stage         int32 // Stage at end
@@ -1963,6 +1965,7 @@ func addFinished(f *flight) {
 		routeReason:      f.routeReason.Load(),
 		status:           f.status,
 		gaveUp:           f.gaveUp,
+		noStop:           f.noStop,
 		attempts:         f.attempt.Load(),
 		bytes:            f.bytes.Load(),
 		stage:            f.stage.Load(),
@@ -4222,6 +4225,9 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 	if f.stripThinking.Load() && !f.responsesRaw() && resp.StatusCode == http.StatusOK {
 		stripper = newThinkingStripper(resp.Header.Get("Content-Type"))
 	}
+
+	// SSE gate for the no-stop badge: only streamed responses carry terminal events (plain JSON has none by nature).
+	sseStream := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
 	if !headersSent {
 		copyHeaders(w.Header(), resp.Header)
 		if stripper != nil && !stripper.sse {
@@ -4248,6 +4254,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 	var lastCacheRead int64              // This stream's cumulative cache_read
 	var lastCacheCreation int64          // This stream's cumulative cache_creation
 	var sawDeltaUsage bool               // A message_delta with usage has been seen (the real usage breakdown has arrived)
+	var sawStop bool                     // Terminal event seen (message_stop / response.completed|failed|incomplete); a 200 SSE stream ending without it gets the noStop badge
 	interrupted := false                 // Whether this stream broke midway (usage rolled back, not counted in the aggregation)
 	openTools := map[int]*openToolCall{} // Anthropic: block index → in-progress tool call (for the *0 empty-args decision, survives across chunks)
 	respTools := map[string]string{}     // Responses passthrough: item_id → tool name (aligns with output_item.done for the empty-args decision)
@@ -4376,6 +4383,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 				// message_stop; same semantics as below: mark delivered as soon as it completes, don't wait for a clean EOF, so Codex's quick disconnect isn't misrecorded as 499).
 				if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) &&
 					(bytes.Contains(line, []byte("response.completed")) || bytes.Contains(line, []byte("response.failed")) || bytes.Contains(line, []byte("response.incomplete"))) {
+					sawStop = true
 					f.delivered.Store(true)
 				}
 				continue
@@ -4406,6 +4414,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 			// (Codex closes the connection as soon as response.completed arrives); once ctx is cancelled the upstream EOF becomes unreadable,
 			// and waiting for a clean EOF to mark would be too late (normal translation-port streams were once misrecorded as 499).
 			if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) && bytes.Contains(line, []byte("message_stop")) {
+				sawStop = true
 				f.delivered.Store(true)
 			}
 		}
@@ -4425,6 +4434,12 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 			}
 			break
 		}
+	}
+	// A 200 SSE stream that ended without any terminal event was cut off upstream-side: flag it for the status page's
+	// red [无stop] badge. Client-side disconnects (Esc) cancel the upstream request context — excluded here; that case
+	// is already re-recorded as 499 by the wrap-up defer.
+	if sseStream && resp.StatusCode == http.StatusOK && !sawStop && (resp.Request == nil || resp.Request.Context().Err() == nil) {
+		f.noStop = true
 	}
 	if stripper != nil {
 		// Flush what the stripper still holds: a partial trailing line (SSE), or the whole transformed document (JSON mode).
