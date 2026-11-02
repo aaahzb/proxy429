@@ -433,10 +433,10 @@ _in_list() {
 }
 
 # Top-level keys that must be replaced in place
-TARGET_KEYS='model model_provider preferred_auth_method forced_login_method model_reasoning_effort model_catalog_json'
+TARGET_KEYS='model model_provider forced_login_method model_reasoning_effort model_catalog_json'
 
 # Level A: would shadow or hijack the target configuration
-DEL_A='oss_provider openai_base_url'
+DEL_A='oss_provider openai_base_url preferred_auth_method'
 
 # Level B: contradict the models.json declarations -> silent errors or 400
 DEL_B='model_context_window model_auto_compact_token_limit model_auto_compact_token_limit_scope base_instructions model_instructions_file compact_prompt experimental_compact_prompt_file service_tier model_verbosity model_reasoning_summary plan_mode_reasoning_effort experimental_use_unified_exec_tool'
@@ -448,7 +448,6 @@ target_value_for() {
   case "$1" in
     model)                   printf '%s' "\"$MODEL_SLUG\"" ;;
     model_provider)          printf '%s' "\"$PROVIDER_ID\"" ;;
-    preferred_auth_method)   printf '%s' '"apikey"' ;;
     forced_login_method)     printf '%s' '"api"' ;;
     model_reasoning_effort)  printf '%s' '"high"' ;;
     model_catalog_json)      printf '%s' "\"$CATALOG_VALUE\"" ;;
@@ -460,6 +459,7 @@ del_why() {
   case "$1" in
     oss_provider)                        printf 'another provider selector that would route requests elsewhere' ;;
     openai_base_url)                     printf 'global base_url override that would hijack requests' ;;
+    preferred_auth_method)             printf 'removed by newer Codex (unrecognized-key startup warning); also forces OpenAI API-key auth on the desktop app' ;;
     model_context_window)                printf 'overrides the context window declared by models.json; when too large, auto-compact never triggers and the API errors mid-run' ;;
     model_auto_compact_token_limit)      printf 'overrides the auto-compact timing' ;;
     model_auto_compact_token_limit_scope) printf 'overrides the auto-compact timing' ;;
@@ -1134,7 +1134,6 @@ The original file was not modified; backup is at: $BACKUP_DIR"
   cat <<EOF
   model                  = "$MODEL_SLUG"
   model_provider         = "$PROVIDER_ID"
-  preferred_auth_method  = "apikey"
   forced_login_method    = "api"
   model_reasoning_effort = "high"
   model_catalog_json     = "$CATALOG_VALUE"

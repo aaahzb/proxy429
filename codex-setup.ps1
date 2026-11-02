@@ -293,12 +293,13 @@ function Get-TomlValue {
     return $l.Substring($eq + 1).Trim()
 }
 
-$TARGET_KEYS = @('model','model_provider','preferred_auth_method','forced_login_method',
+$TARGET_KEYS = @('model','model_provider','forced_login_method',
                  'model_reasoning_effort','model_catalog_json')
 
 $DEL_A = @{
     'oss_provider'    = 'another provider selector that would route requests elsewhere'
     'openai_base_url' = 'global base_url override that would hijack requests'
+    'preferred_auth_method' = 'removed by newer Codex (unrecognized-key startup warning); it also forces OpenAI API-key auth on the desktop app, while custom providers need no OpenAI login'
 }
 
 # These top-level keys fight the model catalog (same cleanup as the DeepSeek
@@ -327,7 +328,6 @@ function Get-TargetValue {
     switch ($Key) {
         'model'                  { return "`"$($script:ModelSlug)`"" }
         'model_provider'         { return "`"$PROVIDER_ID`"" }
-        'preferred_auth_method'  { return '"apikey"' }
         'forced_login_method'    { return '"api"' }
         'model_reasoning_effort' { return '"high"' }
         'model_catalog_json'     { return "`"$CatalogValue`"" }
@@ -803,7 +803,6 @@ function Invoke-Proxy429Install {
     Write-Host @"
   model                  = "$($script:ModelSlug)"
   model_provider         = "$PROVIDER_ID"
-  preferred_auth_method  = "apikey"
   forced_login_method    = "api"
   model_reasoning_effort = "high"
   model_catalog_json     = "$CatalogValue"

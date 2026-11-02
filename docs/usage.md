@@ -78,7 +78,7 @@ bash ./codex-setup.sh
 
 Pick a model from the menu (`gpt-5-codex` / `claude-fable-5` / custom model name); option 9 restores. What the script does:
 
-- Writes top-level `model`, `model_provider = "proxy429"`, `preferred_auth_method = "apikey"` + `forced_login_method = "api"` (these two lines put Codex in API-key mode, **no official-account login required**), `model_reasoning_effort = "high"`, `model_catalog_json`; appends the `[model_providers.proxy429]` section (the token is a placeholder, the proxy doesn't validate it).
+- Writes top-level `model`, `model_provider = "proxy429"`, `forced_login_method = "api"` (API-key mode, **no official-account login required**), `model_reasoning_effort = "high"`, `model_catalog_json`; appends the `[model_providers.proxy429]` section (the token is a placeholder, the proxy doesn't validate it). `preferred_auth_method` is deliberately NOT written — newer Codex dropped that key (unrecognized-key startup warning) and the desktop app honors it by forcing OpenAI API-key auth (a false not-logged-in wall for users without an OpenAI account); a stale line in an existing config is actively deleted.
 - Generates the `~/.codex/proxy429-models.json` model catalog so the `/model` menu lists models and switches thinking levels.
 - Performs surgery on an existing config.toml rather than overwriting: clears stale keys that would fight the proxy (`service_tier`, `openai_base_url`, context-window overrides, etc., reported one by one), fixes other providers' `wire_api = "chat"` (which stops Codex from starting), and keeps everything else like `[profiles.*]` untouched.
 - Automatically backs up to `~/.codex/backup-proxy429/` before changing (with a manifest of changes); option 9 restores verbatim.
@@ -92,8 +92,7 @@ Edit `~/.codex/config.toml` (on Windows `%USERPROFILE%\.codex\config.toml`; crea
 ```toml
 model_provider = "proxy429"
 model = "gpt-5-codex"            # the name that participates in proxy route matching
-preferred_auth_method = "apikey" # these two lines mean API-key mode, no official-account login
-forced_login_method = "api"
+forced_login_method = "api"   # API-key mode, no official-account login (do NOT add preferred_auth_method: dropped by newer Codex, breaks desktop-app auth)
 
 [model_providers.proxy429]
 name = "Proxy429 Local Proxy"
@@ -105,7 +104,7 @@ experimental_bearer_token = "proxy429"
 This structure is identical to what cc-switch writes when taking over Codex (`model_providers` + `wire_api = "responses"`), just with base_url swapped from its routing port to this proxy's. Key points:
 
 - **base_url must carry `/v1`, `wire_api` must be `"responses"`**: Codex POSTs to `http://127.0.0.1:8081/v1/responses`, exactly this proxy's listen path (`/responses` is also accepted).
-- **The token is just a placeholder**: the proxy doesn't validate it; the real upstream key is injected by the hit route's `api` field. The two lines `preferred_auth_method`/`forced_login_method` above make Codex start straight in API-key mode (same as DeepSeek's official script), never prompting for an official-account login.
+- **The token is just a placeholder**: the proxy doesn't validate it; the real upstream key is injected by the hit route's `api` field. The `forced_login_method` line above makes Codex start straight in API-key mode, never prompting for an official-account login.
 - **The model name works twice**: it participates both in the proxy's `routes` wildcard matching (the template's demo `gpt-5*` route -> DeepSeek; change as needed) and in the thinking-level lookup — to use adaptive thinking (see "Responses translation mapping"), fill `model` with the target model name directly (e.g. `claude-fable-5`); routing still matches and forwards as usual.
 - **Thinking level**: add a line `model_reasoning_effort = "high"` to config.toml (or adjust via `/model` in a Codex session); it arrives as `reasoning.effort` and is translated per the mapping table into adaptive effort or budget_tokens.
 - **Restart Codex after changes**: `config.toml` is read at Codex process start, not hot-loaded.
