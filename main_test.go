@@ -1596,7 +1596,6 @@ func TestCodexSetupDropsPreferredAuthMethod(t *testing.T) {
 
 func TestParseConfigPatternArray(t *testing.T) {
 
-
 	t.Run("array expands in place preserving order and fields", func(t *testing.T) {
 		data := []byte(`{
 				"upstream": "http://default",
