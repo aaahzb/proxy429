@@ -81,9 +81,9 @@ type RouteRule struct {
 	Thinking       string               `json:"thinking,omitempty"`         // Thinking shape of the target model (Responses translation only): ""/"auto" = look up by client model name; "adaptive" = force adaptive+effort; "budget" = force enabled+budget_tokens
 	ConvertOff2Low string               `json:"convertOff2Low,omitempty"`   // Per-route thinking-off conversion: ""/unset = off (requests go through untouched); "translate" = Responses translation port only; "all" = translation port + Anthropic native port. When on, an explicit downstream thinking-off is quietly sent upstream as low thinking, with thinking blocks stripped from the response (client unaware)
 
-	ClaudeSearchThinking string `json:"claudeSearchThinking,omitempty"` // Standalone search sub-agent requests hitting this route: rewrite thinking to off/low/mid/high/max; unset = fall back (to enhance_search legacy when this route serves, to search_fallback's own setting when diverted there)
-	ClaudeSearchSummary  string `json:"claudeSearchSummary,omitempty"`  // Same requests: forceLow/forceMid/forceHigh inject the matching summary instruction, noForce disables injection; unset = fall back as above. A set value beats this route's enhance_search legacy fields and (per field) search_fallback's own
-	ClaudeSearchGuard    *bool  `json:"claudeSearchGuard,omitempty"`    // Same requests: replace an all-empty web-search response with a fixed no-results stream; unset = off here, or inherit search_fallback when diverted. Explicit false beats a fallback true
+	ClaudeSearchThinking          string `json:"claudeSearchThinking,omitempty"`          // Standalone search sub-agent requests hitting this route: rewrite thinking to off/low/mid/high/max; unset = fall back (to enhance_search legacy when this route serves, to search_fallback's own setting when diverted there)
+	ClaudeSearchSummary           string `json:"claudeSearchSummary,omitempty"`           // Same requests: forceLow/forceMid/forceHigh inject the matching summary instruction, noForce disables injection; unset = fall back as above. A set value beats this route's enhance_search legacy fields and (per field) search_fallback's own
+	NoBullshitOnEmptyClaudeSearch *bool  `json:"noBullshitOnEmptyClaudeSearch,omitempty"` // Same requests: replace an all-empty web-search response with a fixed no-results stream; unset = off here, or inherit search_fallback when diverted. Explicit false beats a fallback true
 }
 
 // EnhanceSearchConfig holds optional enhanced-search parameters inside a routes entry. When the route hits and the request carries
@@ -135,9 +135,9 @@ type SearchRoute struct {
 	SummaryThinking bool   `json:"summary_thinking"`         // Legacy thinking switch for search sub-agent requests: true rewrites thinking to low (claudeSearchThinking overrides)
 	SummaryLevel    string `json:"summary_level"`            // Summary detail under summary_mode: low (default, brief) / mid (medium) / high (thorough) / max (verbatim steps/code/formulas)
 
-	ClaudeSearchThinking string `json:"claudeSearchThinking,omitempty"` // Standalone search sub-agent requests: rewrite thinking to off / low / mid / high / max (beats summary_thinking; unset = legacy behavior)
-	ClaudeSearchSummary  string `json:"claudeSearchSummary,omitempty"`  // Standalone search sub-agent requests: forceLow / forceMid / forceHigh inject the matching summary instruction into the search request itself; noForce disables injection (beats summary_mode; unset = legacy behavior)
-	ClaudeSearchGuard    *bool  `json:"claudeSearchGuard,omitempty"`    // Standalone search sub-agent requests: replace an all-empty web-search response with a fixed no-results stream; unset = off unless the matched route explicitly overrides it
+	ClaudeSearchThinking          string `json:"claudeSearchThinking,omitempty"`          // Standalone search sub-agent requests: rewrite thinking to off / low / mid / high / max (beats summary_thinking; unset = legacy behavior)
+	ClaudeSearchSummary           string `json:"claudeSearchSummary,omitempty"`           // Standalone search sub-agent requests: forceLow / forceMid / forceHigh inject the matching summary instruction into the search request itself; noForce disables injection (beats summary_mode; unset = legacy behavior)
+	NoBullshitOnEmptyClaudeSearch *bool  `json:"noBullshitOnEmptyClaudeSearch,omitempty"` // Standalone search sub-agent requests: replace an all-empty web-search response with a fixed no-results stream; unset = off unless the matched route explicitly overrides it
 }
 
 // Version is the build stamp, injected by build.sh via -ldflags "-X main.Version=...": "release vX.Y.Z.N" when
@@ -1432,7 +1432,7 @@ type flight struct {
 	searchLevel      string           // Summary level actually injected into the marker request (empty = none); upgrades the badge to [SearchSummary-<level>]
 	searchThinkFrom  string           // Thinking value before the search thinking rewrite (empty = no thinking field, shown as auto)
 	searchThinkTo    string           // Configured level the search thinking rewrite targeted (empty = no rewrite); the API column shows [from->to]
-	searchGuardArmed bool             // Marker request whose effective route enabled claudeSearchGuard; only native Anthropic 200 SSE responses are buffered
+	searchGuardArmed bool             // Marker request whose effective route enabled noBullshitOnEmptyClaudeSearch; only native Anthropic 200 SSE responses are buffered
 	searchGuard      bool             // The upstream response was discarded and replaced with the fixed empty-search stream; the web status column shows [空搜]
 	translated       string           // Translation-port origin tag ("responses"=translated stream, "responses-raw"=native passthrough via a route with url_response_api); the web API column shows [translate]/[Response]
 	countTokens      bool             // count_tokens probe stream (countTokensPath); the response is just {"input_tokens":N}; the web model column shows a [count_tokens] prefix
@@ -4234,7 +4234,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 
 	// SSE gate for the no-stop badge: only streamed responses carry terminal events (plain JSON has none by nature).
 	sseStream := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
-	// claudeSearchGuard is deliberately limited to native Anthropic streaming. The writer holds client-bound bytes,
+	// noBullshitOnEmptyClaudeSearch is deliberately limited to native Anthropic streaming. The writer holds client-bound bytes,
 	// while the normal loop below continues to parse and record the exact upstream response.
 	var guard *searchGuardWriter
 	if f.searchGuardArmed && f.translated == "" && sseStream && resp.StatusCode == http.StatusOK {
@@ -4910,7 +4910,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// where routing settles; the request body is transformed after the routing block.
 	searchInjectLevel := ""     // ""/low/mid/high/max: inject the summary instruction into the search request itself
 	searchThinkLevel := ""      // ""/off/low/mid/high/max: rewrite the search request's thinking
-	searchGuardEnabled := false // Effective route's claudeSearchGuard; armed below only after the request marker is confirmed
+	searchGuardEnabled := false // Effective route's noBullshitOnEmptyClaudeSearch; armed below only after the request marker is confirmed
 	if clsKind != classifierNone && c.ClassifierRoute != nil && c.ClassifierRoute.URL != "" {
 		// Classifier route: shunt safety-check requests to the designated upstream, saving main-model quota.
 		// (url empty = no reroute: a bare {"classifier_thinking":"off"} configures the thinking rewrite only.)

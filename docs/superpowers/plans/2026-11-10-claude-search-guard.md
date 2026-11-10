@@ -46,7 +46,7 @@
 - Modify: `config.example.json`
 
 **Interfaces:**
-- `ClaudeSearchGuard *bool ` + "`json:\"claudeSearchGuard,omitempty\"`" + ` on both route types.
+- `NoBullshitOnEmptyClaudeSearch *bool ` + "`json:\"noBullshitOnEmptyClaudeSearch,omitempty\"`" + ` on both route types.
 - Local `searchGuardEnabled bool`, `flight.searchGuardArmed bool`, and `flight.searchGuard bool` (actual replacement).
 - `resolveSearchGuard(route *RouteRule, fallback *SearchRoute) bool`: route's non-nil value wins; otherwise fallback's non-nil value; default false. For direct route service pass a nil fallback.
 

@@ -10,7 +10,7 @@ Prompt-only experiment B reduced the hard answer but did not provide a determini
 
 ## Approved behavior
 
-Add optional `claudeSearchGuard` to both `routes[]` and `search_fallback`. It is disabled when unset. It affects only native Anthropic-port requests carrying the exact standalone-search marker.
+Add optional `noBullshitOnEmptyClaudeSearch` to both `routes[]` and `search_fallback`. It is disabled when unset. It affects only native Anthropic-port requests carrying the exact standalone-search marker.
 
 For an affected request:
 
@@ -31,7 +31,7 @@ The fixed text asks the Claude Code harness to retry but deliberately supplies n
 The Go fields are tri-state pointers so JSON `false` differs from an unset field:
 
 ```go
-ClaudeSearchGuard *bool `json:"claudeSearchGuard,omitempty"`
+NoBullshitOnEmptyClaudeSearch *bool `json:"noBullshitOnEmptyClaudeSearch,omitempty"`
 ```
 
 - A search-capable route serving its own request uses its own value; unset means off.

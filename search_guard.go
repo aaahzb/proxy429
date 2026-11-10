@@ -26,11 +26,11 @@ type searchGuardUsage struct {
 // resolveSearchGuard applies the same route-wins rule as the other claudeSearch* fields.
 // A pointer distinguishes an explicit false from an unset route that inherits search_fallback.
 func resolveSearchGuard(route *RouteRule, fallback *SearchRoute) bool {
-	if route != nil && route.ClaudeSearchGuard != nil {
-		return *route.ClaudeSearchGuard
+	if route != nil && route.NoBullshitOnEmptyClaudeSearch != nil {
+		return *route.NoBullshitOnEmptyClaudeSearch
 	}
-	if fallback != nil && fallback.ClaudeSearchGuard != nil {
-		return *fallback.ClaudeSearchGuard
+	if fallback != nil && fallback.NoBullshitOnEmptyClaudeSearch != nil {
+		return *fallback.NoBullshitOnEmptyClaudeSearch
 	}
 	return false
 }
