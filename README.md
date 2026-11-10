@@ -60,6 +60,7 @@ The console can help answer practical questions: What did the agent send to the 
 - **Cache visibility:** inspect cache-hit statistics by upstream model and review measured cache lifetimes.
 - **Model remapping:** route a client-facing model name to a different upstream model and switch routes from the tray menu.
 - **Search follow-ups:** in the protocol-translation path, search results can be carried in an encrypted response envelope for reuse by follow-up requests.
+- **Empty-search guard:** optionally replace all-empty Claude Code standalone-search responses with a fixed no-results stream on selected routes, preventing a fabricated answer from prior knowledge.
 - **Thinking behavior:** configured thinking-mode handling can adapt requests and responses for supported upstreams.
 - **Cross-platform tray app:** Windows, macOS, and Linux builds, with a bilingual Chinese/English web console.
 
@@ -171,6 +172,7 @@ Proxy429 是一个面向 Claude Code、Codex CLI 及兼容 OpenAI/Anthropic API 
 - **了解缓存表现：** 按上游模型查看缓存命中统计，并通过持续保存的 48 小时热图回顾近期活动。
 - **模型名称映射：** 将客户端使用的模型名路由到指定的上游模型，也可以通过托盘菜单切换路由。
 - **复用搜索结果：** 在协议翻译路径中，搜索结果可以通过加密响应信封传递，供后续请求复用。
+- **空搜索硬保障：** 可按路由将 Claude Code 独立搜索子代理的全空搜索响应替换为固定的无结果流，阻止上游凭空硬答。
 - **调整思考模式：** 对明确关闭思考的请求，可转换为上游 low-thinking 请求，并从响应中移除思考块。
 
 实现细节和行为说明见[设计与架构文档](docs/DESIGN.md)。

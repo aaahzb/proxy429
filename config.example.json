@@ -31,6 +31,7 @@
       "url": "https://api.deepseek.com",
       "api": "$DEEPSEEK_KEY",
       "model": "deepseek-V4-pro",
+      "claudeSearchGuard": true,
       "enhance_search": {
         "summary_thinking": false,
         "summary_level": "mid"
@@ -85,6 +86,7 @@
     "summary_thinking": false,
     "summary_level": "low",
     "claudeSearchThinking": "low",
-    "claudeSearchSummary": "forceLow"
+    "claudeSearchSummary": "forceLow",
+    "claudeSearchGuard": true
   }
 }

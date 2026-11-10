@@ -888,6 +888,7 @@ func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 			"status":          ff.status,
 			"gaveUp":          ff.gaveUp,
 			"noStop":          ff.noStop,
+			"searchGuard":     ff.searchGuard,
 			"attempts":        ff.attempts,
 			"bytes":           ff.bytes,
 			"total":           fmtMs(ff.totalMs),
@@ -1945,7 +1946,7 @@ async function poll(){
         const rfd = await rf.json();
         (rfd.list||[]).forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull, rd:!!f.reqDown, sd:!!f.respDown, rdt:!!f.reqDownTrunc, hfd:!!f.hasFullDown, lst:f.last||0}; });
         document.querySelector('#finishedFlights tbody').innerHTML = (rfd.list||[]).map(function(f){
-          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+lastTag(f)+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools,0,f.searchMarker,f.searchLevel)+apiCell(f.translated,f.think,f.searchThinkFrom,f.searchThinkTo)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+(f.total||'-')+'</td><td>'+(f.gaveUp?'[重试尽]':(f.status?(f.status===200?'200':'['+f.status+']'):'-'))+(f.attempts>1?'<span style="color:#d7ba7d">[重试'+(f.attempts-1)+'次]</span>':'')+(f.noStop?'<span style="color:#f48771">[无stop]</span>':'')+'</td><td>'+(f.hitRate||'-')+(f.stripped>0?'<span style="color:#f48771">[剥'+f.stripped+']</span>':'')+'</td><td>'+(f.cacheAge||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
+          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+lastTag(f)+'</td>'+modelCell(f.model,f.searchPrompt,f.routeReason,f.countTokens,f.tools,0,f.searchMarker,f.searchLevel)+apiCell(f.translated,f.think,f.searchThinkFrom,f.searchThinkTo)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+(f.total||'-')+'</td><td>'+(f.gaveUp?'[重试尽]':(f.status?(f.status===200?'200':'['+f.status+']'):'-'))+(f.attempts>1?'<span style="color:#d7ba7d">[重试'+(f.attempts-1)+'次]</span>':'')+(f.noStop?'<span style="color:#f48771">[无stop]</span>':'')+(f.searchGuard?'<span style="color:#f48771">[空搜]</span>':'')+'</td><td>'+(f.hitRate||'-')+(f.stripped>0?'<span style="color:#f48771">[剥'+f.stripped+']</span>':'')+'</td><td>'+(f.cacheAge||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
         }).join('');
       }
     }catch(e){}
@@ -3175,6 +3176,7 @@ var enHTMLRepl = [][2]string{
 	{`'<span style="color:#f48771">[剥'+f.stripped+']</span>'`, `'<span style="color:#f48771">[strip '+f.stripped+']</span>'`},
 	{`(f.gaveUp?'[重试尽]':`, `(f.gaveUp?'[retries exhausted]':`},
 	{`[无stop]`, `[no-stop]`},
+	{`[空搜]`, `[empty-search]`},
 	{`'<span style="color:#d7ba7d">[重试'+(f.attempts-1)+'次]</span>'`, `'<span style="color:#d7ba7d">[retried '+(f.attempts-1)+'x]</span>'`},
 	{`text: '[已编辑思考（加密）]'`, `text: '[redacted thinking (encrypted)]'`},
 	{`text:'[已编辑思考（加密）]'`, `text:'[redacted thinking (encrypted)]'`},

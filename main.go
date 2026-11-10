@@ -83,6 +83,7 @@ type RouteRule struct {
 
 	ClaudeSearchThinking string `json:"claudeSearchThinking,omitempty"` // Standalone search sub-agent requests hitting this route: rewrite thinking to off/low/mid/high/max; unset = fall back (to enhance_search legacy when this route serves, to search_fallback's own setting when diverted there)
 	ClaudeSearchSummary  string `json:"claudeSearchSummary,omitempty"`  // Same requests: forceLow/forceMid/forceHigh inject the matching summary instruction, noForce disables injection; unset = fall back as above. A set value beats this route's enhance_search legacy fields and (per field) search_fallback's own
+	ClaudeSearchGuard    *bool  `json:"claudeSearchGuard,omitempty"`    // Same requests: replace an all-empty web-search response with a fixed no-results stream; unset = off here, or inherit search_fallback when diverted. Explicit false beats a fallback true
 }
 
 // EnhanceSearchConfig holds optional enhanced-search parameters inside a routes entry. When the route hits and the request carries
@@ -136,6 +137,7 @@ type SearchRoute struct {
 
 	ClaudeSearchThinking string `json:"claudeSearchThinking,omitempty"` // Standalone search sub-agent requests: rewrite thinking to off / low / mid / high / max (beats summary_thinking; unset = legacy behavior)
 	ClaudeSearchSummary  string `json:"claudeSearchSummary,omitempty"`  // Standalone search sub-agent requests: forceLow / forceMid / forceHigh inject the matching summary instruction into the search request itself; noForce disables injection (beats summary_mode; unset = legacy behavior)
+	ClaudeSearchGuard    *bool  `json:"claudeSearchGuard,omitempty"`    // Standalone search sub-agent requests: replace an all-empty web-search response with a fixed no-results stream; unset = off unless the matched route explicitly overrides it
 }
 
 // Version is the build stamp, injected by build.sh via -ldflags "-X main.Version=...": "release vX.Y.Z.N" when
@@ -1430,6 +1432,8 @@ type flight struct {
 	searchLevel      string           // Summary level actually injected into the marker request (empty = none); upgrades the badge to [SearchSummary-<level>]
 	searchThinkFrom  string           // Thinking value before the search thinking rewrite (empty = no thinking field, shown as auto)
 	searchThinkTo    string           // Configured level the search thinking rewrite targeted (empty = no rewrite); the API column shows [from->to]
+	searchGuardArmed bool             // Marker request whose effective route enabled claudeSearchGuard; only native Anthropic 200 SSE responses are buffered
+	searchGuard      bool             // The upstream response was discarded and replaced with the fixed empty-search stream; the web status column shows [空搜]
 	translated       string           // Translation-port origin tag ("responses"=translated stream, "responses-raw"=native passthrough via a route with url_response_api); the web API column shows [translate]/[Response]
 	countTokens      bool             // count_tokens probe stream (countTokensPath); the response is just {"input_tokens":N}; the web model column shows a [count_tokens] prefix
 	searchStripped   atomic.Int32     // Total replayed search blocks stripped (conversation-watermark strip + 400-fallback strip; the web shows a red [剥N] badge, the split only goes to the log)
@@ -1845,6 +1849,7 @@ type finishedFlight struct {
 	status        int    // HTTP status code
 	gaveUp        bool   // Retries/budget exhausted and a fallback error event has been passed through (status is 0 at this point); the web status column shows [重试尽]
 	noStop        bool   // Upstream 200 SSE stream ended without a terminal event while the client stayed connected; the web status column shows a red [无stop] badge
+	searchGuard   bool   // The upstream response was replaced after every web search result was empty; the web status column shows a red [空搜] badge
 	attempts      int32  // Attempt count (=retries+1; 1 = succeeded first try); the web status column appends [重试N次] when >1
 	bytes         int64
 	stage         int32 // Stage at end
@@ -1966,6 +1971,7 @@ func addFinished(f *flight) {
 		status:           f.status,
 		gaveUp:           f.gaveUp,
 		noStop:           f.noStop,
+		searchGuard:      f.searchGuard,
 		attempts:         f.attempt.Load(),
 		bytes:            f.bytes.Load(),
 		stage:            f.stage.Load(),
@@ -4228,6 +4234,13 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 
 	// SSE gate for the no-stop badge: only streamed responses carry terminal events (plain JSON has none by nature).
 	sseStream := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
+	// claudeSearchGuard is deliberately limited to native Anthropic streaming. The writer holds client-bound bytes,
+	// while the normal loop below continues to parse and record the exact upstream response.
+	var guard *searchGuardWriter
+	if f.searchGuardArmed && f.translated == "" && sseStream && resp.StatusCode == http.StatusOK {
+		guard = newSearchGuardWriter(w, f, headersSent)
+		w = guard
+	}
 	if !headersSent {
 		copyHeaders(w.Header(), resp.Header)
 		if stripper != nil && !stripper.sse {
@@ -4318,10 +4331,13 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 	// the model (response model names written back below) and/or the stripper is active — except when w is a translatingWriter:
 	// the translation port tees its own downstream side (the translated client-bound bytes) via its tap.
 	_, downstreamTapped := w.(interface{ setDownTap(*flight) })
-	teeDown := !downstreamTapped && (stripper != nil || (f.targetModel != "" && f.targetModel != f.origModel))
+	teeDown := !downstreamTapped && (guard != nil || stripper != nil || (f.targetModel != "" && f.targetModel != f.origModel))
 	writeAndCount := func(data []byte) {
 		if len(data) == 0 {
 			return
+		}
+		if guard != nil {
+			guard.observeUpstream(data) // Full-fidelity detector input, independent of the capped web preview.
 		}
 		f.appendContent(data) // Tee a copy for the web upstream side (the exact upstream bytes, before model write-back and stripping)
 		out := data
@@ -4461,6 +4477,9 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 		if tr.argsEmpty() {
 			f.noteToolCallEmpty(tr.name)
 		}
+	}
+	if guard != nil {
+		guard.finish(searchGuardUsage{input: lastInput, cacheRead: lastCacheRead, cacheCreation: lastCacheCreation, output: lastOutput})
 	}
 	return lastOutput
 }
@@ -4889,8 +4908,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	convFlag := "" // The effective route's convertOff2Low value, captured where routing settles ("" = feature off)
 	// Standalone search sub-agent handling (single-request search+summary): the effective levels are resolved
 	// where routing settles; the request body is transformed after the routing block.
-	searchInjectLevel := "" // ""/low/mid/high/max: inject the summary instruction into the search request itself
-	searchThinkLevel := ""  // ""/off/low/mid/high/max: rewrite the search request's thinking
+	searchInjectLevel := ""     // ""/low/mid/high/max: inject the summary instruction into the search request itself
+	searchThinkLevel := ""      // ""/off/low/mid/high/max: rewrite the search request's thinking
+	searchGuardEnabled := false // Effective route's claudeSearchGuard; armed below only after the request marker is confirmed
 	if clsKind != classifierNone && c.ClassifierRoute != nil && c.ClassifierRoute.URL != "" {
 		// Classifier route: shunt safety-check requests to the designated upstream, saving main-model quota.
 		// (url empty = no reroute: a bare {"classifier_thinking":"off"} configures the thinking rewrite only.)
@@ -4983,6 +5003,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 							eff.ClaudeSearchThinking = rr.ClaudeSearchThinking
 						}
 						searchInjectLevel, searchThinkLevel = resolveSearchBehavior(&eff)
+						searchGuardEnabled = resolveSearchGuard(rr, sf)
 						break
 					}
 					// Pure images (no search): use multimodal_fallback when configured; search requests never land on mf (degrade to passthrough when there's no sf).
@@ -5002,6 +5023,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.id, origModel, rr.URL, origModel, rr.Model)
 				f.routeReason.Store(routePattern)
 				convFlag = rr.ConvertOff2Low
+				searchGuardEnabled = resolveSearchGuard(rr, nil)
 				// Enhance search / route-level claudeSearch*: when the route supports search (no_search:false) and has
 				// enhance_search or claudeSearch* configured, a standalone search sub-agent request gets the summary instruction
 				// injected into the request itself and/or its thinking rewritten (single-request mode), served by the route's
@@ -5038,6 +5060,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// Badge every marker hit ([Search] in the model column), even when no injection/rewrite applies.
 	if hasSearchSubagentMarker(body) {
 		f.searchMarker = true
+		f.searchGuardArmed = searchGuardEnabled
 		if searchThinkLevel != "" {
 			thinkFrom := f.think
 			if nb, ok := rewriteSearchThinking(body, searchThinkLevel); ok {
@@ -5055,8 +5078,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 			}
 		}
+		var instructions []string
 		if searchInjectLevel != "" {
-			instr := summaryLevelConfig(searchInjectLevel, searchMarkerQuery(body))
+			instructions = append(instructions, summaryLevelConfig(searchInjectLevel, searchMarkerQuery(body)))
+		}
+		if f.searchGuardArmed {
+			instructions = append(instructions, searchGuardInstruction)
+		}
+		if len(instructions) > 0 {
+			instr := strings.Join(instructions, "\n\n")
 			if nb, ok := injectAfterMarker(body, instr); ok {
 				body = nb
 				f.searchPrompt = instr // The status page shows the injected instruction on hover over the model cell
