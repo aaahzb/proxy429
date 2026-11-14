@@ -3769,3 +3769,25 @@ func TestNoTrayFlagRegistered(t *testing.T) {
 		t.Errorf("-no-tray 默认值应为 false，实际为 %q", f.DefValue)
 	}
 }
+
+// TestLoadConfigSearchFallbackThinkingValidation locks search_fallback.thinking to the same enum as
+// routes[].thinking: the fallback is a route for diverted search requests, so a misconfigured shape
+// must fail at load instead of silently falling back to the client model's mapping.
+func TestLoadConfigSearchFallbackThinkingValidation(t *testing.T) {
+	writeCfg := func(t *testing.T, thinking string) string {
+		body := `{"upstream":"http://x","search_fallback":{"url":"http://y","thinking":"` + thinking + `"}}`
+		p := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, v := range []string{"", "auto", "adaptive", "budget"} {
+		if _, _, err := loadConfig(writeCfg(t, v)); err != nil {
+			t.Errorf("search_fallback thinking=%q should be legal: %v", v, err)
+		}
+	}
+	if _, _, err := loadConfig(writeCfg(t, "turbo")); err == nil {
+		t.Error("search_fallback thinking=turbo should fail")
+	}
+}

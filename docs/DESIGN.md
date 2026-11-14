@@ -351,12 +351,13 @@ Config (sibling of `routes`; an object):
   "url": "https://api.deepseek.com",
   "api": "sk-deepseek-xxx",
   "model": "deepseek-search",
-  "text_only": true
+  "thinking": "budget"
 }
 ```
 
 - **no_search** (inside a `routes` entry): marks that entry's target upstream as not supporting search.
 - **url / api / model** (inside `search_fallback`): the fallback search-capable upstream; same meanings as the like-named fields in `routes`.
+- **thinking** (inside `search_fallback`, optional, default `"auto"`): declares the **fallback target model's** thinking shape, with the same vocabulary and semantics as a `routes` entry's `thinking` (`"auto"` = look up the built-in mapping table by the client-sent model name; `"adaptive"` forces `adaptive+effort`; `"budget"` forces `enabled+budget_tokens`; any other value fails config load). A `search_fallback` is a route, so a Responses-port request bound for it (the hit rule's effective `no_search` is true, the request carries a server-side web search tool, and the fallback is configured) is translated with the **fallback's** effective value: explicit local > `lazyApply` > auto. The hit route's `thinking` describes that route's own target model and never participates once the request is diverted; the fallback's target is the model actually called. Like the route field, this only affects Responses-port translated streams (the native Anthropic port never rewrites the client's thinking fields). The fast-route lane is excluded: translation injecting `speed:"fast"` makes the handler's fast branch win before the routes loop, so no search-fallback diversion happens.
 - **summary_mode** (inside `search_fallback`, optional, default `false`): legacy summary-injection switch (next section); `true` injects the summary instruction (at `summary_level`) into standalone search sub-agent requests; `false` leaves them untouched.
 - **summary_thinking** (inside `search_fallback`, optional, default `false`): legacy thinking switch — `true` rewrites a standalone search sub-agent request's thinking to low.
 - **summary_level** (inside `search_fallback`, optional, default `low`): verbosity of the injected summary instruction. `low` = short summary; `mid` = medium detail with key facts and data points; `high` = thorough, with all data points/citations/context; `max` = on top of `high`, steps/methods/code/formulas restated completely and verbatim (`full` is a synonym alias).
@@ -449,7 +450,7 @@ Add an `enhance_search` object inside a `routes` entry (omitted = disabled):
 Top-level `"lazyApply"` is a materialization shortcut: each key is treated as if written into every supported route-like object that omits it, then normal precedence applies. It never touches connection fields (`url`, `api`, `model`, `pattern`, `url_response_api`) and never creates an optional route.
 
 - `routes[]`: `text_only`, `no_search`, `thinking`, `convertOff2Low`, `enhance_search`, `claudeSearchThinking`, `claudeSearchSummary`, `noBullshitOnEmptyClaudeSearch`.
-- `search_fallback`: `convertOff2Low`, `summary_mode`, `summary_thinking`, `summary_level`, `claudeSearchThinking`, `claudeSearchSummary`, `noBullshitOnEmptyClaudeSearch`.
+- `search_fallback`: `thinking`, `convertOff2Low`, `summary_mode`, `summary_thinking`, `summary_level`, `claudeSearchThinking`, `claudeSearchSummary`, `noBullshitOnEmptyClaudeSearch`.
 - `fast_route` / `multimodal_fallback`: `convertOff2Low`.
 - `classifier_route`: `classifier_thinking`, `classifier_thinking_cc`, `classifier_thinking_codex`.
 

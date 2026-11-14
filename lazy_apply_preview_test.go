@@ -150,15 +150,15 @@ func lazyApplySnapshot(c *Config) string {
 		if c.SearchFallback != nil {
 			eff := effectiveFallbackSearchSettings(c, rr, c.SearchFallback)
 			inject, think = resolveSearchBehavior(eff)
-			fmt.Fprintf(&b, "route%d fallback=(%q,%q) conv=%q\n", i, inject, think, eff.ConvertOff2Low)
+			fmt.Fprintf(&b, "route%d fallback=(%q,%q) conv=%q thinking=%q\n", i, inject, think, eff.ConvertOff2Low, effectiveFallbackThinking(c, c.SearchFallback))
 		}
 	}
 	if sf := c.SearchFallback; sf != nil {
 		eff := effectiveFallbackSearchSettings(c, nil, sf)
 		inject, think := resolveSearchBehavior(eff)
-		fmt.Fprintf(&b, "fallback-only conv=%q search=(%q,%q) guard=%v\n",
+		fmt.Fprintf(&b, "fallback-only conv=%q search=(%q,%q) guard=%v thinking=%q\n",
 			conv(sf.ConvertOff2Low, sf.presence.written("convertOff2Low", sf.ConvertOff2Low != ""), sf.NoLazyApply),
-			inject, think, effectiveSearchGuard(c, nil, sf))
+			inject, think, effectiveSearchGuard(c, nil, sf), effectiveFallbackThinking(c, sf))
 	}
 	fmt.Fprintf(&b, "classifier cc=%q codex=%q\n",
 		classifierThinkingModeFor(c, classifierCC), classifierThinkingModeFor(c, classifierCodex))
@@ -378,5 +378,60 @@ func TestMaterializeLazyApplyTemplate(t *testing.T) {
 	}
 	if want, got := lazyApplySnapshot(before), lazyApplySnapshot(after); want != got {
 		t.Errorf("materialized template behavior differs\nbefore:\n%s\nafter:\n%s", want, got)
+	}
+}
+
+// TestMaterializeLazyApplyOnlySupportedFields locks the field matrix behind "never add a key the object
+// does not already accept": search_fallback is a route, so it inherits thinking like routes[]; fast_route /
+// multimodal_fallback only inherit convertOff2Low, and classifier_route only its own thinking tiers.
+func TestMaterializeLazyApplyOnlySupportedFields(t *testing.T) {
+	raw := `{
+  "upstream": "http://u",
+  "lazyApply": {
+    "thinking": "adaptive",
+    "convertOff2Low": "all",
+    "claudeSearchThinking": "max",
+    "noBullshitOnEmptyClaudeSearch": true
+  },
+  "routes": [{"pattern": "*", "url": "http://r"}],
+  "search_fallback": {"url": "http://s"},
+  "fast_route": {"url": "http://f"},
+  "multimodal_fallback": {"url": "http://m"},
+  "classifier_route": {"url": "http://c"}
+}`
+	out, err := materializeLazyApply([]byte(raw))
+	if err != nil {
+		t.Fatalf("materializeLazyApply: %v", err)
+	}
+	top, routes := lazyPreviewObjects(t, out)
+	route := routes[0]
+	for _, key := range []string{"thinking", "convertOff2Low", "claudeSearchThinking", "noBullshitOnEmptyClaudeSearch"} {
+		if _, ok := route[key]; !ok {
+			t.Errorf("routes[] is missing inherited key %q: %v", key, route)
+		}
+	}
+	sf := lazyPreviewObject(t, top, "search_fallback")
+	if got := string(sf["thinking"]); got != `"adaptive"` {
+		t.Errorf("search_fallback thinking = %s, want adaptive: %v", got, sf)
+	}
+	for _, key := range []string{"thinking", "convertOff2Low", "claudeSearchThinking", "noBullshitOnEmptyClaudeSearch"} {
+		if _, ok := sf[key]; !ok {
+			t.Errorf("search_fallback is missing inherited key %q: %v", key, sf)
+		}
+	}
+	for _, name := range []string{"fast_route", "multimodal_fallback"} {
+		obj := lazyPreviewObject(t, top, name)
+		if _, ok := obj["thinking"]; ok {
+			t.Errorf("%s must not receive routes-only thinking: %v", name, obj)
+		}
+		if _, ok := obj["convertOff2Low"]; !ok {
+			t.Errorf("%s is missing inherited convertOff2Low: %v", name, obj)
+		}
+	}
+	cr := lazyPreviewObject(t, top, "classifier_route")
+	for _, key := range []string{"thinking", "convertOff2Low", "claudeSearchThinking", "noBullshitOnEmptyClaudeSearch"} {
+		if _, ok := cr[key]; ok {
+			t.Errorf("classifier_route must not receive unsupported key %q: %v", key, cr)
+		}
 	}
 }

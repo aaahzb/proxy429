@@ -515,3 +515,46 @@ func TestLazyApplyGoLiteralPresenceFallback(t *testing.T) {
 		t.Errorf("Go literal opt-out convertOff2Low = %q, want empty", got)
 	}
 }
+
+// TestLazyApplyEffectiveFallbackThinking locks search_fallback.thinking: when the fallback serves a
+// diverted search request, its own value (explicit > lazyApply > "") describes the target model. The
+// hit route's thinking describes the route's own model and must not participate.
+func TestLazyApplyEffectiveFallbackThinking(t *testing.T) {
+	c := mustParseLazy(t, `{
+		"upstream":"http://u",
+		"lazyApply":{"thinking":"adaptive"},
+		"routes":[
+			{"pattern":"a","url":"http://a","thinking":"budget"},
+			{"pattern":"b","url":"http://b"}
+		],
+		"search_fallback":{"url":"http://s","thinking":"auto"}
+	}`)
+	if got := effectiveFallbackThinking(c, c.SearchFallback); got != "auto" {
+		t.Errorf("explicit fallback thinking = %q, want auto", got)
+	}
+	if got := effectiveRouteThinking(c, &c.Routes[0]); got != "budget" {
+		t.Errorf("route thinking = %q, want budget", got)
+	}
+
+	inherit := mustParseLazy(t, `{
+		"upstream":"http://u",
+		"lazyApply":{"thinking":"budget"},
+		"search_fallback":{"url":"http://s"}
+	}`)
+	if got := effectiveFallbackThinking(inherit, inherit.SearchFallback); got != "budget" {
+		t.Errorf("lazy fallback thinking = %q, want budget", got)
+	}
+
+	optOut := mustParseLazy(t, `{
+		"upstream":"http://u",
+		"lazyApply":{"thinking":"budget"},
+		"search_fallback":{"url":"http://s","noLazyApply":true}
+	}`)
+	if got := effectiveFallbackThinking(optOut, optOut.SearchFallback); got != "" {
+		t.Errorf("noLazyApply fallback thinking = %q, want empty", got)
+	}
+
+	if got := effectiveFallbackThinking(inherit, nil); got != "" {
+		t.Errorf("nil fallback thinking = %q, want empty", got)
+	}
+}

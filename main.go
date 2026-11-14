@@ -144,6 +144,7 @@ type SearchRoute struct {
 	API             string `json:"api"`                      // Target API key; empty = pass through the client's token
 	Model           string `json:"model"`                    // Target model name to rewrite to; empty = leave the model field unchanged
 	ConvertOff2Low  string `json:"convertOff2Low,omitempty"` // Same semantics as RouteRule.ConvertOff2Low
+	Thinking        string `json:"thinking,omitempty"`       // Thinking shape of the target model (Responses translation only): ""/"auto" = look up by client model name; "adaptive" = force adaptive+effort; "budget" = force enabled+budget_tokens
 	SummaryMode     bool   `json:"summary_mode"`             // Standalone search sub-agent requests: inject the summary instruction (at summary_level) into the search request itself — single request, the upstream's response passed through (legacy; claudeSearchSummary overrides)
 	SummaryThinking bool   `json:"summary_thinking"`         // Legacy thinking switch for search sub-agent requests: true rewrites thinking to low (claudeSearchThinking overrides)
 	SummaryLevel    string `json:"summary_level"`            // Summary detail under summary_mode: low (default, brief) / mid (medium) / high (thorough) / max (verbatim steps/code/formulas)
@@ -776,6 +777,11 @@ func validateConfigEnums(c *Config) error {
 	if c.SearchFallback != nil {
 		if err := checkOff2Low("search_fallback", c.SearchFallback.ConvertOff2Low); err != nil {
 			return err
+		}
+		switch c.SearchFallback.Thinking {
+		case "", "auto", "adaptive", "budget":
+		default:
+			return fmt.Errorf("search_fallback has invalid thinking value %q: only auto / adaptive / budget are supported", c.SearchFallback.Thinking)
 		}
 		switch c.SearchFallback.ClaudeSearchThinking {
 		case "", "off", "low", "mid", "high", "max":

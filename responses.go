@@ -172,6 +172,29 @@ func matchRouteRule(c *Config, model string) *RouteRule {
 	return nil
 }
 
+// responsesHasWebSearch reports whether the Responses request carries a server-side web search tool,
+// matching exactly the shapes buildToolRegistry converts. The main handler's hasWebSearch runs on the
+// translated Anthropic body; the translation-time fallback prediction needs the same answer up front.
+func responsesHasWebSearch(body map[string]interface{}) bool {
+	for _, t := range asArr(body["tools"]) {
+		tm := asObj(t)
+		if tm == nil {
+			continue
+		}
+		switch objStr(tm, "type") {
+		case "web_search", "web_search_preview":
+			return true
+		}
+	}
+	return false
+}
+
+// responsesFastRouteTakes reports whether translation will inject speed:"fast" for this model, making
+// the main handler's fast branch win before the routes loop (so no search-fallback diversion happens).
+func responsesFastRouteTakes(c *Config, model string) bool {
+	return model == "fast_route" && c.FastRoute != nil && c.FastRoute.URL != "" && c.FastRoute.Model != ""
+}
+
 // effectiveKey computes the auth token actually in effect for the upstream request: the route key when non-empty,
 // otherwise the client's Authorization header value passes through (same semantics as the main handler's auth override).
 func effectiveKey(routeAPI string, r *http.Request) string {
@@ -259,6 +282,12 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	if rr := matchRouteRule(c, origModel); rr != nil {
 		thinkStyle = effectiveRouteThinking(c, rr)
 		off2Low = effectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.presence.written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
+		// search_fallback is a route too: when this request will be diverted there (effective no_search +
+		// a server-side web_search tool), the thinking shape must describe the fallback's target model.
+		// The main handler makes the same decision after translation; predict it here with the same inputs.
+		if sf := c.SearchFallback; sf != nil && effectiveRouteNoSearch(c, rr) && responsesHasWebSearch(body) && !responsesFastRouteTakes(c, origModel) {
+			thinkStyle = effectiveFallbackThinking(c, sf)
+		}
 	}
 	// The Codex menu's fast lane goes by the literal name "fast_route": its convertOff2Low comes from fast_route itself,
 	// taking priority over any catch-all routes[] entry the name may have pre-matched above.

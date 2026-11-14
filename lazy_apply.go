@@ -155,3 +155,19 @@ func effectiveFallbackSearchSettings(c *Config, rr *RouteRule, sf *SearchRoute) 
 	}
 	return &eff
 }
+
+// effectiveFallbackThinking resolves search_fallback.thinking for a request the fallback will serve:
+// explicit local > lazyApply > "". The hit route's thinking describes the route's own target model and
+// never participates once the request is diverted; the fallback's target is the model actually called.
+func effectiveFallbackThinking(c *Config, sf *SearchRoute) string {
+	if sf == nil {
+		return ""
+	}
+	if sf.presence.written("thinking", sf.Thinking != "") {
+		return sf.Thinking
+	}
+	if la := lazyApplyFor(c, sf.NoLazyApply); la != nil && la.presence.written("thinking", la.Thinking != "") {
+		return la.Thinking
+	}
+	return ""
+}

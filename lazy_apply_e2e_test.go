@@ -437,3 +437,107 @@ func TestLazyApplyResponsesConvertOff2LowE2E(t *testing.T) {
 		})
 	}
 }
+
+// TestLazyApplyResponsesFallbackThinkingE2E locks the translation-time prediction of the search
+// diversion: when the hit route effectively has no_search and the Responses request carries a
+// server-side web_search tool, the translated thinking shape describes search_fallback's target model
+// (explicit > lazyApply > auto), not the hit route's. Without the diversion the route's shape still wins.
+func TestLazyApplyResponsesFallbackThinkingE2E(t *testing.T) {
+	const searchTool = `,"tools":[{"type":"web_search"}]`
+	cases := []struct {
+		name        string
+		route       RouteRule
+		sf          *SearchRoute
+		lazy        *LazyApplyConfig
+		tools       string
+		wantEnabled bool // true = budget shape enabled/16000; false = adaptive/high
+	}{
+		{
+			name:  "fallback thinking beats the hit route's",
+			route: RouteRule{NoSearch: true, Thinking: "budget"},
+			sf:    &SearchRoute{Thinking: "adaptive"},
+			tools: searchTool,
+		},
+		{
+			name:  "fallback local beats lazy",
+			route: RouteRule{NoSearch: true},
+			sf:    &SearchRoute{Thinking: "adaptive"},
+			lazy:  &LazyApplyConfig{Thinking: "budget"},
+			tools: searchTool,
+		},
+		{
+			name:        "fallback inherits lazy",
+			route:       RouteRule{NoSearch: true},
+			sf:          &SearchRoute{},
+			lazy:        &LazyApplyConfig{Thinking: "budget"},
+			tools:       searchTool,
+			wantEnabled: true,
+		},
+		{
+			name:        "no diversion keeps the route shape",
+			route:       RouteRule{NoSearch: true, Thinking: "budget"},
+			sf:          &SearchRoute{Thinking: "adaptive"},
+			wantEnabled: true,
+		},
+		{
+			name:        "search-capable route keeps the route shape",
+			route:       RouteRule{Thinking: "budget"},
+			sf:          &SearchRoute{Thinking: "adaptive"},
+			tools:       searchTool,
+			wantEnabled: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetStats()
+			var got map[string]interface{}
+			// Route and fallback share one mock; the thinking shape proves which config was predicted.
+			mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(b, &got)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(200)
+				io.WriteString(w, testSSEAllBlocks())
+			}))
+			defer mock.Close()
+			rr := tc.route
+			rr.Pattern = "claude-opus*"
+			rr.URL = mock.URL
+			rr.Model = "kimi-for-coding"
+			sf := tc.sf
+			sf.URL = mock.URL
+			sf.Model = "ark-search"
+			sf.API = "sk-sf"
+			cfg.Store(&Config{
+				Upstream:       mock.URL,
+				MaxRetries:     0,
+				TotalBudgetSec: 10,
+				Routes:         []RouteRule{rr},
+				SearchFallback: sf,
+				LazyApply:      tc.lazy,
+			})
+			defer cfg.Store(&Config{})
+			proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
+			defer proxy.Close()
+
+			resp, err := http.Post(proxy.URL+"/v1/responses", "application/json",
+				strings.NewReader(`{"model":"claude-opus-4-8","input":"hi","reasoning":{"effort":"high"}`+tc.tools+`}`))
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+
+			th := asObj(got["thinking"])
+			if tc.wantEnabled {
+				if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+					t.Errorf("thinking=%v, want enabled/16000", th)
+				}
+				return
+			}
+			if objStr(th, "type") != "adaptive" || objStr(asObj(got["output_config"]), "effort") != "high" {
+				t.Errorf("thinking=%v output_config=%v, want adaptive/high", th, got["output_config"])
+			}
+		})
+	}
+}

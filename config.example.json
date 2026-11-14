@@ -86,6 +86,7 @@
     "url": "https://api.deepseek.com",
     "api": "$DEEPSEEK_KEY",
     "model": "deepseek-search",
+    "thinking": "budget",
     "summary_mode": false,
     "summary_thinking": false,
     "summary_level": "low",

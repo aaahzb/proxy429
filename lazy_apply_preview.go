@@ -25,6 +25,7 @@ var lazyApplyRouteKeys = []string{
 // lazyApplySearchFallbackKeys lists the fields search_fallback may inherit. A nested enhance_search never
 // applies here: the fallback serves diverted requests through its own summary/thinking fields.
 var lazyApplySearchFallbackKeys = []string{
+	"thinking",
 	"convertOff2Low",
 	"summary_mode",
 	"summary_thinking",

@@ -2854,9 +2854,9 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       </tr>
       <tr style="border-bottom:1px solid #333">
       <td style="padding:6px 8px;vertical-align:top"><code>thinking</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] 条目</td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] 条目 / search_fallback</td>
       <td style="padding:6px 8px;vertical-align:top">声明目标模型的思考形态：auto（默认，按客户端 model 名查表）/ adaptive / budget</td>
-      <td style="padding:6px 8px;vertical-align:top">仅 Responses 翻译流生效（透传不翻译、Anthropic 口不改写）；别名命中 adaptive 表但目标是 Kimi 等 budget 上游时配 "budget" 纠正</td>
+      <td style="padding:6px 8px;vertical-align:top">仅 Responses 翻译流生效（透传不翻译、Anthropic 口不改写）；别名命中 adaptive 表但目标是 Kimi 等 budget 上游时配 "budget" 纠正；search_fallback 的值在搜索兜底接管时取代命中 route 的 thinking（显式 &gt; lazyApply &gt; auto）</td>
       </tr>
       <tr style="border-bottom:1px solid #333">
       <td style="padding:6px 8px;vertical-align:top"><code>convertOff2Low</code></td>
