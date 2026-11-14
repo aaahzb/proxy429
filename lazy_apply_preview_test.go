@@ -244,7 +244,7 @@ func TestLazyApplyPreviewHandler(t *testing.T) {
 	if rec.Header().Get("Cache-Control") != "no-store" {
 		t.Errorf("Cache-Control = %q, want no-store", rec.Header().Get("Cache-Control"))
 	}
-	if !strings.Contains(rec.Body.String(), `"text_only": true`) {
+	if !strings.Contains(rec.Body.String(), `"text_only":true`) {
 		t.Errorf("preview should contain the materialized field:\n%s", rec.Body.String())
 	}
 	if _, err := materializeLazyApply(rec.Body.Bytes()); err != nil {
@@ -262,7 +262,7 @@ func TestLazyApplyPreviewHandler(t *testing.T) {
 		t.Errorf("invalid config = %d %q, want 400 invalid config", rec.Code, rec.Body.String())
 	}
 
-	// No lazyApply: the preview is still a pretty rendering of the input.
+	// No lazyApply: the preview returns the editor text unchanged.
 	rec = call(http.MethodPost, "127.0.0.1:1", `{"upstream":"http://u"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("no-lazy preview status = %d, body %s", rec.Code, rec.Body.String())
@@ -273,5 +273,110 @@ func TestLazyApplyPreviewHandler(t *testing.T) {
 	}
 	if _, ok := top["lazyApply"]; ok {
 		t.Error("no-lazy preview must not invent a lazyApply object")
+	}
+}
+
+// TestMaterializeLazyApplyPreservesLayout locks the preview's edit-like behavior: every existing byte
+// keeps its position, inherited keys are appended inside each object, and no map re-serialization is
+// allowed to reorder top-level keys or nested route members.
+func TestMaterializeLazyApplyPreservesLayout(t *testing.T) {
+	raw := "{\n" +
+		"  \"listen\": \"127.0.0.1:8080\",\n" +
+		"  \"lazyApply\": {\"text_only\": true, \"convertOff2Low\": \"translate\"},\n" +
+		"  \"routes\": [\n" +
+		"    {\n" +
+		"      \"pattern\": \"claude-opus*\",\n" +
+		"      \"url\": \"http://x\"\n" +
+		"    }\n" +
+		"  ],\n" +
+		"  \"fast_route\": {}\n" +
+		"}\n"
+	want := "{\n" +
+		"  \"listen\": \"127.0.0.1:8080\",\n" +
+		"  \"lazyApply\": {\"text_only\": true, \"convertOff2Low\": \"translate\"},\n" +
+		"  \"routes\": [\n" +
+		"    {\n" +
+		"      \"pattern\": \"claude-opus*\",\n" +
+		"      \"url\": \"http://x\",\n" +
+		"      \"text_only\":true,\n" +
+		"      \"convertOff2Low\":\"translate\"\n" +
+		"    }\n" +
+		"  ],\n" +
+		"  \"fast_route\": {\"convertOff2Low\":\"translate\"}\n" +
+		"}\n"
+	out, err := materializeLazyApply([]byte(raw))
+	if err != nil {
+		t.Fatalf("materializeLazyApply: %v", err)
+	}
+	if string(out) != want {
+		t.Errorf("preview restructured the config\ngot:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// TestMaterializeLazyApplyLeavesUnchangedConfigAlone locks the no-op cases: without effective defaults,
+// or when every supported object already writes the key, the preview returns the editor text byte-for-byte.
+func TestMaterializeLazyApplyLeavesUnchangedConfigAlone(t *testing.T) {
+	for _, raw := range []string{
+		"{\n  \"upstream\": \"http://u\"\n}\n",
+		"{\"upstream\":\"http://u\",\"lazyApply\":null}\n",
+		"{\"upstream\":\"http://u\",\"lazyApply\":{}}\n",
+		"{\"upstream\":\"http://u\",\"lazyApply\":{\"text_only\":true},\"routes\":[{\"pattern\":\"a\",\"url\":\"http://a\",\"text_only\":false}]}",
+	} {
+		out, err := materializeLazyApply([]byte(raw))
+		if err != nil {
+			t.Errorf("%s: materializeLazyApply: %v", raw, err)
+			continue
+		}
+		if string(out) != raw {
+			t.Errorf("unchanged config was rewritten\ngot:  %q\nwant: %q", out, raw)
+		}
+	}
+}
+
+// TestMaterializeLazyApplyCompactObjects locks insertion into single-line objects: keys are appended in
+// the lazyApply field order with no reformatting of the surrounding text.
+func TestMaterializeLazyApplyCompactObjects(t *testing.T) {
+	raw := `{"upstream":"http://u","lazyApply":{"text_only":true,"thinking":"adaptive"},"routes":[{"pattern":"a","url":"http://a"}]}`
+	want := `{"upstream":"http://u","lazyApply":{"text_only":true,"thinking":"adaptive"},"routes":[{"pattern":"a","url":"http://a","text_only":true,"thinking":"adaptive"}]}`
+	out, err := materializeLazyApply([]byte(raw))
+	if err != nil {
+		t.Fatalf("materializeLazyApply: %v", err)
+	}
+	if string(out) != want {
+		t.Errorf("compact insertion\ngot:  %s\nwant: %s", out, want)
+	}
+}
+
+// TestMaterializeLazyApplyTemplate locks the shipped config template: the preview keeps the document's
+// top-level order and existing route formatting, appends inherited keys, and stays behavior-equivalent.
+func TestMaterializeLazyApplyTemplate(t *testing.T) {
+	out, err := materializeLazyApply(configExampleBytes)
+	if err != nil {
+		t.Fatalf("materializeLazyApply(config.example.json): %v", err)
+	}
+	if string(out) == string(configExampleBytes) {
+		t.Fatal("template preview should gain inherited keys")
+	}
+	last := -1
+	for _, key := range []string{`"listen":`, `"upstream":`, `"vars":`, `"lazyApply":`, `"routes":`, `"classifier_route":`, `"search_fallback":`} {
+		idx := strings.Index(string(out), key)
+		if idx <= last {
+			t.Fatalf("top-level order changed or key missing: %s", key)
+		}
+		last = idx
+	}
+	if !strings.Contains(string(out), `"pattern": "claude-opus*"`) {
+		t.Error("existing route formatting was rewritten")
+	}
+	after, _, err := parseConfig(out)
+	if err != nil {
+		t.Fatalf("materialized template does not parse: %v", err)
+	}
+	before, _, err := parseConfig(configExampleBytes)
+	if err != nil {
+		t.Fatalf("template does not parse: %v", err)
+	}
+	if want, got := lazyApplySnapshot(before), lazyApplySnapshot(after); want != got {
+		t.Errorf("materialized template behavior differs\nbefore:\n%s\nafter:\n%s", want, got)
 	}
 }
