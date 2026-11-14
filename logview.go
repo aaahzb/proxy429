@@ -24,6 +24,7 @@ const (
 	logDataPath       = "/__logs/data"
 	configPath        = "/__config"         // GET returns the config content, POST saves and reloads
 	reloadPath        = "/__reload"         // POST only reloads (the file is not modified)
+	lazyPreviewPath   = "/__lazyapply"      // POST returns the JSON after lazyApply materialization (preview only)
 	configsPath       = "/__configs"        // GET lists all .json files in the current config directory (for switching)
 	switchPath        = "/__switch"         // POST switches to the given config file with immediate effect
 	newConfigPath     = "/__newconfig"      // POST creates a new config file (blank template) and switches to it
@@ -1179,7 +1180,17 @@ const logViewerHTML = `<!DOCTYPE html>
   <div style="margin-top:8px">
     <button id="saveBtn">保存并重载</button>
     <button id="reloadBtn" class="ghost">仅重载（不改动文件）</button>
+    <button id="lazyPreviewBtn" class="ghost">预览 lazyApply 生效后 JSON</button>
     <span id="cfgMsg"></span>
+  </div>
+  <div id="lazyPreviewBox" style="display:none;margin-top:8px">
+    <div class="dim">只读预览，不写入文件。展示每个路由类结构在补上 lazyApply 默认值后的样子；局部显式值优先，noLazyApply:true 的对象保持不变。search_fallback 只显示自身值，命中路由的 claudeSearch* 覆盖在运行时叠加。</div>
+    <textarea id="lazyPreview" spellcheck="false" readonly style="width:100%;background:#1e1e1e;color:#d4d4d4;border:1px solid #333;border-radius:4px;padding:8px;font:inherit;min-height:32vh;margin-top:6px"></textarea>
+    <div style="margin-top:8px">
+      <button id="lazyPreviewCopyBtn" class="ghost">复制到编辑框</button>
+      <button id="lazyPreviewCloseBtn" class="ghost">关闭预览</button>
+      <span id="lazyPreviewMsg"></span>
+    </div>
   </div>
   <div id="codexBox">
     <div class="t">Codex 一键配置 —— 下面两行命令按上方编辑框实时生成（地址取自 responses_listen，模型目录取自 routes 的 pattern），在对应终端粘贴回车即运行</div>
@@ -2019,6 +2030,28 @@ document.getElementById('reloadBtn').onclick = async () => {
   }catch(e){ setMsg('err','失败: '+e); }
 };
 
+// lazyApply 预览：把编辑框当前文本发给服务端，按真实加载规则补默认值后只读展示。
+// 预览保留 lazyApply 本身和 $VAR 引用；复制回编辑框再保存即可把默认值固化为显式字段。
+document.getElementById('lazyPreviewBtn').onclick = async () => {
+  setMsg('', '预览中…');
+  try{
+    const r = await fetch('/__lazyapply',{method:'POST',body:document.getElementById('cfg').value});
+    const t = await r.text();
+    if(!r.ok){ setMsg('err', '失败: '+t); return; }
+    document.getElementById('lazyPreview').value = t;
+    document.getElementById('lazyPreviewBox').style.display = 'block';
+    document.getElementById('lazyPreviewMsg').innerHTML = '';
+    setMsg('ok', '已按 lazyApply 展开');
+  }catch(e){ setMsg('err', '失败: '+e); }
+};
+document.getElementById('lazyPreviewCopyBtn').onclick = () => {
+  document.getElementById('cfg').value = document.getElementById('lazyPreview').value;
+  document.getElementById('lazyPreviewMsg').innerHTML = '<span class="ok">已复制到编辑框（尚未保存）</span>';
+};
+document.getElementById('lazyPreviewCloseBtn').onclick = () => {
+  document.getElementById('lazyPreviewBox').style.display = 'none';
+};
+
 // ---- Codex 一键命令：按编辑框的 responses_listen + routes + 所选模型实时生成 ----
 // 页面只给一行终端命令（DeepSeek 文档同款格式），脚本由服务端 /__codexsetup.ps1|sh
 // 按 query 参数（base/model/catalog）烤制下发；值全是白名单字符，query 无需转义。
@@ -2855,6 +2888,18 @@ const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
       <td style="padding:6px 8px;vertical-align:top">搜索兜底上游</td>
       <td style="padding:6px 8px;vertical-align:top">route 标 no_search 且请求含搜索时走它；整请求转发给上游自己搜索回答。独立搜索子代理请求还可被 claudeSearchSummary 注入摘要指令 / claudeSearchThinking 改写思考（单请求，优先于 legacy 的 summary_mode/summary_thinking；这两个字段也能挂在 routes[] 条目上按 pattern 各自设置，命中 route 设了的字段逐字段压过这里的值）</td>
       </tr>
+      <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>lazyApply</code></td>
+      <td style="padding:6px 8px;vertical-align:top">顶层</td>
+      <td style="padding:6px 8px;vertical-align:top">全局默认值：给各路由类结构（routes[] / search_fallback / fast_route / multimodal_fallback / classifier_route）原本就支持的字段补默认值，等价于把该键写进每个没显式设置它的对象</td>
+      <td style="padding:6px 8px;vertical-align:top">逐字段优先级：局部显式值（含 false / ""）&gt; lazyApply &gt; 内置默认；url/api/model/pattern/url_response_api 永不继承；不创建未配置的可选路由；enhance_search 整体覆盖不合并；控制台「预览 lazyApply 生效后 JSON」可只读查看展开结果</td>
+      </tr>
+      <tr>
+      <td style="padding:6px 8px;vertical-align:top"><code>noLazyApply</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] 条目 / search_fallback / fast_route / multimodal_fallback / classifier_route</td>
+      <td style="padding:6px 8px;vertical-align:top">true = 该对象整体不继承 lazyApply，自己显式写的字段照常生效</td>
+      <td style="padding:6px 8px;vertical-align:top">用于让个别 route 保留 search_fallback 自己的值：继承来的 claudeSearch* 视同局部写入，会压过 fallback</td>
+      </tr>
       </table>
       <h3>pattern 顺序</h3>
       <p>routes 按数组顺序匹配，第一个命中的生效，无"更具体优先"排序。宽通配会截胡窄通配--<code>*opus*</code> 写在 <code>*opus-4*</code> 前面时，<code>claude-opus-4-8</code> 先命中 <code>*opus*</code>，<code>*opus-4*</code> 永不触发；要让更具体的 pattern 生效，写在前面。另外 <code>pattern</code> 可以写成数组表示"或"：<code>"pattern": ["*fable*", "*opus*"]</code> 等价于把同一条路由复制多份、每份一个 pattern（其余字段共享，位置与数组顺序即匹配顺序）；数组成员里的 <code>*</code> 同样算兜底，保留名只废掉对应那一项；空数组或非字符串成员会在加载/保存时报错。</p>
@@ -2995,6 +3040,18 @@ const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h
       <td style="padding:6px 8px;vertical-align:top">Search fallback upstream</td>
       <td style="padding:6px 8px;vertical-align:top">Used when a route is marked no_search and the request contains search; the whole request is forwarded to the upstream to search and answer. Standalone search sub-agent requests may additionally get an injected summary instruction (claudeSearchSummary) / a thinking rewrite (claudeSearchThinking) — single request, taking precedence over the legacy summary_mode/summary_thinking; both fields also mount on routes[] entries per pattern, and a hit route's set fields override these values per field</td>
       </tr>
+      <tr style="border-bottom:1px solid #333">
+      <td style="padding:6px 8px;vertical-align:top"><code>lazyApply</code></td>
+      <td style="padding:6px 8px;vertical-align:top">top level</td>
+      <td style="padding:6px 8px;vertical-align:top">Shared defaults: fills a field that every route-like object (routes[] / search_fallback / fast_route / multimodal_fallback / classifier_route) already supports, as if the key were written into every object that does not set it explicitly</td>
+      <td style="padding:6px 8px;vertical-align:top">Per-field priority: explicit local value (including false / "") &gt; lazyApply &gt; built-in default; url/api/model/pattern/url_response_api are never inherited; never creates an unconfigured optional route; enhance_search is replaced whole, never merged; the console's "Preview JSON after lazyApply" shows the expansion read-only</td>
+      </tr>
+      <tr>
+      <td style="padding:6px 8px;vertical-align:top"><code>noLazyApply</code></td>
+      <td style="padding:6px 8px;vertical-align:top">routes[] entry / search_fallback / fast_route / multimodal_fallback / classifier_route</td>
+      <td style="padding:6px 8px;vertical-align:top">true = this object ignores lazyApply entirely; its own explicit fields keep working</td>
+      <td style="padding:6px 8px;vertical-align:top">Use it when one route should keep search_fallback's own values: an inherited claudeSearch* value behaves as locally written and therefore beats the fallback</td>
+      </tr>
       </tbody>
       </table>
       <h3>Pattern order</h3>
@@ -3096,6 +3153,13 @@ var enHTMLRepl = [][2]string{
 	{`>删除</button>`, `>Delete</button>`},
 	{`>保存并重载</button>`, `>Save & reload</button>`},
 	{`>仅重载（不改动文件）</button>`, `>Reload only (file untouched)</button>`},
+	{`>预览 lazyApply 生效后 JSON</button>`, `>Preview JSON after lazyApply</button>`},
+	{`>复制到编辑框</button>`, `>Copy to editor</button>`},
+	{`>关闭预览</button>`, `>Close preview</button>`},
+	{`只读预览，不写入文件。展示每个路由类结构在补上 lazyApply 默认值后的样子；局部显式值优先，noLazyApply:true 的对象保持不变。search_fallback 只显示自身值，命中路由的 claudeSearch* 覆盖在运行时叠加。`, `Read-only preview; nothing is written. Shows each route-like object after lazyApply defaults are filled in: an explicit local value wins, and noLazyApply:true objects stay untouched. search_fallback shows only its own values; a matched route's claudeSearch* overlay is applied at runtime.`},
+	{`'预览中…'`, `'Previewing…'`},
+	{`'已按 lazyApply 展开'`, `'Expanded with lazyApply'`},
+	{`已复制到编辑框（尚未保存）`, `Copied to the editor (not saved yet)`},
 	{`Codex 一键配置 —— 下面两行命令按上方编辑框实时生成（地址取自 responses_listen，模型目录取自 routes 的 pattern），在对应终端粘贴回车即运行`, `Codex one-line setup — the two commands below are generated live from the editor above (address from responses_listen, model catalog from routes patterns); paste into the matching terminal and press Enter`},
 	{`当前配置没有 responses_listen，Responses API 监听口未启用。要为本配置增加 Responses API 功能吗？`, `This config has no responses_listen — the Responses API listener is off. Add Responses API support to this config?`},
 	{`>是，添加并保存</button>`, `>Yes, add & save</button>`},

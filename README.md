@@ -61,6 +61,7 @@ The console can help answer practical questions: What did the agent send to the 
 - **Model remapping:** route a client-facing model name to a different upstream model and switch routes from the tray menu.
 - **Search follow-ups:** in the protocol-translation path, search results can be carried in an encrypted response envelope for reuse by follow-up requests.
 - **Empty-search guard:** optionally replace all-empty Claude Code standalone-search responses with a fixed no-results stream on selected routes, preventing a fabricated answer from prior knowledge.
+- **Shared route defaults:** a top-level `lazyApply` object fills supported per-route behavior fields (search summary/thinking, empty-search guard, thinking shape, capability flags) into every route-like object that omits them; explicit local values and per-object `noLazyApply` exceptions still win.
 - **Thinking behavior:** configured thinking-mode handling can adapt requests and responses for supported upstreams.
 - **Cross-platform tray app:** Windows, macOS, and Linux builds, with a bilingual Chinese/English web console.
 

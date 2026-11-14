@@ -257,13 +257,13 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	thinkStyle := ""
 	off2Low := ""
 	if rr := matchRouteRule(c, origModel); rr != nil {
-		thinkStyle = rr.Thinking
-		off2Low = rr.ConvertOff2Low
+		thinkStyle = effectiveRouteThinking(c, rr)
+		off2Low = effectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.presence.written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
 	}
 	// The Codex menu's fast lane goes by the literal name "fast_route": its convertOff2Low comes from fast_route itself,
 	// taking priority over any catch-all routes[] entry the name may have pre-matched above.
 	if origModel == "fast_route" && c.FastRoute != nil {
-		off2Low = c.FastRoute.ConvertOff2Low
+		off2Low = effectiveConvertOff2Low(c, c.FastRoute.ConvertOff2Low, c.FastRoute.presence.written("convertOff2Low", c.FastRoute.ConvertOff2Low != ""), c.FastRoute.NoLazyApply)
 	}
 	anth, reg, n2l, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle, off2Low == "translate" || off2Low == "all", allowNoThinkBlock4Anthropic(c))
 	if err != nil {

@@ -43,6 +43,7 @@ type Config struct {
 	LogRequestDetail         bool              `json:"log_request_detail"`
 	LogFile                  string            `json:"log_file"`                      // Log file path; when set, logs are also appended to this file so they can be viewed/copied without a console (e.g. RemoteApp)
 	RecentSampleWindow       int               `json:"recent_sample_window"`          // Window size for the status row's "last X" latency/throughput stats; 0 = default 20
+	LazyApply                *LazyApplyConfig  `json:"lazyApply,omitempty"`           // Global defaults for behavior fields shared by route-like objects; a local explicit value wins, noLazyApply opts an object out
 	Routes                   []RouteRule       `json:"routes"`                        // Model routing rules; empty = no routing, use the default upstream
 	ClassifierRoute          *ClassifierRoute  `json:"classifier_route,omitempty"`    // Dedicated route for classifier requests; classifier hits are routed here regardless of the original model; empty = disabled
 	FastRoute                *FastRoute        `json:"fast_route,omitempty"`          // Dedicated route for fast-mode requests; non-classifier requests carrying "speed":"fast" are routed here; empty = disabled
@@ -84,6 +85,9 @@ type RouteRule struct {
 	ClaudeSearchThinking          string `json:"claudeSearchThinking,omitempty"`          // Standalone search sub-agent requests hitting this route: rewrite thinking to off/low/mid/high/max; unset = fall back (to enhance_search legacy when this route serves, to search_fallback's own setting when diverted there)
 	ClaudeSearchSummary           string `json:"claudeSearchSummary,omitempty"`           // Same requests: forceLow/forceMid/forceHigh inject the matching summary instruction, noForce disables injection; unset = fall back as above. A set value beats this route's enhance_search legacy fields and (per field) search_fallback's own
 	NoBullshitOnEmptyClaudeSearch *bool  `json:"noBullshitOnEmptyClaudeSearch,omitempty"` // Same requests: replace an all-empty web-search response with a fixed no-results stream; unset = off here, or inherit search_fallback when diverted. Explicit false beats a fallback true
+	NoLazyApply                   bool   `json:"noLazyApply,omitempty"`                   // This route ignores every lazyApply default; its own explicit fields stay authoritative
+
+	presence configPresence // JSON key presence captured after variable/pattern expansion
 }
 
 // EnhanceSearchConfig holds optional enhanced-search parameters inside a routes entry. When the route hits and the request carries
@@ -104,6 +108,9 @@ type ClassifierRoute struct {
 	ClassifierThinking      string `json:"classifier_thinking,omitempty"`       // Shared classifier thinking policy: ""/unset = leave the request's thinking untouched; "off" = rewrite the body to thinking-off so classification returns fast; "low" = lower adaptive thinking to effort low (non-adaptive shapes pass through untouched)
 	ClassifierThinkingCC    string `json:"classifier_thinking_cc,omitempty"`    // Claude Code override of classifier_thinking; unset = fall back to the shared value
 	ClassifierThinkingCodex string `json:"classifier_thinking_codex,omitempty"` // Codex guardian override of classifier_thinking; unset = fall back to the shared value
+	NoLazyApply             bool   `json:"noLazyApply,omitempty"`               // This route ignores every lazyApply default; its own explicit fields stay authoritative
+
+	presence configPresence // JSON key presence captured after variable/pattern expansion
 }
 
 // FastRoute defines the dedicated route for fast-mode requests: non-classifier requests carrying "speed":"fast" go to the specified upstream.
@@ -113,6 +120,9 @@ type FastRoute struct {
 	API            string `json:"api"`                      // Target API key; empty = pass through the client's token
 	Model          string `json:"model"`                    // Target model name to rewrite to; empty = leave the model field unchanged
 	ConvertOff2Low string `json:"convertOff2Low,omitempty"` // Same semantics as RouteRule.ConvertOff2Low
+	NoLazyApply    bool   `json:"noLazyApply,omitempty"`    // This route ignores every lazyApply default
+
+	presence configPresence // JSON key presence captured after variable expansion
 }
 
 // MultimodalRoute defines the multimodal fallback: when a request contains images but hits a text_only text-only model,
@@ -122,6 +132,9 @@ type MultimodalRoute struct {
 	API            string `json:"api"`                      // Target API key; empty = pass through the client's token
 	Model          string `json:"model"`                    // Target model name to rewrite to; empty = leave the model field unchanged
 	ConvertOff2Low string `json:"convertOff2Low,omitempty"` // Same semantics as RouteRule.ConvertOff2Low
+	NoLazyApply    bool   `json:"noLazyApply,omitempty"`    // This route ignores every lazyApply default
+
+	presence configPresence // JSON key presence captured after variable expansion
 }
 
 // SearchRoute defines the search fallback: when a request carries search tools but hits a no_search search-incapable upstream,
@@ -138,6 +151,51 @@ type SearchRoute struct {
 	ClaudeSearchThinking          string `json:"claudeSearchThinking,omitempty"`          // Standalone search sub-agent requests: rewrite thinking to off / low / mid / high / max (beats summary_thinking; unset = legacy behavior)
 	ClaudeSearchSummary           string `json:"claudeSearchSummary,omitempty"`           // Standalone search sub-agent requests: forceLow / forceMid / forceHigh inject the matching summary instruction into the search request itself; noForce disables injection (beats summary_mode; unset = legacy behavior)
 	NoBullshitOnEmptyClaudeSearch *bool  `json:"noBullshitOnEmptyClaudeSearch,omitempty"` // Standalone search sub-agent requests: replace an all-empty web-search response with a fixed no-results stream; unset = off unless the matched route explicitly overrides it
+	NoLazyApply                   bool   `json:"noLazyApply,omitempty"`                   // This fallback ignores every lazyApply default; its own explicit fields stay authoritative
+
+	presence configPresence // JSON key presence captured after variable expansion
+}
+
+// configPresence records which JSON object keys were actually written, so lazyApply resolution can
+// distinguish an omitted key from an explicit false / "" / null. A nil map means "no JSON metadata"
+// (programmatic Go literals keep the existing non-zero-means-set convention); a non-nil empty map
+// means a real JSON object that contained no recognized keys.
+type configPresence map[string]struct{}
+
+// written reports whether key was present in the source JSON. Without presence metadata it falls
+// back to the caller-provided non-zero test, keeping Go-literal configs working.
+func (p configPresence) written(key string, nonzero bool) bool {
+	if p == nil {
+		return nonzero
+	}
+	_, ok := p[key]
+	return ok
+}
+
+// LazyApplyConfig supplies defaults for behavior fields that route-like objects already accept.
+// Resolution is per field: an explicitly written local value wins over lazyApply, and an omitted
+// local key inherits lazyApply. noLazyApply on a route-like object disables all of its defaults.
+type LazyApplyConfig struct {
+	TextOnly       bool   `json:"text_only,omitempty"`      // Default for routes[].text_only
+	NoSearch       bool   `json:"no_search,omitempty"`      // Default for routes[].no_search
+	Thinking       string `json:"thinking,omitempty"`       // Default for routes[].thinking (Responses translation pre-match)
+	ConvertOff2Low string `json:"convertOff2Low,omitempty"` // Default for every route-like object that accepts convertOff2Low
+
+	EnhanceSearch *EnhanceSearchConfig `json:"enhance_search,omitempty"` // Default direct-route enhance_search (object; a local object or null wins whole)
+
+	SummaryMode     bool   `json:"summary_mode,omitempty"`     // Default for search_fallback.summary_mode
+	SummaryThinking bool   `json:"summary_thinking,omitempty"` // Default for search_fallback.summary_thinking
+	SummaryLevel    string `json:"summary_level,omitempty"`    // Default for search_fallback.summary_level
+
+	ClaudeSearchThinking          string `json:"claudeSearchThinking,omitempty"`          // Default for matching claudeSearchThinking fields
+	ClaudeSearchSummary           string `json:"claudeSearchSummary,omitempty"`           // Default for matching claudeSearchSummary fields
+	NoBullshitOnEmptyClaudeSearch *bool  `json:"noBullshitOnEmptyClaudeSearch,omitempty"` // Default for matching empty-search guard fields
+
+	ClassifierThinking      string `json:"classifier_thinking,omitempty"`       // Default for classifier_route.classifier_thinking
+	ClassifierThinkingCC    string `json:"classifier_thinking_cc,omitempty"`    // Default for classifier_route.classifier_thinking_cc
+	ClassifierThinkingCodex string `json:"classifier_thinking_codex,omitempty"` // Default for classifier_route.classifier_thinking_codex
+
+	presence configPresence // JSON key presence captured after variable expansion
 }
 
 // Version is the build stamp, injected by build.sh via -ldflags "-X main.Version=...": "release vX.Y.Z.N" when
@@ -521,6 +579,17 @@ func parseConfig(data []byte) (*Config, []string, error) {
 	if err := expandRoutePatterns(top); err != nil {
 		return nil, nil, err
 	}
+	// lazyApply and its nested enhance_search are the only strictly decoded objects: a typo there would
+	// silently disable a global default. Decode it separately so the error names the exact path.
+	var lazyApply *LazyApplyConfig
+	var lazyApplyPresence configPresence
+	if raw, ok := top["lazyApply"]; ok {
+		var err error
+		lazyApply, lazyApplyPresence, err = decodeLazyApply(raw)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	full, err := json.Marshal(top)
 	if err != nil {
 		return nil, nil, err
@@ -529,6 +598,11 @@ func parseConfig(data []byte) (*Config, []string, error) {
 	if err := json.Unmarshal(full, &c); err != nil {
 		return nil, nil, err
 	}
+	if lazyApply != nil {
+		lazyApply.presence = lazyApplyPresence
+	}
+	c.LazyApply = lazyApply
+	attachConfigPresence(top, &c)
 	if err := validateConfigEnums(&c); err != nil {
 		return nil, nil, err
 	}
@@ -552,9 +626,98 @@ func parseConfig(data []byte) (*Config, []string, error) {
 	return &c, warnings, nil
 }
 
+// keysPresence turns a decoded JSON object into key-presence metadata. A nil map (JSON null) becomes an
+// empty non-nil map, so "present but no keys" stays distinguishable from "no metadata at all".
+func keysPresence(m map[string]json.RawMessage) configPresence {
+	p := make(configPresence, len(m))
+	for k := range m {
+		p[k] = struct{}{}
+	}
+	return p
+}
+
+// decodeLazyApply strictly decodes the top-level lazyApply object and its nested enhance_search object.
+// Unknown fields (including connection fields such as url/api/model/pattern/url_response_api) are rejected
+// with a path-specific error; the rest of the configuration keeps its existing tolerant decoding.
+func decodeLazyApply(raw json.RawMessage) (*LazyApplyConfig, configPresence, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil, nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &m); err != nil {
+		return nil, nil, fmt.Errorf("lazyApply: %w", err)
+	}
+	if er, ok := m["enhance_search"]; ok {
+		if et := bytes.TrimSpace(er); len(et) > 0 && !bytes.Equal(et, []byte("null")) {
+			var es EnhanceSearchConfig
+			dec := json.NewDecoder(bytes.NewReader(et))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&es); err != nil {
+				return nil, nil, fmt.Errorf("lazyApply.enhance_search: %w", err)
+			}
+		}
+	}
+	var la LazyApplyConfig
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&la); err != nil {
+		return nil, nil, fmt.Errorf("lazyApply: %w", err)
+	}
+	return &la, keysPresence(m), nil
+}
+
+// attachConfigPresence copies the raw expanded JSON's key presence onto the typed configuration objects.
+// It runs after both the variable expansion and the route-pattern-array expansion, so every expanded route
+// receives the same presence as its source object.
+func attachConfigPresence(top map[string]json.RawMessage, c *Config) {
+	attach := func(key string, dst *configPresence) {
+		raw, ok := top[key]
+		if !ok {
+			return
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return
+		}
+		*dst = keysPresence(m)
+	}
+	if raw, ok := top["routes"]; ok {
+		var entries []json.RawMessage
+		if json.Unmarshal(raw, &entries) == nil {
+			for i := range c.Routes {
+				if i >= len(entries) {
+					break
+				}
+				var m map[string]json.RawMessage
+				if err := json.Unmarshal(entries[i], &m); err != nil {
+					c.Routes[i].presence = configPresence{}
+					continue
+				}
+				c.Routes[i].presence = keysPresence(m)
+			}
+		}
+	}
+	if c.ClassifierRoute != nil {
+		attach("classifier_route", &c.ClassifierRoute.presence)
+	}
+	if c.FastRoute != nil {
+		attach("fast_route", &c.FastRoute.presence)
+	}
+	if c.MultimodalFallback != nil {
+		attach("multimodal_fallback", &c.MultimodalFallback.presence)
+	}
+	if c.SearchFallback != nil {
+		attach("search_fallback", &c.SearchFallback.presence)
+	}
+}
+
 // validateConfigEnums rejects config values outside their supported sets (route thinking shapes, classifier thinking
 // policy, convertOff2Low scope), so a typo fails loudly at load/save time instead of silently doing nothing.
 func validateConfigEnums(c *Config) error {
+	if err := validateLazyApplyEnums(c.LazyApply); err != nil {
+		return err
+	}
 	if cr := c.ClassifierRoute; cr != nil {
 		switch cr.ClassifierThinking {
 		case "", "off", "low":
@@ -623,6 +786,63 @@ func validateConfigEnums(c *Config) error {
 		case "", "noForce", "forceLow", "forceMid", "forceHigh":
 		default:
 			return fmt.Errorf("search_fallback has invalid claudeSearchSummary value %q: only noForce / forceLow / forceMid / forceHigh are supported (unset = no summary-prompt injection)", c.SearchFallback.ClaudeSearchSummary)
+		}
+	}
+	return nil
+}
+
+// validateDefaultSummaryLevel accepts exactly the levels summaryLevelConfig consumes (including its aliases).
+func validateDefaultSummaryLevel(owner, level string) error {
+	switch level {
+	case "", "low", "mid", "medium", "high", "max", "full":
+		return nil
+	default:
+		return fmt.Errorf("%s has invalid summary_level value %q: only low / mid / medium / high / max / full are supported", owner, level)
+	}
+}
+
+// validateLazyApplyEnums validates every enum in lazyApply, including the nested enhance_search object.
+func validateLazyApplyEnums(la *LazyApplyConfig) error {
+	if la == nil {
+		return nil
+	}
+	switch la.Thinking {
+	case "", "auto", "adaptive", "budget":
+	default:
+		return fmt.Errorf("lazyApply has invalid thinking value %q: only auto / adaptive / budget are supported", la.Thinking)
+	}
+	switch la.ConvertOff2Low {
+	case "", "translate", "all":
+	default:
+		return fmt.Errorf("lazyApply has invalid convertOff2Low value %q: only \"translate\" / \"all\" are supported (unset = off)", la.ConvertOff2Low)
+	}
+	switch la.ClaudeSearchThinking {
+	case "", "off", "low", "mid", "high", "max":
+	default:
+		return fmt.Errorf("lazyApply has invalid claudeSearchThinking value %q: only off / low / mid / high / max are supported", la.ClaudeSearchThinking)
+	}
+	switch la.ClaudeSearchSummary {
+	case "", "noForce", "forceLow", "forceMid", "forceHigh":
+	default:
+		return fmt.Errorf("lazyApply has invalid claudeSearchSummary value %q: only noForce / forceLow / forceMid / forceHigh are supported", la.ClaudeSearchSummary)
+	}
+	for _, f := range []struct{ name, value string }{
+		{"classifier_thinking", la.ClassifierThinking},
+		{"classifier_thinking_cc", la.ClassifierThinkingCC},
+		{"classifier_thinking_codex", la.ClassifierThinkingCodex},
+	} {
+		switch f.value {
+		case "", "off", "low":
+		default:
+			return fmt.Errorf("lazyApply has invalid %s value %q: only \"off\" and \"low\" are supported", f.name, f.value)
+		}
+	}
+	if err := validateDefaultSummaryLevel("lazyApply.summary_level", la.SummaryLevel); err != nil {
+		return err
+	}
+	if la.EnhanceSearch != nil {
+		if err := validateDefaultSummaryLevel("lazyApply.enhance_search.summary_level", la.EnhanceSearch.SummaryLevel); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -3329,16 +3549,40 @@ func detectClassifier(body []byte) classifierSource {
 // the per-source override (classifier_thinking_cc / classifier_thinking_codex) wins;
 // unset falls back to the shared classifier_thinking; "" = the request's thinking goes through untouched.
 func classifierThinkingModeFor(c *Config, kind classifierSource) string {
-	if c.ClassifierRoute == nil {
+	if c == nil || c.ClassifierRoute == nil {
 		return ""
 	}
-	if kind == classifierCodex && c.ClassifierRoute.ClassifierThinkingCodex != "" {
-		return c.ClassifierRoute.ClassifierThinkingCodex
+	cr := c.ClassifierRoute
+	la := lazyApplyFor(c, cr.NoLazyApply)
+	// Resolve each field independently: explicit local > lazyApply > built-in empty.
+	shared := cr.ClassifierThinking
+	if !cr.presence.written("classifier_thinking", shared != "") {
+		shared = ""
+		if la != nil && la.presence.written("classifier_thinking", la.ClassifierThinking != "") {
+			shared = la.ClassifierThinking
+		}
 	}
-	if kind == classifierCC && c.ClassifierRoute.ClassifierThinkingCC != "" {
-		return c.ClassifierRoute.ClassifierThinkingCC
+	cc := cr.ClassifierThinkingCC
+	if !cr.presence.written("classifier_thinking_cc", cc != "") {
+		cc = ""
+		if la != nil && la.presence.written("classifier_thinking_cc", la.ClassifierThinkingCC != "") {
+			cc = la.ClassifierThinkingCC
+		}
 	}
-	return c.ClassifierRoute.ClassifierThinking
+	codex := cr.ClassifierThinkingCodex
+	if !cr.presence.written("classifier_thinking_codex", codex != "") {
+		codex = ""
+		if la != nil && la.presence.written("classifier_thinking_codex", la.ClassifierThinkingCodex != "") {
+			codex = la.ClassifierThinkingCodex
+		}
+	}
+	if kind == classifierCodex && codex != "" {
+		return codex
+	}
+	if kind == classifierCC && cc != "" {
+		return cc
+	}
+	return shared
 }
 
 // classifierTag returns the per-source log tag fragment ("(codex)" for Codex guardian hits, "" for Claude Code).
@@ -4930,7 +5174,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		upstream = fr.URL
 		authToken = fr.API
 		fastRouteHit = true
-		convFlag = fr.ConvertOff2Low
+		convFlag = effectiveConvertOff2Low(c, fr.ConvertOff2Low, fr.presence.written("convertOff2Low", fr.ConvertOff2Low != ""), fr.NoLazyApply)
 		if fr.Model != "" && fr.Model != origModel {
 			body = replaceModelValue(body, fr.Model)
 			targetModel = fr.Model
@@ -4971,8 +5215,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 				// Capability fallback: when the target upstream lacks image/search capability the request needs, switch to the corresponding fallback upstream.
-				needImage := rr.TextOnly && hasImage(body)
-				needSearch := rr.NoSearch && hasWebSearch(body)
+				needImage := effectiveRouteTextOnly(c, rr) && hasImage(body)
+				needSearch := effectiveRouteNoSearch(c, rr) && hasWebSearch(body)
 				if needImage || needSearch {
 					// applyFB assigns the selected fallback upstream to the current request (changing upstream/API/model).
 					applyFB := func(url, api, model, label string, reason int32) {
@@ -4992,24 +5236,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					//    is resolved here and applied to the request body after the routing block.
 					if needSearch && sf != nil {
 						applyFB(sf.URL, sf.API, sf.Model, "search-fallback", routeSearch)
-						convFlag = sf.ConvertOff2Low // The fallback's own flag overwrites the matched route's
-						// The matched route's claudeSearch* fields win over search_fallback's own, per field
-						// (each no_search route can get its own summary/thinking treatment of the same fallback).
-						eff := *sf
-						if rr.ClaudeSearchSummary != "" {
-							eff.ClaudeSearchSummary = rr.ClaudeSearchSummary
-						}
-						if rr.ClaudeSearchThinking != "" {
-							eff.ClaudeSearchThinking = rr.ClaudeSearchThinking
-						}
-						searchInjectLevel, searchThinkLevel = resolveSearchBehavior(&eff)
-						searchGuardEnabled = resolveSearchGuard(rr, sf)
+						// Per field: route claudeSearch* > search_fallback > lazyApply > built-in.
+						effFB := effectiveFallbackSearchSettings(c, rr, sf)
+						convFlag = effFB.ConvertOff2Low // The fallback's own effective flag overwrites the matched route's
+						searchInjectLevel, searchThinkLevel = resolveSearchBehavior(effFB)
+						searchGuardEnabled = effectiveSearchGuard(c, rr, sf)
 						break
 					}
 					// Pure images (no search): use multimodal_fallback when configured; search requests never land on mf (degrade to passthrough when there's no sf).
 					if needImage && mf != nil && !needSearch {
 						applyFB(mf.URL, mf.API, mf.Model, "image-fallback", routeMultimodal)
-						convFlag = mf.ConvertOff2Low // The fallback's own flag overwrites the matched route's
+						convFlag = effectiveConvertOff2Low(c, mf.ConvertOff2Low, mf.presence.written("convertOff2Low", mf.ConvertOff2Low != ""), mf.NoLazyApply)
 						break
 					}
 					// Degrade: search without sf, or pure images without mf — pass through to the original route (the upstream handles it, possibly with an error).
@@ -5022,23 +5259,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.id, origModel, rr.URL, origModel, rr.Model)
 				f.routeReason.Store(routePattern)
-				convFlag = rr.ConvertOff2Low
-				searchGuardEnabled = resolveSearchGuard(rr, nil)
-				// Enhance search / route-level claudeSearch*: when the route supports search (no_search:false) and has
-				// enhance_search or claudeSearch* configured, a standalone search sub-agent request gets the summary instruction
-				// injected into the request itself and/or its thinking rewritten (single-request mode), served by the route's
-				// own upstream — the request forwards to the route as usual; only the body transform after the routing block
-				// applies. The route's claudeSearch* fields win over the legacy enhance_search summary_* fields.
-				if (rr.EnhanceSearch != nil || rr.ClaudeSearchSummary != "" || rr.ClaudeSearchThinking != "") && hasWebSearch(body) && !rr.NoSearch && !(rr.TextOnly && hasImage(body)) {
-					synth := &SearchRoute{
-						ClaudeSearchSummary:  rr.ClaudeSearchSummary,
-						ClaudeSearchThinking: rr.ClaudeSearchThinking,
-					}
-					if rr.EnhanceSearch != nil {
-						synth.SummaryMode = true
-						synth.SummaryLevel = rr.EnhanceSearch.SummaryLevel
-						synth.SummaryThinking = rr.EnhanceSearch.SummaryThinking
-					}
+				convFlag = effectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.presence.written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
+				searchGuardEnabled = effectiveSearchGuard(c, rr, nil)
+				// Enhance search / route-level claudeSearch*: when the route effectively supports search (no_search:false),
+				// a standalone search sub-agent request gets the summary instruction injected into the request itself
+				// and/or its thinking rewritten (single-request mode), served by the route's own upstream — the request
+				// forwards to the route as usual; only the body transform after the routing block applies. Local
+				// claudeSearch* fields win over the legacy enhance_search summary_* fields; lazyApply fills omitted fields.
+				if hasWebSearch(body) && !effectiveRouteNoSearch(c, rr) && !(effectiveRouteTextOnly(c, rr) && hasImage(body)) {
+					synth := effectiveDirectSearchSettings(c, rr)
 					searchInjectLevel, searchThinkLevel = resolveSearchBehavior(synth)
 					if searchInjectLevel != "" || searchThinkLevel != "" {
 						log.Printf("[route] #%d enhanced search %s -> %s (model %s)", f.id, origModel, rr.URL, rr.Model)
@@ -5575,6 +5804,7 @@ func runServer(c *Config) {
 		}
 	})
 	http.HandleFunc(reloadPath, reloadHandler)
+	http.HandleFunc(lazyPreviewPath, lazyApplyPreviewHandler)
 	http.HandleFunc(configsPath, configsHandler)
 	http.HandleFunc(switchPath, switchHandler)
 	http.HandleFunc(newConfigPath, newConfigHandler)

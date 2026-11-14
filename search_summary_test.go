@@ -481,7 +481,7 @@ var bigMaxSearchReq = strings.Replace(searchSubagentReq, `"max_tokens":32000`, `
 // when routeServesSearch the route's own URL points at the recording search mock (a search-capable route serving
 // the request itself, no search_fallback involved), otherwise the route points at a hit-detecting dummy and
 // search_fallback (sf, nil allowed) serves the diverted request.
-func runSearchE2EFull(t *testing.T, rr RouteRule, sf *SearchRoute, routeServesSearch bool, clientBody string) (clientOut string, sfBodies [][]byte, routeCalled bool, recent string) {
+func runSearchE2EFull(t *testing.T, rr RouteRule, sf *SearchRoute, routeServesSearch bool, clientBody string, lazy ...*LazyApplyConfig) (clientOut string, sfBodies [][]byte, routeCalled bool, recent string) {
 	t.Helper()
 	resetStats()
 	sfMock, bodies := searchE2EMock(t)
@@ -503,14 +503,18 @@ func runSearchE2EFull(t *testing.T, rr RouteRule, sf *SearchRoute, routeServesSe
 		rr.URL = routeMock.URL
 	}
 
-	cfg.Store(&Config{
+	runtimeCfg := &Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
 		Routes:             []RouteRule{rr},
 		SearchFallback:     sf,
-	})
+	}
+	if len(lazy) > 0 {
+		runtimeCfg.LazyApply = lazy[0]
+	}
+	cfg.Store(runtimeCfg)
 	defer cfg.Store(&Config{})
 	stats.resetSampleCap(5)
 

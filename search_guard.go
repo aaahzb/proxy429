@@ -23,14 +23,30 @@ type searchGuardUsage struct {
 	output        int64
 }
 
-// resolveSearchGuard applies the same route-wins rule as the other claudeSearch* fields.
-// A pointer distinguishes an explicit false from an unset route that inherits search_fallback.
-func resolveSearchGuard(route *RouteRule, fallback *SearchRoute) bool {
-	if route != nil && route.NoBullshitOnEmptyClaudeSearch != nil {
-		return *route.NoBullshitOnEmptyClaudeSearch
+// effectiveSearchGuard resolves the guard with lazyApply materialized: route local > route lazy >
+// fallback local > fallback lazy > false. Defaults never arm the guard without a matched route or
+// fallback object, so the unmatched default upstream stays unchanged. An object's own noLazyApply
+// removes only that object's inherited layer; an explicit local value always wins.
+func effectiveSearchGuard(c *Config, route *RouteRule, fallback *SearchRoute) bool {
+	// lazyApply behaves as if the key were written into every supported object. Resolve the route
+	// first (local then lazy), so a route-level default keeps the existing route-over-fallback
+	// precedence; a route noLazyApply removes only the inherited layer. The fallback resolves the
+	// same way, and an unmatched request (both nil) never arms the guard.
+	if route != nil {
+		if route.presence.written("noBullshitOnEmptyClaudeSearch", route.NoBullshitOnEmptyClaudeSearch != nil) {
+			return route.NoBullshitOnEmptyClaudeSearch != nil && *route.NoBullshitOnEmptyClaudeSearch
+		}
+		if la := lazyApplyFor(c, route.NoLazyApply); la != nil && la.presence.written("noBullshitOnEmptyClaudeSearch", la.NoBullshitOnEmptyClaudeSearch != nil) {
+			return la.NoBullshitOnEmptyClaudeSearch != nil && *la.NoBullshitOnEmptyClaudeSearch
+		}
 	}
-	if fallback != nil && fallback.NoBullshitOnEmptyClaudeSearch != nil {
-		return *fallback.NoBullshitOnEmptyClaudeSearch
+	if fallback != nil {
+		if fallback.presence.written("noBullshitOnEmptyClaudeSearch", fallback.NoBullshitOnEmptyClaudeSearch != nil) {
+			return fallback.NoBullshitOnEmptyClaudeSearch != nil && *fallback.NoBullshitOnEmptyClaudeSearch
+		}
+		if la := lazyApplyFor(c, fallback.NoLazyApply); la != nil && la.presence.written("noBullshitOnEmptyClaudeSearch", la.NoBullshitOnEmptyClaudeSearch != nil) {
+			return la.NoBullshitOnEmptyClaudeSearch != nil && *la.NoBullshitOnEmptyClaudeSearch
+		}
 	}
 	return false
 }

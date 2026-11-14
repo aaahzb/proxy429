@@ -63,6 +63,16 @@ func TestConfigExampleMatchesStruct(t *testing.T) {
 		}
 	}
 
+	// lazyApply demo values must be enums the runtime actually accepts.
+	if la := c.LazyApply; la != nil {
+		if !validSearchThink[la.ClaudeSearchThinking] {
+			t.Errorf("lazyApply.claudeSearchThinking=%q 不是合法枚举", la.ClaudeSearchThinking)
+		}
+		if la.ClaudeSearchSummary != "" && !validSearchSummary[la.ClaudeSearchSummary] {
+			t.Errorf("lazyApply.claudeSearchSummary=%q 不是合法枚举", la.ClaudeSearchSummary)
+		}
+	}
+
 	// The debug field is excluded from the template by convention.
 	var raw map[string]interface{}
 	if err := json.Unmarshal(configExampleBytes, &raw); err != nil {
@@ -88,7 +98,7 @@ func TestConfigCoversAllStructFields(t *testing.T) {
 		"upstream_header_timeout_s", "ping_interval_s", "log_request_detail",
 		"log_file", "recent_sample_window", "routes", "classifier_route",
 		"fast_route", "multimodal_fallback", "search_fallback",
-		"convertAlltoStream", "responses_listen",
+		"convertAlltoStream", "responses_listen", "lazyApply",
 	} {
 		if exempt[f] {
 			continue

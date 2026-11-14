@@ -16,6 +16,10 @@
   "convertAlltoStream": false,
   "responses_listen": "127.0.0.1:8081",
   "allowNoThinkBlock4Anthropic": true,
+  "lazyApply": {
+    "noBullshitOnEmptyClaudeSearch": true,
+    "claudeSearchThinking": "max"
+  },
   "routes": [
     {
       "pattern": "claude-opus*",

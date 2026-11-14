@@ -80,6 +80,7 @@ The example below uses a Volcano ARK Coding Plan upstream:
 - **fast_route**: dedicated route for fast-mode requests (an object, sibling of `routes`). Non-classifier requests carrying `"speed":"fast"` are routed to the given `url`/`api`/`model`; unset means no intervention (compatible). See "Routing".
 - **multimodal_fallback**: multimodal fallback route (an object, sibling of `routes`). When a request carries an image but hits a `text_only` text-only model, it automatically falls back to the given `url`/`api`/`model`; unset means no fallback (passed through to the text-only model, for the upstream to deal with). See "Routing".
 - **search_fallback**: search fallback route (an object, sibling of `routes`). When a request carries a search tool but hits a `no_search` upstream that doesn't support search, it automatically falls back to the given `url`/`api`/`model`; unset means no fallback. See "Routing".
+- **lazyApply** (optional): shared defaults for route-like objects. Each key is applied to every `routes[]` / `search_fallback` / `fast_route` / `multimodal_fallback` / `classifier_route` object that supports the same field and omits it; explicit local values win. `"noLazyApply": true` on one object disables inheritance for that whole object. Connection fields (`url` / `api` / `model` / `pattern` / `url_response_api`) are never inherited. See "Shared defaults (lazyApply)".
 - **log_file**: log file path (optional). **Default empty**: logs go only to the in-memory ring buffer (`logRing`, 500 lines, polled by the web console's Logs tab) + stderr; under the windowsgui subsystem or with no terminal, stderr is a no-op, i.e. nothing hits disk. A non-empty value additionally appends to this file — handy for keeping logs around, or for copy-reading in console-less scenarios like RemoteApp. Changing it requires a proxy restart (the web Config tab's save+reload does not reopen the log file).
 
 ## Usage
@@ -442,6 +443,19 @@ Add an `enhance_search` object inside a `routes` entry (omitted = disabled):
 ```
 
 - A hit logs `[route] #N enhanced search <original model> -> <route url> (model <route model>)`.
+
+### Shared defaults (lazyApply)
+
+Top-level `"lazyApply"` is a materialization shortcut: each key is treated as if written into every supported route-like object that omits it, then normal precedence applies. It never touches connection fields (`url`, `api`, `model`, `pattern`, `url_response_api`) and never creates an optional route.
+
+- `routes[]`: `text_only`, `no_search`, `thinking`, `convertOff2Low`, `enhance_search`, `claudeSearchThinking`, `claudeSearchSummary`, `noBullshitOnEmptyClaudeSearch`.
+- `search_fallback`: `convertOff2Low`, `summary_mode`, `summary_thinking`, `summary_level`, `claudeSearchThinking`, `claudeSearchSummary`, `noBullshitOnEmptyClaudeSearch`.
+- `fast_route` / `multimodal_fallback`: `convertOff2Low`.
+- `classifier_route`: `classifier_thinking`, `classifier_thinking_cc`, `classifier_thinking_codex`.
+
+Priority is per field: explicit local value > `"lazyApply"` > built-in default. Key presence decides "explicit" — a written `false`, `""`, or `null` is explicit and stops inheritance. `enhance_search` is atomic: a local object (or explicit `null`) wins whole and is never partially merged. Because an inherited value behaves as if written locally, a route that omits a `claudeSearch*` key receives the global value at route precedence, so it beats `search_fallback`'s explicit value; set `"noLazyApply": true` on that route to expose the fallback's own values. The same switch on `routes[]`, `search_fallback`, `fast_route`, `multimodal_fallback`, or `classifier_route` disables inheritance for that whole object while its explicit fields keep working. Invalid values are the user's responsibility beyond the normal enum checks.
+
+The web console's config pane exposes a read-only preview: **预览 lazyApply 生效后 JSON** POSTs the editor text to `/__lazyapply`, which validates the whole config and returns the materialized JSON (the `lazyApply` object itself is preserved; no file is written). **复制到编辑框** copies the preview into the editor without saving.
 
 ### Image + search in the same request
 

@@ -95,7 +95,9 @@ func TestSynthesizeSearchGuardSSE(t *testing.T) {
 	}
 }
 
-func TestResolveSearchGuard(t *testing.T) {
+// TestEffectiveSearchGuardBaseRule locks the pre-lazyApply precedence: route local > fallback local > false.
+func TestEffectiveSearchGuardBaseRule(t *testing.T) {
+	base := &Config{}
 	on, off := true, false
 	tests := []struct {
 		name     string
@@ -115,12 +117,12 @@ func TestResolveSearchGuard(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rr := &RouteRule{NoBullshitOnEmptyClaudeSearch: tc.route}
 			sf := &SearchRoute{NoBullshitOnEmptyClaudeSearch: tc.fallback}
-			if got := resolveSearchGuard(rr, sf); got != tc.want {
-				t.Errorf("resolveSearchGuard() = %v, want %v", got, tc.want)
+			if got := effectiveSearchGuard(base, rr, sf); got != tc.want {
+				t.Errorf("effectiveSearchGuard() = %v, want %v", got, tc.want)
 			}
 		})
 	}
-	if resolveSearchGuard(nil, nil) {
+	if effectiveSearchGuard(base, nil, nil) {
 		t.Error("nil routes must default to guard off")
 	}
 }

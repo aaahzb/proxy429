@@ -41,7 +41,7 @@ type searchGuardE2EResult struct {
 }
 
 // runSearchGuardE2E serves a caller-supplied upstream response through the real native handler and archives one flight.
-func runSearchGuardE2E(t *testing.T, rr RouteRule, sf *SearchRoute, routeServes bool, clientBody string, status int, contentType, responseBody string) searchGuardE2EResult {
+func runSearchGuardE2E(t *testing.T, rr RouteRule, sf *SearchRoute, routeServes bool, clientBody string, status int, contentType, responseBody string, lazy ...*LazyApplyConfig) searchGuardE2EResult {
 	t.Helper()
 	resetStats()
 	finishedMu.Lock()
@@ -86,14 +86,18 @@ func runSearchGuardE2E(t *testing.T, rr RouteRule, sf *SearchRoute, routeServes 
 	if sf != nil {
 		sf.URL = upstream.URL
 	}
-	cfg.Store(&Config{
+	runtimeCfg := &Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
 		Routes:             []RouteRule{rr},
 		SearchFallback:     sf,
-	})
+	}
+	if len(lazy) > 0 {
+		runtimeCfg.LazyApply = lazy[0]
+	}
+	cfg.Store(runtimeCfg)
 	stats.resetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
