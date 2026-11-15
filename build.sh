@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+#456
 # Build the proxy. Version stamp: "release vX.Y.Z.N" when HEAD is exactly a version tag (CD tag builds),
 # otherwise "beta <git short hash>-<build HHMM>" (e.g. beta c639d56-1545). Injected via -ldflags -X main.Version.
 # Cross-platform: produces artifacts under release/ per host GOOS:
