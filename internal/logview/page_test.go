@@ -52,6 +52,12 @@ func TestTokensColumn(t *testing.T) {
 	if !strings.Contains(logViewerHTML, "tokensCell(f.tokens, f.bytes)+'<td>'+(f.total||'-')") {
 		t.Error("finished rows should replace the bytes column with the token cell and keep bytes as its hover title")
 	}
+	if !strings.Contains(logViewerHTML, "'>'+esc(t)+'</td>'") {
+		t.Error("token cells should render the bare value without brackets")
+	}
+	if strings.Contains(logViewerHTML, "'>['+esc(t)+']</td>'") {
+		t.Error("token cells should not wrap the value in brackets")
+	}
 	en := renderLogViewerEN(logViewerHTML)
 	if n := strings.Count(en, "<th>token in/out"); n != 2 {
 		t.Errorf("English tables should carry the token in/out header, found %d", n)

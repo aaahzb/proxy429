@@ -157,7 +157,7 @@ const logViewerHTML = `<!DOCTYPE html>
     <div id="flightView" style="max-height:300px;overflow:auto;background:#1e1e1e;border:1px solid #333;padding:8px"></div>
   </div>
   <div style="margin-top:10px">最近完成的流</div>
-  <table id="finishedFlights"><thead><tr><th>#</th><th>model</th><th>API<span class="thq" title="协议来源：橙 [Anthropic] = Anthropic 口原生流量、紫 [translate] = Responses 口翻译成 Anthropic。名后 [值] = 实际发给上游的思考配置最短形态，其颜色 = 词汇口径（思考是针对上游的：上游收到的都是 Anthropic 格式）——橙 = Anthropic thinking（直连原样或翻译映射后）。值：关 = thinking 关或 effort none/off；开 N = enabled+budget_tokens N；adaptive = 自适应无档；low/high/max 等档位词 = adaptive 的 effort；无 [值] = 请求体未带思考字段">?</span></th><th>token 入/出<span class="thq" title="该流的总输入 / 输出 tokens（输入 = input + 缓存读 + 缓存写），完成后才准确；未收到的一侧显示 -（如被下游取消的流 [107k/-]）。鼠标悬停单元格显示该流字节数">?</span></th><th>总时间</th><th>状态码</th><th>缓存命中</th><th>缓存年龄<span class="thq" title="该会话+路由最近一次缓存写入距现在的时长（m:ss 递增）。显示方括号且数字冻结（如 [4:32]）时：同会话同路由有一条正在进行的流刚刷新了缓存，方括号内是刷新那一刻的年龄；该流完成后恢复递增（新锚）。上游缓存真实存活期是动态的——点击「缓存命中」卡片，弹窗内有各上游（按 URL+模型归类）实测的缓存存活时间可对照">?</span></th><th>首字</th><th>tok/s</th><th>结束</th></tr></thead><tbody></tbody></table>
+  <table id="finishedFlights"><thead><tr><th>#</th><th>model</th><th>API<span class="thq" title="协议来源：橙 [Anthropic] = Anthropic 口原生流量、紫 [translate] = Responses 口翻译成 Anthropic。名后 [值] = 实际发给上游的思考配置最短形态，其颜色 = 词汇口径（思考是针对上游的：上游收到的都是 Anthropic 格式）——橙 = Anthropic thinking（直连原样或翻译映射后）。值：关 = thinking 关或 effort none/off；开 N = enabled+budget_tokens N；adaptive = 自适应无档；low/high/max 等档位词 = adaptive 的 effort；无 [值] = 请求体未带思考字段">?</span></th><th>token 入/出<span class="thq" title="该流的总输入 / 输出 tokens（输入 = input + 缓存读 + 缓存写），完成后才准确；未收到的一侧显示 -（如被下游取消的流 107k/-）。鼠标悬停单元格显示该流字节数">?</span></th><th>总时间</th><th>状态码</th><th>缓存命中</th><th>缓存年龄<span class="thq" title="该会话+路由最近一次缓存写入距现在的时长（m:ss 递增）。显示方括号且数字冻结（如 [4:32]）时：同会话同路由有一条正在进行的流刚刷新了缓存，方括号内是刷新那一刻的年龄；该流完成后恢复递增（新锚）。上游缓存真实存活期是动态的——点击「缓存命中」卡片，弹窗内有各上游（按 URL+模型归类）实测的缓存存活时间可对照">?</span></th><th>首字</th><th>tok/s</th><th>结束</th></tr></thead><tbody></tbody></table>
 </div>
 
 <div class="pane" id="pane-logs">
@@ -479,13 +479,11 @@ function fmtBytes(n){
   if(n<1048576) return (n/1024).toFixed(1)+'KB';
   return (n/1048576).toFixed(2)+'MB';
 }
-// token 入/出列：[总输入/输出] 例如 [107k/4]。未收到的一侧显示 -（如被取消的流 [107k/-]），
-// 两侧都未知时整格显示 -。传入 bytes（最近完成流）时单元格带 title，悬停显示该流字节数——
-// 该表用它替换了字节列；在途流字节数就在旁边一列，不重复挂提示。
+// 最近完成流用本列替换了字节列，字节数转入悬停提示；在途流字节数就在旁边一列，不挂提示。
 function tokensCell(t, bytes){
   var title = bytes===undefined ? '' : ' title="'+fmtBytes(bytes)+'"';
   if(!t || t==='-') return '<td'+title+'>-</td>';
-  return '<td'+title+'>['+esc(t)+']</td>';
+  return '<td'+title+'>'+esc(t)+'</td>';
 }
 // model 列单元格：有 searchPrompt 时整个 td 加 title，hover 显示系统原生提示词（宽度自适应、无滚动条）。
 // routeReason 非 0（透传）时前置 [标签]，一眼看出是什么原因路由的（如 [Fast]claude-sonnet-5 -> glm-5.2）。
@@ -2027,7 +2025,7 @@ var enHTMLRepl = [][2]string{
 	{` 个</label>`, `</label>`},
 	{`<th>字节</th>`, `<th>Bytes</th>`},
 	{`<th>token 入/出<span class="thq" title="该流的总输入 / 输出 tokens（输入 = input + 缓存读 + 缓存写）。在途时显示头部/尾部已到达的数值，完成后才准确；未收到的一侧显示 -">?</span></th>`, `<th>token in/out<span class="thq" title="This stream's total input / output tokens (input = input + cache read + cache write). In flight it shows what the head/tail has delivered so far and is exact only once finished; a side never received shows -">?</span></th>`},
-	{`<th>token 入/出<span class="thq" title="该流的总输入 / 输出 tokens（输入 = input + 缓存读 + 缓存写），完成后才准确；未收到的一侧显示 -（如被下游取消的流 [107k/-]）。鼠标悬停单元格显示该流字节数">?</span></th>`, `<th>token in/out<span class="thq" title="This stream's total input / output tokens (input = input + cache read + cache write), exact once finished; a side never received shows - (e.g. [107k/-] for a stream cancelled by the downstream). Hover a cell to see that stream's byte count">?</span></th>`},
+	{`<th>token 入/出<span class="thq" title="该流的总输入 / 输出 tokens（输入 = input + 缓存读 + 缓存写），完成后才准确；未收到的一侧显示 -（如被下游取消的流 107k/-）。鼠标悬停单元格显示该流字节数">?</span></th>`, `<th>token in/out<span class="thq" title="This stream's total input / output tokens (input = input + cache read + cache write), exact once finished; a side never received shows - (e.g. 107k/- for a stream cancelled by the downstream). Hover a cell to see that stream's byte count">?</span></th>`},
 	{`<th>状态</th>`, `<th>State</th>`},
 	{`<th>总时间</th>`, `<th>Total</th>`},
 	{`<th>状态码</th>`, `<th>HTTP</th>`},

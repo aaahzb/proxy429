@@ -114,7 +114,7 @@ func (f *Flight) SetCompactEffort(level string) { f.compactEffort.Store(level) }
 // Input becomes visible once any component is non-zero (ARK's all-zero message_start is skipped
 // until the delta carries the real split); output only once the terminal usage delta arrived
 // (message_delta / Responses terminal event / non-stream JSON parse), so a stream cancelled before
-// it renders "[input/-]". Call after each usage parse, passing the running last* values.
+// it renders "input/-". Call after each usage parse, passing the running last* values.
 func (f *Flight) NoteLiveUsage(in, cacheRead, cacheCreation, out int64, deltaSeen bool) {
 	if total := in + cacheRead + cacheCreation; total > 0 {
 		f.TokIn.Store(total<<1 | 1)

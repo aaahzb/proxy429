@@ -80,7 +80,7 @@ func main() {
 			}
 			if mode == "slow" {
 				// Hold the stream after message_start (input usage visible, no message_delta yet): the smoke reads
-				// the live token cell mid-stream and cancels a downstream here to pin the [input/-] display.
+				// the live token cell mid-stream and cancels a downstream here to pin the input/- display.
 				time.Sleep(1500 * time.Millisecond)
 			}
 			// Faithful block framing (start/delta/stop with index and typed text_delta) so downstream

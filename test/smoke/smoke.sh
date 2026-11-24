@@ -16,7 +16,7 @@
 # must beat that route pin (upstream medium, not max) and carry the compact display fields; h1 (a history quote) must
 # stay unflagged with an empty compactEffort.
 # Token column: completed rows carry "tokens":"18/50"; the /slow mock holds 1.5s after message_start so a live row and
-# a downstream-cancelled row both read [18/-] (input seen, tail not yet); the served page swaps the finished table's
+# a downstream-cancelled row both read 18/- (input seen, tail not yet); the served page swaps the finished table's
 # bytes column for this cell with the byte count as its hover title.
 # Vars: the config resolves $SMOKE_KEY from the top-level vars section (search_fallback uses it; routes keep a
 # literal key) — a green run proves variable expansion works end to end on the real startup path.
@@ -371,7 +371,7 @@ grep -qF "f.compactEffort?'-'+esc(f.compactEffort):''" "$OUT/page.html" || { ech
 
 # --- token in/out column: a completed stream shows 18/50 (mock message_start 10+5+3=18, message_delta ends at 50);
 # the /slow mock holds 1.5s after message_start so an in-flight row shows the head's 18 with the tail still "-",
-# and a downstream cancel in that window archives the same [18/-] (the display keeps it while the aggregates roll
+# and a downstream cancel in that window archives the same 18/- (the display keeps it while the aggregates roll
 # back). The served page swaps the bytes column for this cell on finished rows, with bytes as the hover title.
 tokok=1
 grep -q '"tokens":"18/50"' "$OUT/recent.json" || { echo "TOKENS COMPLETE ROW MISSING (want 18/50)"; tokok=0; }
@@ -423,7 +423,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
   [ -n "$cancelled" ] && break
   sleep 0.2
 done
-echo "$cancelled" | grep -q '"tokens":"18/-"' || { echo "INTERRUPTED ROW MUST KEEP [18/-] (got: ${cancelled:-no smoke-slow 499 row})"; tokok=0; }
+echo "$cancelled" | grep -q '"tokens":"18/-"' || { echo "INTERRUPTED ROW MUST KEEP 18/- (got: ${cancelled:-no smoke-slow 499 row})"; tokok=0; }
 [ "$tokok" = 1 ] && echo "TOKENS SMOKE PASS" || { echo "TOKENS SMOKE FAIL"; exit 1; }
 
 echo "page classifier(codex) log lines: $(grep -c 'classifier(codex)' "$OUT/data.json")"
