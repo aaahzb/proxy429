@@ -17,7 +17,9 @@ config.json
 .claude/
 
 # Local scratch: agent session patches/logs/smoke configs, never committed.
-# Temp/ also holds stray Go files that would otherwise pollute `go test ./...`.
+# .gitignore does not hide files from Go tooling: `go build/vet/test ./...` still
+# walks Temp/, so a half-written .go file there breaks the whole-module run until
+# removed (Temp/tools/* are deliberately complete main packages).
 Temp/
 
 # Local screenshots dropped into the repo root

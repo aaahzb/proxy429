@@ -22,7 +22,7 @@ var codexSetupPS1 []byte
 //go:embed scripts/codex-setup.sh
 var codexSetupSH []byte
 
-// Bake anchors: character-for-character identical to how they're written in the template files (codex_setup_test.go locks each to appear exactly once).
+// Bake anchors: character-for-character identical to how they're written in the template files (codex_test.go locks each to appear exactly once).
 // Values are only substituted into the single-quoted empty-string positions after whitelist validation, so quote escape is impossible.
 var codexPS1Anchors = [5]string{"$BAKED_BASE_URL = ''", "$BAKED_MODEL    = ''", "$BAKED_CATALOG  = ''", "$BAKED_CONTEXT_WINDOW  = ''", "$BAKED_COMPACT_PERCENT = ''"}
 

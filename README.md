@@ -126,6 +126,8 @@ Download prebuilt binaries from [GitHub Releases](https://github.com/aaahzb/prox
 
 Run `bash build.sh`. Build artifacts are written to `release/`.
 
+The code is organized by subsystem: `cmd/proxy429` is the entry point; `internal/proxy` holds the proxy core (forwarding, routing, search guard, tray); `internal/logview` the web console; and `internal/{config,translate,recorder,platform,jsonutil}` the supporting packages. See the file-structure table in [Design and Architecture](docs/DESIGN.md).
+
 ### Motivation
 
 I built Proxy429 after repeatedly hitting transient 429 throttling while using Claude Code with a GLM endpoint on Volcano Engine ARK. Manually reconnecting often let the work continue, which suggested that a patient retrying proxy could make these failures less disruptive.
@@ -236,6 +238,8 @@ Proxy429 是一个面向 Claude Code、Codex CLI 及兼容 OpenAI/Anthropic API 
 ### 从源码构建
 
 运行 `bash build.sh`，构建产物会输出到 `release/`。
+
+代码按子系统组织：`cmd/proxy429` 是入口；`internal/proxy` 是代理核心（转发、路由、空搜守卫、托盘）；`internal/logview` 是网页控制台；`internal/{config,translate,recorder,platform,jsonutil}` 为支撑包。完整文件结构表见[设计与架构文档](docs/DESIGN.md)。
 
 ### 项目缘起
 
