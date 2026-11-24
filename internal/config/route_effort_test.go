@@ -20,3 +20,21 @@ func TestValidateRouteEffortEnum(t *testing.T) {
 		t.Errorf("effort=bogus should fail naming the route and field, got %v", err)
 	}
 }
+
+// TestValidateCompactEffortEnum locks the top-level compactEffort enum: the four levels and an unset value load,
+// anything else fails at parse time naming compactEffort.
+func TestValidateCompactEffortEnum(t *testing.T) {
+	for _, ok := range []string{"", "low", "mid", "high", "max"} {
+		body := `{"upstream":"http://u","compactEffort":"` + ok + `"}`
+		if _, _, err := ParseConfig([]byte(body)); err != nil {
+			t.Errorf("compactEffort=%q should load, got %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"medium", "off", "MAX", "bogus"} {
+		body := `{"upstream":"http://u","compactEffort":"` + bad + `"}`
+		_, _, err := ParseConfig([]byte(body))
+		if err == nil || !strings.Contains(err.Error(), "compactEffort") {
+			t.Errorf("compactEffort=%q should fail naming the field, got %v", bad, err)
+		}
+	}
+}

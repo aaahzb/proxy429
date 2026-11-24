@@ -69,7 +69,8 @@ type Flight struct {
 	SearchGuard      bool                       // The upstream response was discarded and replaced with the fixed empty-search stream; the web status column shows [空搜]
 	Translated       string                     // Translation-port origin tag ("responses"=translated stream, "responses-raw"=native passthrough via a route with url_response_api); the web API column shows [translate]/[Response]
 	CountTokens      bool                       // count_tokens probe stream (countTokensPath); the response is just {"input_tokens":N}; the web model column shows a [count_tokens] prefix
-	Compaction       atomic.Bool                // The final user message opens with a known client context-compaction prompt (detected at body read); the web model column shows [Compact]. Atomic because logDataHandler reads it from another goroutine
+	Compaction       atomic.Bool                // The final user message opens with a known client context-compaction prompt (detected at body read); the web model column shows [Compact], upgraded to [Compact-<level>] when compactEffort is set. Atomic because logDataHandler reads it from another goroutine
+	compactEffort    atomic.Value               // Configured top-level compactEffort pin in wire form (mid->medium), stored once at body read when the request is a context compaction; the web model column shows [Compact-<level>]. Atomic because logDataHandler reads it from another goroutine
 	SearchStripped   atomic.Int32               // Total replayed search blocks stripped (conversation-watermark strip + 400-fallback strip; the web shows a red [剥N] badge, the split only goes to the log)
 	StripThinking    atomic.Bool                // convertOff2Low upgrade (off->low): thinking blocks are stripped from the response before writing downstream (the client keeps seeing a thinking-off response)
 	NoStop           bool                       // Upstream 200 SSE stream ended without a terminal event (message_stop / response.completed|failed|incomplete) while the client stayed connected; the web status column shows a red [无stop] badge
@@ -96,6 +97,15 @@ type Flight struct {
 	toolNames []string       // Names of tool calls in the response stream (in first-appearance order; guarded by toolMu)
 	toolCalls map[string]int // Call count per tool (guarded by toolMu)
 	toolEmpty map[string]int // Per-tool count of calls with an empty arguments object (guarded by toolMu)
+}
+
+// SetCompactEffort records the top-level compactEffort pin (wire form) for this compaction request; call once at body read.
+func (f *Flight) SetCompactEffort(level string) { f.compactEffort.Store(level) }
+
+// CompactEffortValue returns the stored compactEffort pin; empty = no pin for this flight.
+func (f *Flight) CompactEffortValue() string {
+	s, _ := f.compactEffort.Load().(string)
+	return s
 }
 
 // realModel returns this stream's real upstream model name: prefer the one the response actually returned, fall back to the route target, then the original model.
@@ -520,7 +530,8 @@ type FinishedFlight struct {
 	TPS              float64 // This stream's streaming tok/s
 	SearchPrompt     string  // Summary instruction injected into a standalone search sub-agent request (empty when none)
 	SearchMarker     bool    // Standalone search marker hit on the final user message (the model column shows [Search])
-	Compaction       bool    // The final user message opened with a known client context-compaction prompt (the model column shows [Compact]); finished rows append the compact result via CompactSave
+	Compaction       bool    // The final user message opened with a known client context-compaction prompt (the model column shows [Compact], upgraded to [Compact-<level>] when compactEffort is set); finished rows append the compact result via CompactSave
+	CompactEffort    string  // Configured compactEffort pin (wire form); the finished row's model column shows [Compact-<level>]
 	SearchLevel      string  // Injected summary level (empty = none; the badge upgrades to [SearchSummary-<level>])
 	ThinkFrom        string  // Thinking value before the last body-side thinking rewrite (empty = no thinking field, shown as auto)
 	ThinkTo          string  // Level a body-side rewrite wrote upstream (empty = no rewrite; the API column shows [from->to])
@@ -644,6 +655,7 @@ func AddFinished(f *Flight) {
 		SearchPrompt:     f.SearchPrompt,
 		SearchMarker:     f.SearchMarker,
 		Compaction:       f.Compaction.Load(),
+		CompactEffort:    f.CompactEffortValue(),
 		SearchLevel:      f.SearchLevel,
 		ThinkFrom:        f.ThinkFrom,
 		ThinkTo:          f.ThinkTo,

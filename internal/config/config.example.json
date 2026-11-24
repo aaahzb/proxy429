@@ -14,6 +14,7 @@
   "log_file": "",
   "recent_sample_window": 20,
   "convertAlltoStream": false,
+  "compactEffort": "",
   "responses_listen": "127.0.0.1:8081",
   "allowNoThinkBlock4Anthropic": true,
   "lazyApply": {

@@ -496,6 +496,11 @@ func attachConfigPresence(top map[string]json.RawMessage, c *Config) {
 // ValidateConfigEnums rejects config values outside their supported sets (route thinking shapes, route effort levels,
 // classifier thinking policy, convertOff2Low scope), so a typo fails loudly at load/save time instead of silently doing nothing.
 func ValidateConfigEnums(c *Config) error {
+	switch c.CompactEffort {
+	case "", "low", "mid", "high", "max":
+	default:
+		return fmt.Errorf("compactEffort has invalid value %q: only low / mid / high / max are supported (unset = leave compaction requests' effort untouched)", c.CompactEffort)
+	}
 	if err := validateLazyApplyEnums(c.LazyApply); err != nil {
 		return err
 	}

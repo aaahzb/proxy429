@@ -488,9 +488,11 @@ function modelCell(f){
   var model = f.model;
   var tag = routeTag(f.routeReason);
   if(tag) model = tag + model;
-  // [Compact] marks a client context-compaction request; finished rows append the result ([170k->20k, 88%])
-  // after the model name. The in-flight JSON carries no compactSave field, so only the badge shows there.
-  if(f.compaction) model = '<span style="color:#ce9178">[Compact]</span>' + model;
+  // [Compact] marks a client context-compaction request; when the top-level compactEffort pins a level the badge
+  // carries it ([Compact-max], wire form so mid reads medium) and the route [level] tag is suppressed on that flight.
+  // Finished rows append the result ([170k->20k, 88%]) after the model name; the in-flight JSON carries no
+  // compactSave field, so only the badge shows there.
+  if(f.compaction) model = '<span style="color:#ce9178">[Compact'+(f.compactEffort?'-'+esc(f.compactEffort):'')+']</span>' + model;
   // 独立搜索子代理徽标：所有标记命中挂 [Search]，摘要注入成功升级为 [SearchSummary-档位]（青绿 #4ec9b0，与路由标签淡蓝区分）
   if(f.searchMarker) model = (f.searchLevel ? '<span style="color:#4ec9b0">[SearchSummary-'+esc(f.searchLevel)+']</span>' : '<span style="color:#4ec9b0">[Search]</span>') + model;
   if(f.countTokens) model = '<span style="color:#9d9d9d">[count_tokens]</span>' + model;
@@ -520,7 +522,7 @@ function apiCell(translated, think, thinkFrom, thinkTo){
   else { name = '[Anthropic]'; color = '#d97757'; }
   var html = '<span style="color:'+color+'">'+name+'</span>';
   if(thinkTo){
-    // Body-side thinking rewrite badge [from->to] (route effort pin / search sub-agent rewrite; empty from = the request had no thinking field, shown as auto), teal; replaces the normal [think] badge when present
+    // Body-side thinking rewrite badge [from->to] (route effort pin / compactEffort pin on a compaction request / search sub-agent rewrite; empty from = the request had no thinking field, shown as auto), teal; replaces the normal [think] badge when present
     html += '<span style="color:#4ec9b0">['+esc((thinkFrom||'auto')+'->'+thinkTo)+']</span>';
   } else if(think === 'off->low'){
     // convertOff2Low 升级流双色徽标：off 用翻译紫（下游口径：它发的是关思考），

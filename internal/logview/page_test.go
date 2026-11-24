@@ -40,14 +40,14 @@ func TestLogViewerLineageLastTag(t *testing.T) {
 }
 
 func TestCompactionConsoleBadge(t *testing.T) {
-	if !strings.Contains(logViewerHTML, "[Compact]") || !strings.Contains(logViewerHTML, "f.compaction") {
-		t.Error("model cell should render the [Compact] badge from f.compaction")
+	if !strings.Contains(logViewerHTML, "f.compaction") || !strings.Contains(logViewerHTML, "f.compactEffort") {
+		t.Error("model cell should render the [Compact] badge from f.compaction and upgrade it from f.compactEffort")
 	}
 	if !strings.Contains(logViewerHTML, `model = model + '<span style="color:#ce9178">['+esc(f.compactSave)+']</span>'`) {
 		t.Error("finished rows should append the compact result after the model name")
 	}
-	if !strings.Contains(logViewerHTML, `if(f.compaction) model = '<span style="color:#ce9178">[Compact]</span>' + model`) {
-		t.Error("the [Compact] badge should stay ahead of the model name")
+	if !strings.Contains(logViewerHTML, `if(f.compaction) model = '<span style="color:#ce9178">[Compact'+(f.compactEffort?'-'+esc(f.compactEffort):'')+']</span>' + model`) {
+		t.Error("the [Compact] badge should stay ahead of the model name and carry the configured level")
 	}
 	en := renderLogViewerEN(logViewerHTML)
 	if !strings.Contains(en, "Context-compaction badge") {
@@ -55,6 +55,17 @@ func TestCompactionConsoleBadge(t *testing.T) {
 	}
 	if strings.Contains(en, "上下文压缩标记") {
 		t.Error("Chinese compaction doc leaked into the English console")
+	}
+}
+
+func TestFlightInfoCompactEffortJSON(t *testing.T) {
+	b, _ := json.Marshal(flightInfo{ID: 1, Compaction: true, CompactEffort: "max"})
+	if !strings.Contains(string(b), `"compactEffort":"max"`) {
+		t.Errorf("flightInfo should carry compactEffort: %s", b)
+	}
+	b2, _ := json.Marshal(flightInfo{ID: 1})
+	if strings.Contains(string(b2), "compactEffort") {
+		t.Errorf("a flight without a compactEffort pin should omit the field: %s", b2)
 	}
 }
 

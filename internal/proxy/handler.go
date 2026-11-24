@@ -135,6 +135,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// before dispatch (e.g. bad JSON) still have this entry body to inspect.
 	f.SetReqBody(body)
 	f.Compaction.Store(isCompactionRequest(body)) // Display-only: a client context-compaction request gets a [Compact] badge in the console
+	if f.Compaction.Load() && c.CompactEffort != "" {
+		f.SetCompactEffort(wireEffort(c.CompactEffort)) // Display-only: the model column shows [Compact-<level>] even when the body-side rewrite does not apply
+	}
 	// The downstream-side (downstream→proxy) request body of dual-link recording: the translation port brings the Responses original via context
 	// (necessarily different from the translated body, so always stored); native streams defer to a comparison with the first upstream-bound body and are stored only on difference.
 	var downBody []byte
@@ -324,8 +327,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.ID, origModel, upstream, origModel, rr.Model)
 				f.RouteReason.Store(recorder.RoutePattern)
 				convFlag = config.EffectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.Presence.Written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
-				routeEffort = rr.Effort          // Captured only here: fallback/classifier/fast/Responses-raw lanes are served otherwise and never inherit it (the pin site itself exempts the quiet off->low upgrade)
-				f.Effort = wireEffort(rr.Effort) // Display-only: the model column shows the configured pin even when the body-side rewrite doesn't apply
+				routeEffort = rr.Effort // Captured only here: fallback/classifier/fast/Responses-raw lanes are served otherwise and never inherit it (the pin site itself exempts the quiet off->low upgrade)
+				if !(f.Compaction.Load() && c.CompactEffort != "") {
+					f.Effort = wireEffort(rr.Effort) // Display-only: the model column shows the configured pin when the body-side rewrite doesn't apply; a compactEffort pin takes over that display on compaction requests ([Compact-<level>] carries it)
+				}
 				searchGuardEnabled = config.EffectiveSearchGuard(c, rr, nil)
 				// Enhance search / route-level claudeSearch*: when the route effectively supports search (no_search:false),
 				// a standalone search sub-agent request gets the summary instruction injected into the request itself
@@ -348,15 +353,25 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	f.TargetModel = targetModel
 
 	// Route-level effort pin: when the upstream-bound body carries adaptive thinking, force output_config.effort to
-	// the route's level whatever the client asked for (mid went to the wire as medium). Non-adaptive bodies are left
-	// byte-identical, and so are bodies already at the level (forceAdaptiveEffort returns changed=false).
+	// the route's level whatever the client asked for (mid went to the wire as medium). A context-compaction request
+	// with the top-level compactEffort set uses that level instead — it beats every route pin. Non-adaptive bodies are
+	// left byte-identical, and so are bodies already at the level (forceAdaptiveEffort returns changed=false).
 	// The quiet off->low upgrade owns its level: on the translated port it already rewrote an explicit thinking-off
 	// body into adaptive+low before this point (n2lMode from ctx is still fresh — the native upgrade below reassigns
 	// it later), and pinning that body would quietly send the client's "off" at the route level.
-	if routeEffort != "" && n2lMode != translate.N2LStealth {
-		if nb, level, changed := forceAdaptiveEffort(body, routeEffort); changed {
+	pinEffort := routeEffort
+	compactPin := f.Compaction.Load() && c.CompactEffort != ""
+	if compactPin {
+		pinEffort = c.CompactEffort
+	}
+	if pinEffort != "" && n2lMode != translate.N2LStealth {
+		if nb, level, changed := forceAdaptiveEffort(body, pinEffort); changed {
 			from := f.Think
-			log.Printf("[effort] #%d adaptive thinking effort forced %q -> %q", f.ID, from, level)
+			if compactPin {
+				log.Printf("[effort] #%d compact adaptive thinking effort forced %q -> %q (compactEffort beats the route pin)", f.ID, from, level)
+			} else {
+				log.Printf("[effort] #%d adaptive thinking effort forced %q -> %q", f.ID, from, level)
+			}
 			body = nb
 			f.ThinkFrom = from // Empty from renders as auto in the API column's [from->to] badge
 			f.ThinkTo = level

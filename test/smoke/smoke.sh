@@ -12,6 +12,9 @@
 # search/compaction: no upstream injection, badge fields stay false, and the global searchMarker=true count stays 2.
 # Route effort: e1/e3 on a route with effort:max get output_config.effort forced (adaptive shape only), e2 (budget) and
 # e4 (route without effort) must reach the mock byte-identical; the API column badge counts prove the [from->to] fields.
+# Compact effort: e5 is a genuine compaction request on the same effort:max route and the top-level compactEffort=mid
+# must beat that route pin (upstream medium, not max) and carry the compact display fields; h1 (a history quote) must
+# stay unflagged with an empty compactEffort.
 # Vars: the config resolves $SMOKE_KEY from the top-level vars section (search_fallback uses it; routes keep a
 # literal key) — a green run proves variable expansion works end to end on the real startup path.
 # Pattern arrays: smoke-sf is written as "pattern": ["smoke-sf", "smoke-sf-alt"] (desugared into two route copies at
@@ -194,6 +197,13 @@ for n in e1 e2 e3 e4; do
   code=$(curl -s -o "$OUT/$n.resp" -w "%{http_code}" --max-time 30 -X POST "http://127.0.0.1:18083/v1/messages" -H "Content-Type: application/json" --data-binary "@$OUT/$n.json")
   echo "anthropic $n -> HTTP $code"
 done
+# e5 (id 25): a genuine compaction request on smoke-effort (effort:max) — the top-level compactEffort=mid beats the
+# route pin: adaptive+max is rewritten to medium, not max, and only this row carries the compact display fields.
+cat > "$OUT/e5.json" <<'EOF'
+{"model":"smoke-effort","max_tokens":64,"stream":true,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"messages":[{"role":"user","content":"CRITICAL: Respond with TEXT ONLY. Do not call any tools. Your task is to create a detailed summary of the conversation so far."}]}
+EOF
+code=$(curl -s -o "$OUT/e5.resp" -w "%{http_code}" --max-time 30 -X POST "http://127.0.0.1:18083/v1/messages" -H "Content-Type: application/json" --data-binary "@$OUT/e5.json")
+echo "anthropic e5 -> HTTP $code"
 
 sleep 1
 curl -s --max-time 10 "http://127.0.0.1:18083/__recentflights" > "$OUT/recent.json"
@@ -298,9 +308,10 @@ echo "$srow" | grep -q '"searchGuard":false' || { echo "S3 SEARCH GUARD FALSE PO
 [ -n "$hrow" ] || { echo "H1 ROW MISSING (model smoke-hist-compact)"; hqok=0; }
 echo "$hrow" | grep -q '"compaction":false' || { echo "H1 COMPACTION FALSE POSITIVE"; hqok=0; }
 echo "$hrow" | grep -q '"compactSave":""' || { echo "H1 COMPACT SAVE MUST STAY EMPTY"; hqok=0; }
+echo "$hrow" | grep -q '"compactEffort":""' || { echo "H1 COMPACTEFFORT BADGE MUST STAY EMPTY"; hqok=0; }
 ccount=$(grep -o '"compaction":true' "$OUT/recent.json" | wc -l | tr -d ' ')
-echo "compaction=true rows in recent.json: $ccount (want 0: no genuine compaction request in smoke)"
-[ "$ccount" = "0" ] || { echo "HISTORY QUOTE FLAGGED AS COMPACTION"; hqok=0; }
+echo "compaction=true rows in recent.json: $ccount (want 1: only the e5 compact request)"
+[ "$ccount" = "1" ] || { echo "HISTORY QUOTE FLAGGED AS COMPACTION (or the e5 compact row is missing)"; hqok=0; }
 if [ -n "$sid" ]; then
   s3up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=$sid&side=up")
   echo "$s3up" | grep -q 'Perform a web search for the query' || { echo "S3 HISTORY QUOTE LOST upstream"; hqok=0; }
@@ -329,14 +340,30 @@ efrom=$(grep -o '"thinkFrom":"high"' "$OUT/recent.json" | wc -l | tr -d ' ')
 efromad=$(grep -o '"thinkFrom":"adaptive"' "$OUT/recent.json" | wc -l | tr -d ' ')
 eflog=$(grep -o 'adaptive thinking effort forced' "$OUT/data.json" | wc -l | tr -d ' ')
 # thinkFrom=high counts e1 plus the earlier s2 search rewrite (its client carried adaptive+high); adaptive is e3's "from".
-echo "effort badges: thinkTo=max x$eto, thinkFrom=high x$efrom, thinkFrom=adaptive x$efromad, log lines x$eflog (want 2/2/1/2)"
-[ "$eto" = "2" ] && [ "$efrom" = "2" ] && [ "$efromad" = "1" ] && [ "$eflog" = "2" ] || { echo "EFFORT BADGE/LOG COUNTS WRONG"; efok=0; }
-# Model column: every smoke-effort flight carries the configured [max] (even e2, whose budget body the pin left
-# alone — the tag is the configured pin, the badge is the actual rewrite); smoke-noeff carries no tag.
+# The compact log line contains the same substring, so the count is 3 (e1, e3, e5).
+echo "effort badges: thinkTo=max x$eto, thinkFrom=high x$efrom, thinkFrom=adaptive x$efromad, log lines x$eflog (want 2/2/1/3)"
+[ "$eto" = "2" ] && [ "$efrom" = "2" ] && [ "$efromad" = "1" ] && [ "$eflog" = "3" ] || { echo "EFFORT BADGE/LOG COUNTS WRONG"; efok=0; }
+# Model column: the smoke-effort flights whose route pin still governs carry the configured [max] (e2's budget
+# body included — the tag is the configured pin, the badge is the actual rewrite). e5 is the exception: its
+# compactEffort pin takes over the display, so its row carries no [max] (want 3). smoke-noeff carries no tag.
 emodel=$(grep -o '"model":"smoke-effort \[max\]' "$OUT/recent.json" | wc -l | tr -d ' ')
 enoeff=$(grep -o '"model":"smoke-noeff"' "$OUT/recent.json" | wc -l | tr -d ' ')
 echo "effort model column: smoke-effort [max] x$emodel, smoke-noeff plain x$enoeff (want 3/1)"
 [ "$emodel" = "3" ] && [ "$enoeff" = "1" ] || { echo "EFFORT MODEL COLUMN WRONG"; efok=0; }
+# e5 (id 25): compactEffort=mid beats the route's effort:max on a genuine compaction request. The upstream body must
+# carry medium (neither max nor high), the row must carry compaction/compactEffort with thinkFrom=max thinkTo=medium,
+# the route [max] tag must be suppressed on that row, and the compact [effort] log line appears exactly once.
+e5up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=25&side=up")
+echo "$e5up" | grep -q '"effort":"medium"' && ! echo "$e5up" | grep -q '"effort":"max"' || { echo "E5 COMPACTEFFORT DID NOT BEAT ROUTE MAX"; efok=0; }
+e5row=$(sed 's/},{/}\n{/g' "$OUT/recent.json" | grep '"id":25,')
+echo "$e5row" | grep -q '"compaction":true' || { echo "E5 COMPACTION FLAG MISSING"; efok=0; }
+echo "$e5row" | grep -q '"compactEffort":"medium"' || { echo "E5 COMPACTEFFORT FIELD WRONG"; efok=0; }
+echo "$e5row" | grep -q '"thinkFrom":"max"' && echo "$e5row" | grep -q '"thinkTo":"medium"' || { echo "E5 API BADGE WRONG (want max->medium)"; efok=0; }
+echo "$e5row" | grep -q '\[max\]' && { echo "E5 ROUTE MAX TAG NOT SUPPRESSED"; efok=0; }
+clog=$(grep -o 'compact adaptive thinking effort forced' "$OUT/data.json" | wc -l | tr -d ' ')
+echo "compact effort log lines: $clog (want 1)"
+[ "$clog" = "1" ] || { echo "E5 COMPACT EFFORT LOG LINE WRONG"; efok=0; }
+grep -qF "f.compactEffort?'-'+esc(f.compactEffort):''" "$OUT/page.html" || { echo "COMPACT-EFFORT BADGE JS MISSING in served page"; efok=0; }
 [ "$efok" = 1 ] && echo "EFFORT SMOKE PASS" || { echo "EFFORT SMOKE FAIL"; exit 1; }
 
 echo "page classifier(codex) log lines: $(grep -c 'classifier(codex)' "$OUT/data.json")"

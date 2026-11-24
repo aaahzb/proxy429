@@ -7,6 +7,8 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -88,27 +90,21 @@ func TestConfigExampleMatchesStruct(t *testing.T) {
 }
 
 // TestConfigCoversAllStructFields is the reverse check: every json field on the Config struct
-// (except debug) should be demonstrated in the template, so adding a new field can't forget its demo.
+// should be demonstrated in the template, so adding a new field can't forget its demo. The field
+// list comes from the struct tags themselves — a hand list drifts silently as fields come and go.
 func TestConfigCoversAllStructFields(t *testing.T) {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(ConfigExampleBytes, &raw); err != nil {
 		t.Fatalf("模板不是合法 JSON: %v", err)
 	}
-	// All Config struct fields (the debug field is exempted).
-	exempt := map[string]bool{"search_debug_dir": true}
-	for _, f := range []string{
-		"listen", "upstream", "max_retries", "base_delay_s",
-		"max_delay_s", "total_budget_s", "retry_status_codes", "respect_retry_after",
-		"upstream_header_timeout_s", "ping_interval_s", "log_request_detail",
-		"log_file", "recent_sample_window", "routes", "classifier_route",
-		"fast_route", "multimodal_fallback", "search_fallback",
-		"convertAlltoStream", "responses_listen", "lazyApply",
-	} {
-		if exempt[f] {
+	typ := reflect.TypeOf(Config{})
+	for i := 0; i < typ.NumField(); i++ {
+		name := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
+		if name == "" || name == "-" {
 			continue
 		}
-		if _, ok := raw[f]; !ok {
-			t.Errorf("模板缺字段演示: %s", f)
+		if _, ok := raw[name]; !ok {
+			t.Errorf("模板缺字段演示: %s", name)
 		}
 	}
 }

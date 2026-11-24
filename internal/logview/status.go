@@ -15,34 +15,35 @@ import (
 
 // flightInfo is one in-flight stream's display info (for the web 「状态」 tab's table).
 type flightInfo struct {
-	ID           uint64 `json:"id"`
-	Model        string `json:"model"`
-	Phase        int    `json:"phase"`                 // 0=awaiting response, 1=response received (forwarding started)
-	Bytes        int64  `json:"bytes"`                 // Forwarded bytes
-	Status       int    `json:"status"`                // HTTP status code (shown when stage=stageForward)
-	Stage        int32  `json:"stage"`                 // Current stage: 0=request 1=routing 2=attemptN 3=forwarding (shows status code)
-	Attempt      int32  `json:"attempt"`               // Current attempt number (from 1); 「尝试N」 is shown when stage=2
-	AttemptMs    int64  `json:"attemptMs"`             // Milliseconds the current attempt has awaited the first byte ([尝试N:Xs] next to the yellow light); -1=in retry backoff (shows [退避中])
-	RouteReason  int32  `json:"routeReason"`           // Route reason: 0=passthrough 1=pattern 2=classifier 3=fast 4=multimodal 5=search
-	Translated   string `json:"translated"`            // Translation-port origin ("responses"=translated / "responses-raw"=native passthrough [implemented, not field-tested, undocumented]); the API column shows [translate]/[Response]
-	CountTokens  bool   `json:"countTokens,omitempty"` // count_tokens probe stream; the model column shows a [count_tokens] prefix
-	SearchPrompt string `json:"searchPrompt,omitempty"`
-	SearchMarker bool   `json:"searchMarker,omitempty"` // Standalone search sub-agent marker hit; the model column shows [Search]
-	Compaction   bool   `json:"compaction,omitempty"`   // Client context-compaction request; the model column shows [Compact]
-	SearchLevel  string `json:"searchLevel,omitempty"`  // Injected summary level; the badge upgrades to [SearchSummary-<level>]
-	ThinkFrom    string `json:"thinkFrom,omitempty"`    // Thinking value before the last body-side thinking rewrite (empty renders as auto)
-	ThinkTo      string `json:"thinkTo,omitempty"`      // Rewrite target level (empty = none; the API column shows [from->to])
-	ReqTrunc     bool   `json:"reqTrunc,omitempty"`     // Request body truncated to just the head 256KB (download button greyed out)
-	HasFull      bool   `json:"hasFull,omitempty"`      // Full output copy still held (download output available; interactive JSON prefers it when present)
-	StageMs      int64  `json:"stageMs"`                // Milliseconds the current light color has lasted (shown next to the status light; only resets on color change)
-	Tools        string `json:"tools,omitempty"`        // Tool-call tag ("[Read*1][Edit*3]", omitted when no tools; accumulates live during forwarding)
-	Stripped     int    `json:"stripped,omitempty"`     // Total replayed search blocks stripped (conversation watermark + 400 fallback; 0 is omitted); the model column shows a red [剥N]
-	Think        string `json:"think,omitempty"`        // Shortest form of the thinking config actually sent upstream ("off"/"on N"/"adaptive"/effort word; which API family is carried by the column color); empty = no thinking field (column shows -)
-	ReqDown      bool   `json:"reqDown,omitempty"`      // Downstream-side (downstream→proxy) request body recorded (recorded only when it differs from the upstream side; the viewer can switch link sides)
-	RespDown     bool   `json:"respDown,omitempty"`     // Downstream-side (proxy→downstream) response content recorded (always present for translation streams and rebuilt-JSON streams)
-	ReqDownTrunc bool   `json:"reqDownTrunc,omitempty"` // Downstream-side request body truncated to just the head 256KB (download greyed out after switching to the downstream side)
-	HasFullDown  bool   `json:"hasFullDown,omitempty"`  // Downstream-side full output copy still held (the downstream side's download output; interactive JSON prefers it when present)
-	Last         uint64 `json:"last,omitempty"`         // Lineage parent flight id (same-session message-hash prefix chain); omitted when none — the # column shows 「#N<-M」 when present
+	ID            uint64 `json:"id"`
+	Model         string `json:"model"`
+	Phase         int    `json:"phase"`                 // 0=awaiting response, 1=response received (forwarding started)
+	Bytes         int64  `json:"bytes"`                 // Forwarded bytes
+	Status        int    `json:"status"`                // HTTP status code (shown when stage=stageForward)
+	Stage         int32  `json:"stage"`                 // Current stage: 0=request 1=routing 2=attemptN 3=forwarding (shows status code)
+	Attempt       int32  `json:"attempt"`               // Current attempt number (from 1); 「尝试N」 is shown when stage=2
+	AttemptMs     int64  `json:"attemptMs"`             // Milliseconds the current attempt has awaited the first byte ([尝试N:Xs] next to the yellow light); -1=in retry backoff (shows [退避中])
+	RouteReason   int32  `json:"routeReason"`           // Route reason: 0=passthrough 1=pattern 2=classifier 3=fast 4=multimodal 5=search
+	Translated    string `json:"translated"`            // Translation-port origin ("responses"=translated / "responses-raw"=native passthrough [implemented, not field-tested, undocumented]); the API column shows [translate]/[Response]
+	CountTokens   bool   `json:"countTokens,omitempty"` // count_tokens probe stream; the model column shows a [count_tokens] prefix
+	SearchPrompt  string `json:"searchPrompt,omitempty"`
+	SearchMarker  bool   `json:"searchMarker,omitempty"`  // Standalone search sub-agent marker hit; the model column shows [Search]
+	Compaction    bool   `json:"compaction,omitempty"`    // Client context-compaction request; the model column shows [Compact], or [Compact-<level>] when compactEffort is set
+	CompactEffort string `json:"compactEffort,omitempty"` // Configured compactEffort pin in wire form; upgrades the model-column badge to [Compact-<level>]
+	SearchLevel   string `json:"searchLevel,omitempty"`   // Injected summary level; the badge upgrades to [SearchSummary-<level>]
+	ThinkFrom     string `json:"thinkFrom,omitempty"`     // Thinking value before the last body-side thinking rewrite (empty renders as auto)
+	ThinkTo       string `json:"thinkTo,omitempty"`       // Rewrite target level (empty = none; the API column shows [from->to])
+	ReqTrunc      bool   `json:"reqTrunc,omitempty"`      // Request body truncated to just the head 256KB (download button greyed out)
+	HasFull       bool   `json:"hasFull,omitempty"`       // Full output copy still held (download output available; interactive JSON prefers it when present)
+	StageMs       int64  `json:"stageMs"`                 // Milliseconds the current light color has lasted (shown next to the status light; only resets on color change)
+	Tools         string `json:"tools,omitempty"`         // Tool-call tag ("[Read*1][Edit*3]", omitted when no tools; accumulates live during forwarding)
+	Stripped      int    `json:"stripped,omitempty"`      // Total replayed search blocks stripped (conversation watermark + 400 fallback; 0 is omitted); the model column shows a red [剥N]
+	Think         string `json:"think,omitempty"`         // Shortest form of the thinking config actually sent upstream ("off"/"on N"/"adaptive"/effort word; which API family is carried by the column color); empty = no thinking field (column shows -)
+	ReqDown       bool   `json:"reqDown,omitempty"`       // Downstream-side (downstream→proxy) request body recorded (recorded only when it differs from the upstream side; the viewer can switch link sides)
+	RespDown      bool   `json:"respDown,omitempty"`      // Downstream-side (proxy→downstream) response content recorded (always present for translation streams and rebuilt-JSON streams)
+	ReqDownTrunc  bool   `json:"reqDownTrunc,omitempty"`  // Downstream-side request body truncated to just the head 256KB (download greyed out after switching to the downstream side)
+	HasFullDown   bool   `json:"hasFullDown,omitempty"`   // Downstream-side full output copy still held (the downstream side's download output; interactive JSON prefers it when present)
+	Last          uint64 `json:"last,omitempty"`          // Lineage parent flight id (same-session message-hash prefix chain); omitted when none — the # column shows 「#N<-M」 when present
 }
 
 // logData is the JSON returned by /__logs/data: recent logs + full status counters + the in-flight stream list.
@@ -115,34 +116,35 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 	for _, f := range recorder.Flights.Snapshot() {
 		model := f.ModelDisplay()
 		d.Flights = append(d.Flights, flightInfo{
-			ID:           f.ID,
-			Model:        model,
-			Phase:        int(f.Phase.Load()),
-			Bytes:        f.Bytes.Load(),
-			Status:       f.Status,
-			Stage:        f.Stage.Load(),
-			Attempt:      f.Attempt.Load(),
-			AttemptMs:    f.AttemptMs(),
-			RouteReason:  f.RouteReason.Load(),
-			Translated:   f.Translated,
-			CountTokens:  f.CountTokens,
-			SearchPrompt: f.SearchPrompt,
-			SearchMarker: f.SearchMarker,
-			Compaction:   f.Compaction.Load(),
-			SearchLevel:  f.SearchLevel,
-			ThinkFrom:    f.ThinkFrom,
-			ThinkTo:      f.ThinkTo,
-			Tools:        f.ToolCallsTag(),             // Tool calls accumulate live; the in-flight model column fills in progressively with the 500ms polls
-			Stripped:     int(f.SearchStripped.Load()), // Watermark strips are booked at stream creation; 400-fallback strips accrue during forwarding
-			ReqTrunc:     f.ReqTrunc(),
-			HasFull:      f.HasFullContent(),
-			ReqDown:      f.HasReqDown(),
-			RespDown:     f.HasContentDown(),
-			ReqDownTrunc: f.ReqDownTrunc(),
-			HasFullDown:  f.HasFullContentDown(),
-			StageMs:      f.StageMs(),
-			Think:        f.Think,
-			Last:         f.LastFlight,
+			ID:            f.ID,
+			Model:         model,
+			Phase:         int(f.Phase.Load()),
+			Bytes:         f.Bytes.Load(),
+			Status:        f.Status,
+			Stage:         f.Stage.Load(),
+			Attempt:       f.Attempt.Load(),
+			AttemptMs:     f.AttemptMs(),
+			RouteReason:   f.RouteReason.Load(),
+			Translated:    f.Translated,
+			CountTokens:   f.CountTokens,
+			SearchPrompt:  f.SearchPrompt,
+			SearchMarker:  f.SearchMarker,
+			Compaction:    f.Compaction.Load(),
+			CompactEffort: f.CompactEffortValue(),
+			SearchLevel:   f.SearchLevel,
+			ThinkFrom:     f.ThinkFrom,
+			ThinkTo:       f.ThinkTo,
+			Tools:         f.ToolCallsTag(),             // Tool calls accumulate live; the in-flight model column fills in progressively with the 500ms polls
+			Stripped:      int(f.SearchStripped.Load()), // Watermark strips are booked at stream creation; 400-fallback strips accrue during forwarding
+			ReqTrunc:      f.ReqTrunc(),
+			HasFull:       f.HasFullContent(),
+			ReqDown:       f.HasReqDown(),
+			RespDown:      f.HasContentDown(),
+			ReqDownTrunc:  f.ReqDownTrunc(),
+			HasFullDown:   f.HasFullContentDown(),
+			StageMs:       f.StageMs(),
+			Think:         f.Think,
+			Last:          f.LastFlight,
 		})
 	}
 	if d.Flights == nil {
@@ -399,6 +401,7 @@ func RecentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 			"searchPrompt":  ff.SearchPrompt,
 			"searchMarker":  ff.SearchMarker,
 			"compaction":    ff.Compaction,
+			"compactEffort": ff.CompactEffort,
 			"compactSave":   compactSave,
 			"searchLevel":   ff.SearchLevel,
 			"thinkFrom":     ff.ThinkFrom,

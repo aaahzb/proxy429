@@ -255,7 +255,7 @@ func HumanNum(n int64) string {
 
 // CompactSave formats a context-compaction result: the total input context (input + cache_read + cache_creation)
 // versus the summary's output tokens, and the percentage compressed away (e.g. "170k->20k, 88%").
-// Returns "" when either side is unknown, so the console shows the [Compact] badge without numbers.
+// Returns "" when either side is unknown, so the console shows the [Compact] (or [Compact-<level>]) badge without numbers.
 func CompactSave(in, cacheRead, cacheCreation, out int64) string {
 	total := in + cacheRead + cacheCreation
 	if total <= 0 || out <= 0 {
