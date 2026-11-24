@@ -1,4 +1,4 @@
-package main
+package proxy
 
 // responses_test.go — end-to-end tests through the real main pipeline: the Responses listener port
 // (translate.ResponsesHandler) feeding the root handler.

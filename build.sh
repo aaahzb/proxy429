@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the proxy. Version stamp: "release vX.Y.Z.N" when HEAD is exactly a version tag (CD tag builds),
-# otherwise "beta <git short hash>-<build HHMM>" (e.g. beta c639d56-1545). Injected via -ldflags -X main.Version.
+# otherwise "beta <git short hash>-<build HHMM>" (e.g. beta c639d56-1545). Injected via -ldflags -X proxy429/internal/proxy.Version.
 # Cross-platform: produces artifacts under release/ per host GOOS:
 #   darwin  -> release/Proxy429.app (LSUIElement menu-bar app, no Dock icon) + ad-hoc signature
 #   linux   -> release/proxy429
@@ -30,7 +30,7 @@ mkdir -p release
 build_bin() {  # $1 = output path, $2 = extra ldflags
   # The stamp contains a space ("beta <hash>-<HHMM>" / "release vX.Y.Z.N"), so the -X value needs
   # inner quotes: go splits -ldflags on spaces and would otherwise choke on the stamp's tail half.
-  go build -buildvcs=false -ldflags "-X 'main.Version=$VERSION' $2" -o "$1" .
+  go build -buildvcs=false -ldflags "-X 'proxy429/internal/proxy.Version=$VERSION' $2" -o "$1" ./cmd/proxy429
 }
 
 case "$(go env GOOS)" in

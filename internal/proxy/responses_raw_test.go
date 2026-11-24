@@ -1,4 +1,4 @@
-package main
+package proxy
 
 // responses_raw_test.go — tests for url_response_api native passthrough (when the Responses port hits a route with this field,
 // the original body passes through untranslated to a native Responses upstream): route precheck, URL joining,

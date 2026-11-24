@@ -1,5 +1,5 @@
 // lang_test.go — startup UI-language resolution: program-settings.txt wins, legacy config ui_lang is migrated, otherwise follow the OS.
-package main
+package proxy
 
 import (
 	"os"

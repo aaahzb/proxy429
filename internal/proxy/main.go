@@ -1,4 +1,6 @@
-package main
+// Package proxy is the proxy core: config loading, the forwarding pipeline, the search guard,
+// the system tray, and the wiring that starts the HTTP server and web console.
+package proxy
 
 import (
 	"encoding/json"
@@ -21,8 +23,9 @@ import (
 	"proxy429/internal/translate"
 )
 
-// Version is the build stamp, injected by build.sh via -ldflags "-X main.Version=...": "release vX.Y.Z.N" when
-// HEAD is exactly a version tag (CD tag builds), otherwise "beta <git-short>-<HHMM>"; bare go builds show "dev".
+// Version is the build stamp, injected by build.sh via -ldflags "-X proxy429/internal/proxy.Version=...":
+// "release vX.Y.Z.N" when HEAD is exactly a version tag (CD tag builds), otherwise "beta <git-short>-<HHMM>";
+// bare go builds show "dev".
 var Version = "dev"
 
 // resolveProgramUILang determines the web console UI language at startup: program-settings.txt's ui-lang
@@ -138,7 +141,10 @@ func configureConsole() {
 // The HTTP server and web console still run; the process stops on Ctrl+C / SIGTERM like a bare server.
 var noTrayFlag = flag.Bool("no-tray", false, "run without the system tray (headless/CI); stop with Ctrl+C")
 
-func main() {
+// Main runs the proxy: parse flags, load config, start the HTTP server and console, then block on the
+// system tray (or forever in -no-tray headless mode). It occupies the process main thread: macOS requires
+// the tray event loop there.
+func Main() {
 	configPath := flag.String("config", "", "config file path (empty = look up ./config.json then the user config dir)")
 	flag.Parse()
 	config.SetCurrentPath(config.ResolveConfigPath(*configPath))

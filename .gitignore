@@ -1,8 +1,8 @@
 # Build artifacts
 *.exe
 *.exe~
-proxy429
-proxy429-*
+/proxy429
+/proxy429-*
 
 # macOS directory metadata
 .DS_Store

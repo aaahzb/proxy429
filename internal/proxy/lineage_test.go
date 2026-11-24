@@ -1,4 +1,4 @@
-package main
+package proxy
 
 // lineage_test.go pins the conversation-lineage feature (the web 「#N<-M」 parent tag): a request's parent
 // is the earlier same-session flight scoring best on (leading byte-identical elements, then tail-element common
