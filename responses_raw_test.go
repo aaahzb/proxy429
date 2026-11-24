@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"proxy429/internal/config"
 	"strings"
 	"testing"
 )
@@ -34,7 +35,7 @@ func TestResponsesAPIPath(t *testing.T) {
 // TestMatchPassthroughResponsesRoute verifies the passthrough precheck: only a route hit carrying url_response_api passes through;
 // reserved names (Fallback/fast_route) are skipped; routes are ordered, first hit wins.
 func TestMatchPassthroughResponsesRoute(t *testing.T) {
-	c := &Config{Routes: []RouteRule{
+	c := &config.Config{Routes: []config.RouteRule{
 		{Pattern: "fast_route", URLResponseAPI: "https://x.example.com"}, // Reserved name, must be skipped
 		{Pattern: "k3*", URL: "https://a.example.com"},                   // No url_response_api, no passthrough
 		{Pattern: "k3-256k", URL: "https://b.example.com", URLResponseAPI: "https://b.example.com/coding"},
@@ -53,7 +54,7 @@ func TestMatchPassthroughResponsesRoute(t *testing.T) {
 		t.Errorf("空 model 不应命中, got %+v", got)
 	}
 	// Ordering: a wide wildcard listed first with the passthrough field intercepts a narrower wildcard (same rule as the handler's route loop).
-	c2 := &Config{Routes: []RouteRule{
+	c2 := &config.Config{Routes: []config.RouteRule{
 		{Pattern: "k3*", URLResponseAPI: "https://wide.example.com"},
 		{Pattern: "k3-256k", URLResponseAPI: "https://narrow.example.com"},
 	}}
@@ -212,15 +213,15 @@ func TestResponsesRawPassthrough(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:       "http://default-upstream.invalid", // Must not be used once the passthrough route hits
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "k3*", URL: "http://anthropic-url.invalid", API: "route-key", Model: "k3-256k", URLResponseAPI: mock.URL + "/coding"},
 		},
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 	defer proxy.Close()
@@ -307,14 +308,14 @@ func TestResponsesRawPassthroughNonStream(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "k3*", URL: "http://anthropic-url.invalid", Model: "k3-256k", URLResponseAPI: mock.URL},
 		},
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 	defer proxy.Close()
@@ -346,12 +347,12 @@ func TestResponsesRawRouteLost(t *testing.T) {
 	resetStats()
 	// Precheck and the route loop read the same cfg, so no config swap can slip in between; equivalent verification path:
 	// build an internal request carrying the responses-raw flag straight into the handler; the route loop sees a route without the field → 502.
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes:         []RouteRule{{Pattern: "k3*", URL: "http://a.invalid"}}, // No url_response_api
+		Routes:         []config.RouteRule{{Pattern: "k3*", URL: "http://a.invalid"}}, // No url_response_api
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r2 := r.WithContext(context.WithValue(r.Context(), ctxKeyTranslated, translatedResponsesRaw))

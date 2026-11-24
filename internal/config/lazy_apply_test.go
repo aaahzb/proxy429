@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"strings"
@@ -8,9 +8,9 @@ import (
 // mustParseLazy parses a config body and fails the test on any error.
 func mustParseLazy(t *testing.T, body string) *Config {
 	t.Helper()
-	c, _, err := parseConfig([]byte(body))
+	c, _, err := ParseConfig([]byte(body))
 	if err != nil {
-		t.Fatalf("parseConfig: %v", err)
+		t.Fatalf("ParseConfig: %v", err)
 	}
 	return c
 }
@@ -54,7 +54,7 @@ func TestLazyApplyStrictDecodeAndValidation(t *testing.T) {
 	t.Run("connection and unknown fields rejected", func(t *testing.T) {
 		for _, key := range []string{"url", "api", "model", "pattern", "url_response_api", "bogus"} {
 			body := `{"upstream":"http://u","lazyApply":{"` + key + `":"x"}}`
-			_, _, err := parseConfig([]byte(body))
+			_, _, err := ParseConfig([]byte(body))
 			if err == nil || !strings.Contains(err.Error(), "lazyApply") {
 				t.Errorf("lazyApply.%s: want a lazyApply error, got %v", key, err)
 			}
@@ -63,7 +63,7 @@ func TestLazyApplyStrictDecodeAndValidation(t *testing.T) {
 
 	t.Run("nested enhance_search is strict", func(t *testing.T) {
 		body := `{"upstream":"http://u","lazyApply":{"enhance_search":{"bogus":1}}}`
-		_, _, err := parseConfig([]byte(body))
+		_, _, err := ParseConfig([]byte(body))
 		if err == nil || !strings.Contains(err.Error(), "lazyApply.enhance_search") {
 			t.Fatalf("want lazyApply.enhance_search error, got %v", err)
 		}
@@ -82,13 +82,13 @@ func TestLazyApplyStrictDecodeAndValidation(t *testing.T) {
 		}
 		for _, tc := range cases {
 			body := `{"upstream":"http://u","lazyApply":{"` + tc.key + `":"` + tc.value + `"}}`
-			_, _, err := parseConfig([]byte(body))
+			_, _, err := ParseConfig([]byte(body))
 			if err == nil || !strings.Contains(err.Error(), "lazyApply") {
 				t.Errorf("lazyApply.%s=%q: want a lazyApply validation error, got %v", tc.key, tc.value, err)
 			}
 		}
 		body := `{"upstream":"http://u","lazyApply":{"enhance_search":{"summary_level":"ultra"}}}`
-		_, _, err := parseConfig([]byte(body))
+		_, _, err := ParseConfig([]byte(body))
 		if err == nil || !strings.Contains(err.Error(), "lazyApply.enhance_search") {
 			t.Errorf("nested summary_level: want a lazyApply.enhance_search error, got %v", err)
 		}
@@ -107,19 +107,19 @@ func TestLazyApplyStrictDecodeAndValidation(t *testing.T) {
 }
 
 // TestLazyApplyPresence locks explicit-key detection: an explicit false/null is written and must stop
-// inheritance, while an absent key inherits. A nil presence map (Go literal) keeps the non-zero convention.
+// inheritance, while an absent key inherits. A nil Presence map (Go literal) keeps the non-zero convention.
 func TestLazyApplyPresence(t *testing.T) {
 	c := mustParseLazy(t, `{"upstream":"http://u","lazyApply":{"text_only":false,"noBullshitOnEmptyClaudeSearch":null}}`)
 	if c.LazyApply == nil {
 		t.Fatal("LazyApply is nil")
 	}
-	if !c.LazyApply.presence.written("text_only", false) {
+	if !c.LazyApply.Presence.Written("text_only", false) {
 		t.Error("explicit text_only:false must count as written")
 	}
-	if c.LazyApply.presence.written("no_search", false) {
+	if c.LazyApply.Presence.Written("no_search", false) {
 		t.Error("absent no_search must not count as written")
 	}
-	if !c.LazyApply.presence.written("noBullshitOnEmptyClaudeSearch", false) {
+	if !c.LazyApply.Presence.Written("noBullshitOnEmptyClaudeSearch", false) {
 		t.Error("explicit guard:null must count as written")
 	}
 	if c.LazyApply.NoBullshitOnEmptyClaudeSearch != nil {
@@ -127,10 +127,10 @@ func TestLazyApplyPresence(t *testing.T) {
 	}
 
 	c = mustParseLazy(t, `{"upstream":"http://u","routes":[{"pattern":"a","url":"http://a","text_only":false}]}`)
-	if !c.Routes[0].presence.written("text_only", false) {
+	if !c.Routes[0].Presence.Written("text_only", false) {
 		t.Error("route explicit text_only:false must count as written")
 	}
-	if c.Routes[0].presence.written("no_search", false) {
+	if c.Routes[0].Presence.Written("no_search", false) {
 		t.Error("route absent no_search must not count as written")
 	}
 }
@@ -154,67 +154,67 @@ func TestLazyApplyEffectiveRouteFields(t *testing.T) {
 	}`)
 	r := c.Routes
 
-	if !effectiveRouteTextOnly(c, &r[0]) || !effectiveRouteNoSearch(c, &r[0]) {
+	if !EffectiveRouteTextOnly(c, &r[0]) || !EffectiveRouteNoSearch(c, &r[0]) {
 		t.Error("route a should inherit text_only/no_search")
 	}
-	if effectiveRouteTextOnly(c, &r[1]) || effectiveRouteNoSearch(c, &r[1]) {
+	if EffectiveRouteTextOnly(c, &r[1]) || EffectiveRouteNoSearch(c, &r[1]) {
 		t.Error("route b noLazyApply should ignore the inherited booleans")
 	}
-	if effectiveRouteTextOnly(c, &r[2]) || effectiveRouteNoSearch(c, &r[2]) {
+	if EffectiveRouteTextOnly(c, &r[2]) || EffectiveRouteNoSearch(c, &r[2]) {
 		t.Error("route c explicit false should beat lazyApply true")
 	}
-	if !effectiveRouteTextOnly(c, &r[3]) || !effectiveRouteNoSearch(c, &r[3]) {
+	if !EffectiveRouteTextOnly(c, &r[3]) || !EffectiveRouteNoSearch(c, &r[3]) {
 		t.Error("route d noLazyApply keeps its local true values")
 	}
 
-	if got := effectiveRouteThinking(c, &r[0]); got != "adaptive" {
+	if got := EffectiveRouteThinking(c, &r[0]); got != "adaptive" {
 		t.Errorf("route a thinking = %q, want adaptive", got)
 	}
-	if got := effectiveRouteThinking(c, &r[1]); got != "" {
+	if got := EffectiveRouteThinking(c, &r[1]); got != "" {
 		t.Errorf("route b noLazyApply thinking = %q, want empty", got)
 	}
-	if got := effectiveRouteThinking(c, &r[2]); got != "budget" {
+	if got := EffectiveRouteThinking(c, &r[2]); got != "budget" {
 		t.Errorf("route c explicit thinking = %q, want budget", got)
 	}
-	if got := effectiveRouteThinking(c, &r[3]); got != "adaptive" {
+	if got := EffectiveRouteThinking(c, &r[3]); got != "adaptive" {
 		t.Errorf("route d local thinking = %q, want adaptive", got)
 	}
 
 	conv := func(local string, written, optOut bool) string {
-		return effectiveConvertOff2Low(c, local, written, optOut)
+		return EffectiveConvertOff2Low(c, local, written, optOut)
 	}
-	if got := conv(r[0].ConvertOff2Low, r[0].presence.written("convertOff2Low", r[0].ConvertOff2Low != ""), r[0].NoLazyApply); got != "translate" {
+	if got := conv(r[0].ConvertOff2Low, r[0].Presence.Written("convertOff2Low", r[0].ConvertOff2Low != ""), r[0].NoLazyApply); got != "translate" {
 		t.Errorf("route a convertOff2Low = %q, want translate", got)
 	}
-	if got := conv(r[1].ConvertOff2Low, r[1].presence.written("convertOff2Low", r[1].ConvertOff2Low != ""), r[1].NoLazyApply); got != "" {
+	if got := conv(r[1].ConvertOff2Low, r[1].Presence.Written("convertOff2Low", r[1].ConvertOff2Low != ""), r[1].NoLazyApply); got != "" {
 		t.Errorf("route b convertOff2Low = %q, want empty", got)
 	}
-	if got := conv(r[2].ConvertOff2Low, r[2].presence.written("convertOff2Low", r[2].ConvertOff2Low != ""), r[2].NoLazyApply); got != "all" {
+	if got := conv(r[2].ConvertOff2Low, r[2].Presence.Written("convertOff2Low", r[2].ConvertOff2Low != ""), r[2].NoLazyApply); got != "all" {
 		t.Errorf("route c convertOff2Low = %q, want all", got)
 	}
-	if got := conv(c.FastRoute.ConvertOff2Low, c.FastRoute.presence.written("convertOff2Low", c.FastRoute.ConvertOff2Low != ""), c.FastRoute.NoLazyApply); got != "translate" {
+	if got := conv(c.FastRoute.ConvertOff2Low, c.FastRoute.Presence.Written("convertOff2Low", c.FastRoute.ConvertOff2Low != ""), c.FastRoute.NoLazyApply); got != "translate" {
 		t.Errorf("fast_route convertOff2Low = %q, want translate", got)
 	}
-	if got := conv(c.MultimodalFallback.ConvertOff2Low, c.MultimodalFallback.presence.written("convertOff2Low", c.MultimodalFallback.ConvertOff2Low != ""), c.MultimodalFallback.NoLazyApply); got != "" {
+	if got := conv(c.MultimodalFallback.ConvertOff2Low, c.MultimodalFallback.Presence.Written("convertOff2Low", c.MultimodalFallback.ConvertOff2Low != ""), c.MultimodalFallback.NoLazyApply); got != "" {
 		t.Errorf("multimodal noLazyApply convertOff2Low = %q, want empty", got)
 	}
-	if got := conv(c.SearchFallback.ConvertOff2Low, c.SearchFallback.presence.written("convertOff2Low", c.SearchFallback.ConvertOff2Low != ""), c.SearchFallback.NoLazyApply); got != "translate" {
+	if got := conv(c.SearchFallback.ConvertOff2Low, c.SearchFallback.Presence.Written("convertOff2Low", c.SearchFallback.ConvertOff2Low != ""), c.SearchFallback.NoLazyApply); got != "translate" {
 		t.Errorf("search_fallback convertOff2Low = %q, want translate", got)
 	}
 
-	// Go literals have no presence metadata: non-zero means "written", and lazyApply still fills the rest.
+	// Go literals have no Presence metadata: non-zero means "written", and lazyApply still fills the rest.
 	lit := &Config{LazyApply: &LazyApplyConfig{TextOnly: true, Thinking: "adaptive", ConvertOff2Low: "translate"},
 		Routes: []RouteRule{{Pattern: "x", URL: "http://x"}, {Pattern: "y", URL: "http://y", TextOnly: true}}}
-	if !effectiveRouteTextOnly(lit, &lit.Routes[0]) {
+	if !EffectiveRouteTextOnly(lit, &lit.Routes[0]) {
 		t.Error("Go literal route should inherit text_only")
 	}
-	if effectiveRouteNoSearch(lit, &lit.Routes[0]) {
+	if EffectiveRouteNoSearch(lit, &lit.Routes[0]) {
 		t.Error("Go literal route with no lazy no_search should stay false")
 	}
-	if got := effectiveRouteThinking(lit, &lit.Routes[0]); got != "adaptive" {
+	if got := EffectiveRouteThinking(lit, &lit.Routes[0]); got != "adaptive" {
 		t.Errorf("Go literal route thinking = %q, want adaptive", got)
 	}
-	if !effectiveRouteTextOnly(lit, &lit.Routes[1]) {
+	if !EffectiveRouteTextOnly(lit, &lit.Routes[1]) {
 		t.Error("Go literal local true should win")
 	}
 }
@@ -227,10 +227,10 @@ func TestLazyApplyEffectiveClassifier(t *testing.T) {
 		"lazyApply":{"classifier_thinking":"off","classifier_thinking_cc":"low","classifier_thinking_codex":"off"},
 		"classifier_route":{"url":"http://c"}
 	}`)
-	if got := classifierThinkingModeFor(c, classifierCC); got != "low" {
+	if got := ClassifierThinkingModeFor(c, ClassifierCC); got != "low" {
 		t.Errorf("cc inherited mode = %q, want low", got)
 	}
-	if got := classifierThinkingModeFor(c, classifierCodex); got != "off" {
+	if got := ClassifierThinkingModeFor(c, ClassifierCodex); got != "off" {
 		t.Errorf("codex inherited mode = %q, want off", got)
 	}
 
@@ -239,10 +239,10 @@ func TestLazyApplyEffectiveClassifier(t *testing.T) {
 		"lazyApply":{"classifier_thinking":"off","classifier_thinking_cc":"low"},
 		"classifier_route":{"url":"http://c","classifier_thinking":"","classifier_thinking_cc":""}
 	}`)
-	if got := classifierThinkingModeFor(c, classifierCC); got != "" {
+	if got := ClassifierThinkingModeFor(c, ClassifierCC); got != "" {
 		t.Errorf("explicit empty cc/shared must block lazy values, got %q", got)
 	}
-	if got := classifierThinkingModeFor(c, classifierCodex); got != "" {
+	if got := ClassifierThinkingModeFor(c, ClassifierCodex); got != "" {
 		t.Errorf("explicit empty shared must block lazy shared, got %q", got)
 	}
 
@@ -251,8 +251,8 @@ func TestLazyApplyEffectiveClassifier(t *testing.T) {
 		"lazyApply":{"classifier_thinking":"off","classifier_thinking_cc":"low","classifier_thinking_codex":"off"},
 		"classifier_route":{"url":"http://c","noLazyApply":true}
 	}`)
-	for _, kind := range []classifierSource{classifierCC, classifierCodex} {
-		if got := classifierThinkingModeFor(c, kind); got != "" {
+	for _, kind := range []ClassifierSource{ClassifierCC, ClassifierCodex} {
+		if got := ClassifierThinkingModeFor(c, kind); got != "" {
 			t.Errorf("noLazyApply classifier mode = %q, want empty", got)
 		}
 	}
@@ -263,7 +263,7 @@ func TestLazyApplyEffectiveClassifier(t *testing.T) {
 		"lazyApply":{"classifier_thinking_cc":"low"},
 		"classifier_route":{"url":"http://c","classifier_thinking":"off"}
 	}`)
-	if got := classifierThinkingModeFor(c, classifierCC); got != "low" {
+	if got := ClassifierThinkingModeFor(c, ClassifierCC); got != "low" {
 		t.Errorf("inherited cc should win over local shared off, got %q", got)
 	}
 }
@@ -277,7 +277,7 @@ func TestLazyApplyEffectiveDirectSearch(t *testing.T) {
 			"enhance_search":{"summary_thinking":true,"summary_level":"high"}},
 		"routes":[{"pattern":"a","url":"http://a"}]
 	}`)
-	inject, think := resolveSearchBehavior(effectiveDirectSearchSettings(c, &c.Routes[0]))
+	inject, think := ResolveSearchBehavior(EffectiveDirectSearchSettings(c, &c.Routes[0]))
 	if inject != "high" || think != "max" {
 		t.Errorf("inherited direct search = (%q,%q), want (high,max)", inject, think)
 	}
@@ -287,7 +287,7 @@ func TestLazyApplyEffectiveDirectSearch(t *testing.T) {
 		"lazyApply":{"claudeSearchThinking":"max","claudeSearchSummary":"forceHigh"},
 		"routes":[{"pattern":"a","url":"http://a","claudeSearchThinking":"off","claudeSearchSummary":"noForce"}]
 	}`)
-	inject, think = resolveSearchBehavior(effectiveDirectSearchSettings(c, &c.Routes[0]))
+	inject, think = ResolveSearchBehavior(EffectiveDirectSearchSettings(c, &c.Routes[0]))
 	if inject != "" || think != "off" {
 		t.Errorf("local direct search = (%q,%q), want empty/off", inject, think)
 	}
@@ -297,7 +297,7 @@ func TestLazyApplyEffectiveDirectSearch(t *testing.T) {
 		"lazyApply":{"enhance_search":{"summary_thinking":true,"summary_level":"high"}},
 		"routes":[{"pattern":"a","url":"http://a","enhance_search":null}]
 	}`)
-	inject, think = resolveSearchBehavior(effectiveDirectSearchSettings(c, &c.Routes[0]))
+	inject, think = ResolveSearchBehavior(EffectiveDirectSearchSettings(c, &c.Routes[0]))
 	if inject != "" || think != "" {
 		t.Errorf("explicit null enhance_search = (%q,%q), want empty", inject, think)
 	}
@@ -307,7 +307,7 @@ func TestLazyApplyEffectiveDirectSearch(t *testing.T) {
 		"lazyApply":{"claudeSearchThinking":"max","enhance_search":{"summary_thinking":true,"summary_level":"high"}},
 		"routes":[{"pattern":"a","url":"http://a","enhance_search":{}}]
 	}`)
-	inject, think = resolveSearchBehavior(effectiveDirectSearchSettings(c, &c.Routes[0]))
+	inject, think = ResolveSearchBehavior(EffectiveDirectSearchSettings(c, &c.Routes[0]))
 	if inject != "low" || think != "max" {
 		t.Errorf("local empty enhance object = (%q,%q), want (low,max)", inject, think)
 	}
@@ -317,7 +317,7 @@ func TestLazyApplyEffectiveDirectSearch(t *testing.T) {
 		"lazyApply":{"claudeSearchThinking":"max","claudeSearchSummary":"forceHigh","enhance_search":{"summary_level":"high"}},
 		"routes":[{"pattern":"a","url":"http://a","noLazyApply":true}]
 	}`)
-	inject, think = resolveSearchBehavior(effectiveDirectSearchSettings(c, &c.Routes[0]))
+	inject, think = ResolveSearchBehavior(EffectiveDirectSearchSettings(c, &c.Routes[0]))
 	if inject != "" || think != "" {
 		t.Errorf("direct noLazyApply = (%q,%q), want empty", inject, think)
 	}
@@ -335,15 +335,15 @@ func TestLazyApplyEffectiveFallbackSearch(t *testing.T) {
 		"search_fallback":{"url":"http://s"}
 	}`
 	c := mustParseLazy(t, base)
-	eff := effectiveFallbackSearchSettings(c, &c.Routes[0], c.SearchFallback)
-	inject, think := resolveSearchBehavior(eff)
+	eff := EffectiveFallbackSearchSettings(c, &c.Routes[0], c.SearchFallback)
+	inject, think := ResolveSearchBehavior(eff)
 	if inject != "high" || think != "max" {
 		t.Errorf("inherited fallback search = (%q,%q), want (high,max)", inject, think)
 	}
 	if eff.ConvertOff2Low != "translate" {
 		t.Errorf("fallback convertOff2Low = %q, want translate", eff.ConvertOff2Low)
 	}
-	if !effectiveSearchGuard(c, &c.Routes[0], c.SearchFallback) {
+	if !EffectiveSearchGuard(c, &c.Routes[0], c.SearchFallback) {
 		t.Error("inherited guard should be true")
 	}
 
@@ -354,7 +354,7 @@ func TestLazyApplyEffectiveFallbackSearch(t *testing.T) {
 		"routes":[{"pattern":"a","url":"http://a","no_search":true}],
 		"search_fallback":{"url":"http://s","claudeSearchThinking":"low","claudeSearchSummary":"forceLow"}
 	}`)
-	inject, think = resolveSearchBehavior(effectiveFallbackSearchSettings(c, &c.Routes[0], c.SearchFallback))
+	inject, think = ResolveSearchBehavior(EffectiveFallbackSearchSettings(c, &c.Routes[0], c.SearchFallback))
 	if inject != "high" || think != "max" {
 		t.Errorf("route inherited values should beat fallback locals = (%q,%q), want (high,max)", inject, think)
 	}
@@ -366,7 +366,7 @@ func TestLazyApplyEffectiveFallbackSearch(t *testing.T) {
 		"routes":[{"pattern":"a","url":"http://a","no_search":true,"claudeSearchThinking":"mid","claudeSearchSummary":"forceMid"}],
 		"search_fallback":{"url":"http://s","claudeSearchThinking":"low","claudeSearchSummary":"forceLow"}
 	}`)
-	inject, think = resolveSearchBehavior(effectiveFallbackSearchSettings(c, &c.Routes[0], c.SearchFallback))
+	inject, think = ResolveSearchBehavior(EffectiveFallbackSearchSettings(c, &c.Routes[0], c.SearchFallback))
 	if inject != "mid" || think != "mid" {
 		t.Errorf("route locals = (%q,%q), want (mid,mid)", inject, think)
 	}
@@ -378,7 +378,7 @@ func TestLazyApplyEffectiveFallbackSearch(t *testing.T) {
 		"routes":[{"pattern":"a","url":"http://a","no_search":true,"noLazyApply":true}],
 		"search_fallback":{"url":"http://s","claudeSearchThinking":"low","claudeSearchSummary":"forceLow"}
 	}`)
-	inject, think = resolveSearchBehavior(effectiveFallbackSearchSettings(c, &c.Routes[0], c.SearchFallback))
+	inject, think = ResolveSearchBehavior(EffectiveFallbackSearchSettings(c, &c.Routes[0], c.SearchFallback))
 	if inject != "low" || think != "low" {
 		t.Errorf("route noLazyApply should expose fallback locals = (%q,%q), want (low,low)", inject, think)
 	}
@@ -390,13 +390,13 @@ func TestLazyApplyEffectiveFallbackSearch(t *testing.T) {
 		"routes":[{"pattern":"a","url":"http://a","no_search":true}],
 		"search_fallback":{"url":"http://s","noLazyApply":true,"claudeSearchThinking":"low","claudeSearchSummary":"forceLow"}
 	}`)
-	inject, think = resolveSearchBehavior(effectiveFallbackSearchSettings(c, &c.Routes[0], c.SearchFallback))
+	inject, think = ResolveSearchBehavior(EffectiveFallbackSearchSettings(c, &c.Routes[0], c.SearchFallback))
 	if inject != "high" || think != "max" {
 		t.Errorf("fallback noLazyApply should still let route inherited values win = (%q,%q), want (high,max)", inject, think)
 	}
 
 	// nil fallback: the resolver returns the built-in zero object.
-	if eff := effectiveFallbackSearchSettings(c, &c.Routes[0], nil); eff == nil || eff.ClaudeSearchThinking != "" {
+	if eff := EffectiveFallbackSearchSettings(c, &c.Routes[0], nil); eff == nil || eff.ClaudeSearchThinking != "" {
 		t.Errorf("nil fallback should return an empty view, got %+v", eff)
 	}
 }
@@ -436,7 +436,7 @@ func TestLazyApplyEffectiveGuard(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := mustParseLazy(t, tc.body)
 			rr := &c.Routes[0]
-			if got := effectiveSearchGuard(c, rr, c.SearchFallback); got != tc.want {
+			if got := EffectiveSearchGuard(c, rr, c.SearchFallback); got != tc.want {
 				t.Errorf("effectiveSearchGuard = %v, want %v", got, tc.want)
 			}
 		})
@@ -445,17 +445,17 @@ func TestLazyApplyEffectiveGuard(t *testing.T) {
 	// Direct route (no fallback object): route local > route lazy > false.
 	c := mustParseLazy(t, `{"upstream":"http://u","lazyApply":{"noBullshitOnEmptyClaudeSearch":true},
 		"routes":[{"pattern":"a","url":"http://a"}]}`)
-	if !effectiveSearchGuard(c, &c.Routes[0], nil) {
+	if !EffectiveSearchGuard(c, &c.Routes[0], nil) {
 		t.Error("direct route should inherit guard true")
 	}
-	if effectiveSearchGuard(c, nil, nil) {
+	if EffectiveSearchGuard(c, nil, nil) {
 		t.Error("unmatched request must not arm the guard")
 	}
 
 	// Fallback-only scope (no matched route): fallback local > fallback lazy > false.
 	c = mustParseLazy(t, `{"upstream":"http://u","lazyApply":{"noBullshitOnEmptyClaudeSearch":true},
 		"search_fallback":{"url":"http://s"}}`)
-	if !effectiveSearchGuard(c, nil, c.SearchFallback) {
+	if !EffectiveSearchGuard(c, nil, c.SearchFallback) {
 		t.Error("fallback-only scope should inherit guard true")
 	}
 }
@@ -476,17 +476,17 @@ func TestLazyApplyPatternArrayAndVars(t *testing.T) {
 		t.Fatalf("pattern array should expand to 2 routes, got %d", len(c.Routes))
 	}
 	for i := range c.Routes {
-		if got := effectiveRouteThinking(c, &c.Routes[i]); got != "adaptive" {
+		if got := EffectiveRouteThinking(c, &c.Routes[i]); got != "adaptive" {
 			t.Errorf("expanded route %d thinking = %q, want adaptive", i, got)
 		}
-		if _, got := resolveSearchBehavior(effectiveDirectSearchSettings(c, &c.Routes[i])); got != "max" {
+		if _, got := ResolveSearchBehavior(EffectiveDirectSearchSettings(c, &c.Routes[i])); got != "max" {
 			t.Errorf("expanded route %d claudeSearchThinking = %q, want max", i, got)
 		}
-		if effectiveRouteTextOnly(c, &c.Routes[i]) {
+		if EffectiveRouteTextOnly(c, &c.Routes[i]) {
 			t.Errorf("expanded route %d should keep its explicit text_only:false", i)
 		}
-		if !c.Routes[i].presence.written("text_only", false) {
-			t.Errorf("expanded route %d lost presence metadata", i)
+		if !c.Routes[i].Presence.Written("text_only", false) {
+			t.Errorf("expanded route %d lost Presence metadata", i)
 		}
 	}
 }
@@ -498,20 +498,20 @@ func TestLazyApplyGoLiteralPresenceFallback(t *testing.T) {
 		LazyApply: &LazyApplyConfig{NoSearch: true, ConvertOff2Low: "translate"},
 		Routes:    []RouteRule{{Pattern: "a", URL: "http://a"}},
 	}
-	if !effectiveRouteNoSearch(c, &c.Routes[0]) {
+	if !EffectiveRouteNoSearch(c, &c.Routes[0]) {
 		t.Error("Go literal route should inherit no_search")
 	}
 	// A Go literal cannot express explicit false without metadata; it inherits. This is the documented convention.
-	if !effectiveRouteNoSearch(c, &RouteRule{Pattern: "b", URL: "http://b"}) {
+	if !EffectiveRouteNoSearch(c, &RouteRule{Pattern: "b", URL: "http://b"}) {
 		t.Error("Go literal with no metadata should inherit no_search")
 	}
-	if got := effectiveConvertOff2Low(c, "", false, false); got != "translate" {
+	if got := EffectiveConvertOff2Low(c, "", false, false); got != "translate" {
 		t.Errorf("Go literal convertOff2Low = %q, want translate", got)
 	}
-	if got := effectiveConvertOff2Low(c, "all", true, false); got != "all" {
+	if got := EffectiveConvertOff2Low(c, "all", true, false); got != "all" {
 		t.Errorf("Go literal local convertOff2Low = %q, want all", got)
 	}
-	if got := effectiveConvertOff2Low(c, "", false, true); got != "" {
+	if got := EffectiveConvertOff2Low(c, "", false, true); got != "" {
 		t.Errorf("Go literal opt-out convertOff2Low = %q, want empty", got)
 	}
 }
@@ -529,10 +529,10 @@ func TestLazyApplyEffectiveFallbackThinking(t *testing.T) {
 		],
 		"search_fallback":{"url":"http://s","thinking":"auto"}
 	}`)
-	if got := effectiveFallbackThinking(c, c.SearchFallback); got != "auto" {
+	if got := EffectiveFallbackThinking(c, c.SearchFallback); got != "auto" {
 		t.Errorf("explicit fallback thinking = %q, want auto", got)
 	}
-	if got := effectiveRouteThinking(c, &c.Routes[0]); got != "budget" {
+	if got := EffectiveRouteThinking(c, &c.Routes[0]); got != "budget" {
 		t.Errorf("route thinking = %q, want budget", got)
 	}
 
@@ -541,7 +541,7 @@ func TestLazyApplyEffectiveFallbackThinking(t *testing.T) {
 		"lazyApply":{"thinking":"budget"},
 		"search_fallback":{"url":"http://s"}
 	}`)
-	if got := effectiveFallbackThinking(inherit, inherit.SearchFallback); got != "budget" {
+	if got := EffectiveFallbackThinking(inherit, inherit.SearchFallback); got != "budget" {
 		t.Errorf("lazy fallback thinking = %q, want budget", got)
 	}
 
@@ -550,11 +550,11 @@ func TestLazyApplyEffectiveFallbackThinking(t *testing.T) {
 		"lazyApply":{"thinking":"budget"},
 		"search_fallback":{"url":"http://s","noLazyApply":true}
 	}`)
-	if got := effectiveFallbackThinking(optOut, optOut.SearchFallback); got != "" {
+	if got := EffectiveFallbackThinking(optOut, optOut.SearchFallback); got != "" {
 		t.Errorf("noLazyApply fallback thinking = %q, want empty", got)
 	}
 
-	if got := effectiveFallbackThinking(inherit, nil); got != "" {
+	if got := EffectiveFallbackThinking(inherit, nil); got != "" {
 		t.Errorf("nil fallback thinking = %q, want empty", got)
 	}
 }

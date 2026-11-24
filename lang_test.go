@@ -2,6 +2,7 @@
 package main
 
 import (
+	"proxy429/internal/config"
 	"proxy429/internal/platform"
 
 	"encoding/json"
@@ -22,7 +23,7 @@ func TestLoadConfigUILangIgnored(t *testing.T) {
 		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := loadConfig(p); err != nil {
+		if _, _, err := config.LoadConfig(p); err != nil {
 			t.Errorf("ui_lang=%q 应被忽略且加载成功: %v", lang, err)
 		}
 	}
@@ -54,15 +55,9 @@ func TestUILangHandlerWritesProgramSettings(t *testing.T) {
 	if err := os.WriteFile(path, []byte(orig), 0644); err != nil {
 		t.Fatal(err)
 	}
-	configMu.Lock()
-	oldPath := configFilePath
-	configFilePath = path
-	configMu.Unlock()
-	defer func() {
-		configMu.Lock()
-		configFilePath = oldPath
-		configMu.Unlock()
-	}()
+	oldPath := config.CurrentConfigPath()
+	config.SetCurrentPath(path)
+	defer config.SetCurrentPath(oldPath)
 	oldLang := platform.CurrentUILang()
 	defer platform.ApplyUILang(oldLang)
 
@@ -78,7 +73,7 @@ func TestUILangHandlerWritesProgramSettings(t *testing.T) {
 	if w := post(`{"lang":"en"}`); w.Code != http.StatusOK {
 		t.Fatalf("POST en 状态码=%d: %s", w.Code, w.Body.String())
 	}
-	if got := readProgramSetting("ui-lang"); got != "en" {
+	if got := config.ReadProgramSetting("ui-lang"); got != "en" {
 		t.Errorf("program-settings ui-lang=%q, want en", got)
 	}
 	if data, _ := os.ReadFile(path); string(data) != orig {
@@ -92,7 +87,7 @@ func TestUILangHandlerWritesProgramSettings(t *testing.T) {
 	if w := post(`{"lang":""}`); w.Code != http.StatusOK {
 		t.Fatalf("POST 空 状态码=%d: %s", w.Code, w.Body.String())
 	}
-	if got := readProgramSetting("ui-lang"); got != "" {
+	if got := config.ReadProgramSetting("ui-lang"); got != "" {
 		t.Errorf("传空串后 ui-lang 应被删除, got %q", got)
 	}
 	if data, _ := os.ReadFile(path); string(data) != orig {
@@ -100,11 +95,11 @@ func TestUILangHandlerWritesProgramSettings(t *testing.T) {
 	}
 
 	// Illegal value → 400, program-settings.txt untouched
-	before, _ := os.ReadFile(programSettingsPath())
+	before, _ := os.ReadFile(config.ProgramSettingsPath())
 	if w := post(`{"lang":"fr"}`); w.Code != http.StatusBadRequest {
 		t.Errorf("POST fr 状态码=%d, want 400", w.Code)
 	}
-	after, _ := os.ReadFile(programSettingsPath())
+	after, _ := os.ReadFile(config.ProgramSettingsPath())
 	if string(before) != string(after) {
 		t.Errorf("非法值不应改动 program-settings.txt")
 	}
@@ -303,15 +298,9 @@ func TestResolveProgramUILangMigration(t *testing.T) {
 	if err := os.WriteFile(path, []byte(orig), 0644); err != nil {
 		t.Fatal(err)
 	}
-	configMu.Lock()
-	oldPath := configFilePath
-	configFilePath = path
-	configMu.Unlock()
-	defer func() {
-		configMu.Lock()
-		configFilePath = oldPath
-		configMu.Unlock()
-	}()
+	oldPath := config.CurrentConfigPath()
+	config.SetCurrentPath(path)
+	defer config.SetCurrentPath(oldPath)
 	oldLang := platform.CurrentUILang()
 	defer platform.ApplyUILang(oldLang)
 
@@ -319,7 +308,7 @@ func TestResolveProgramUILangMigration(t *testing.T) {
 	if got := platform.CurrentUILang(); got != "zh" {
 		t.Errorf("迁移后 currentUILang=%q, want zh", got)
 	}
-	if got := readProgramSetting("ui-lang"); got != "zh" {
+	if got := config.ReadProgramSetting("ui-lang"); got != "zh" {
 		t.Errorf("program-settings ui-lang=%q, want zh", got)
 	}
 	want := "{\n  \"max_retries\": 3,\n  \"upstream\": \"http://x\"\n}\n"
@@ -331,7 +320,7 @@ func TestResolveProgramUILangMigration(t *testing.T) {
 	if err := os.WriteFile(path, []byte(orig), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeProgramSetting("ui-lang", "en"); err != nil {
+	if err := config.WriteProgramSetting("ui-lang", "en"); err != nil {
 		t.Fatal(err)
 	}
 	resolveProgramUILang()
@@ -351,46 +340,40 @@ func TestProgramSettingsRoundTrip(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"upstream":"http://x"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	configMu.Lock()
-	oldPath := configFilePath
-	configFilePath = path
-	configMu.Unlock()
-	defer func() {
-		configMu.Lock()
-		configFilePath = oldPath
-		configMu.Unlock()
-	}()
+	oldPath := config.CurrentConfigPath()
+	config.SetCurrentPath(path)
+	defer config.SetCurrentPath(oldPath)
 
-	if got := readProgramSetting("ui-lang"); got != "" {
+	if got := config.ReadProgramSetting("ui-lang"); got != "" {
 		t.Fatalf("初始应无 ui-lang, got %q", got)
 	}
-	if err := writeProgramSetting("ui-lang", "zh"); err != nil {
+	if err := config.WriteProgramSetting("ui-lang", "zh"); err != nil {
 		t.Fatal(err)
 	}
 	// Manually add a comment line and another key, verifying set/delete don't break them
-	data, _ := os.ReadFile(programSettingsPath())
+	data, _ := os.ReadFile(config.ProgramSettingsPath())
 	text := "# 程序设置（与路由配置分离）\n" + string(data) + "other=1\n"
-	if err := os.WriteFile(programSettingsPath(), []byte(text), 0644); err != nil {
+	if err := os.WriteFile(config.ProgramSettingsPath(), []byte(text), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeProgramSetting("ui-lang", "en"); err != nil { // Change a value
+	if err := config.WriteProgramSetting("ui-lang", "en"); err != nil { // Change a value
 		t.Fatal(err)
 	}
 	want := "# 程序设置（与路由配置分离）\nui-lang=en\nother=1\n"
-	if data, _ := os.ReadFile(programSettingsPath()); string(data) != want {
+	if data, _ := os.ReadFile(config.ProgramSettingsPath()); string(data) != want {
 		t.Errorf("改值后应为:\n%q\ngot:\n%q", want, data)
 	}
-	if err := writeProgramSetting("ui-lang", ""); err != nil { // Delete a key
+	if err := config.WriteProgramSetting("ui-lang", ""); err != nil { // Delete a key
 		t.Fatal(err)
 	}
 	want = "# 程序设置（与路由配置分离）\nother=1\n"
-	if data, _ := os.ReadFile(programSettingsPath()); string(data) != want {
+	if data, _ := os.ReadFile(config.ProgramSettingsPath()); string(data) != want {
 		t.Errorf("删键后应为:\n%q\ngot:\n%q", want, data)
 	}
-	if err := writeProgramSetting("no-such-key", ""); err != nil { // Delete a nonexistent key
+	if err := config.WriteProgramSetting("no-such-key", ""); err != nil { // Delete a nonexistent key
 		t.Errorf("删不存在的键不应报错: %v", err)
 	}
-	if got := readProgramSetting("other"); got != "1" {
+	if got := config.ReadProgramSetting("other"); got != "1" {
 		t.Errorf("readProgramSetting(other)=%q, want 1", got)
 	}
 }

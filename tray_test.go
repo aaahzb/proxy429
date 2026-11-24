@@ -1,6 +1,7 @@
 package main
 
 import (
+	"proxy429/internal/config"
 	"proxy429/internal/platform"
 
 	"net/http/httptest"
@@ -80,18 +81,16 @@ func TestSwitchConfigNotifiesTray(t *testing.T) {
 		t.Fatalf("switchConfig: %v", err)
 	}
 	defer func() {
-		configMu.Lock()
-		configFilePath = ""
-		configMu.Unlock()
-		cfg.Store(&Config{})
+		config.SetCurrentPath("")
+		config.Store(&config.Config{})
 	}()
 	select {
 	case <-trayCfgSwitched:
 	default:
 		t.Error("switchConfig 成功后应投递托盘重建通知")
 	}
-	if filepath.Base(currentConfigPath()) != "b.json" {
-		t.Errorf("currentConfigPath=%q, want b.json", currentConfigPath())
+	if filepath.Base(config.CurrentConfigPath()) != "b.json" {
+		t.Errorf("currentConfigPath=%q, want b.json", config.CurrentConfigPath())
 	}
 	// A failed switch (file doesn't exist) posts no notification; checkmarks stay put
 	if err := switchConfig(filepath.Join(dir, "nope.json")); err == nil {
@@ -116,13 +115,9 @@ func TestDelConfigNotifiesTray(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	configMu.Lock()
-	configFilePath = a
-	configMu.Unlock()
+	config.SetCurrentPath(a)
 	defer func() {
-		configMu.Lock()
-		configFilePath = ""
-		configMu.Unlock()
+		config.SetCurrentPath("")
 	}()
 	// Drain the notification channel first, excluding backlog left by other tests
 	select {
@@ -169,13 +164,9 @@ func TestRenameConfigNotifiesTray(t *testing.T) {
 	if err := os.WriteFile(a, []byte(`{"upstream":"http://127.0.0.1:1"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	configMu.Lock()
-	configFilePath = a
-	configMu.Unlock()
+	config.SetCurrentPath(a)
 	defer func() {
-		configMu.Lock()
-		configFilePath = ""
-		configMu.Unlock()
+		config.SetCurrentPath("")
 	}()
 	// Drain the notification channel first, excluding backlog left by other tests
 	select {
@@ -190,8 +181,8 @@ func TestRenameConfigNotifiesTray(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("重命名应 200，实际 %d: %s", rec.Code, rec.Body.String())
 	}
-	if filepath.Base(currentConfigPath()) != "b.json" {
-		t.Errorf("重命名当前配置后 currentConfigPath=%q, want b.json", currentConfigPath())
+	if filepath.Base(config.CurrentConfigPath()) != "b.json" {
+		t.Errorf("重命名当前配置后 currentConfigPath=%q, want b.json", config.CurrentConfigPath())
 	}
 	select {
 	case <-trayCfgSwitched:
@@ -206,14 +197,10 @@ func TestRenameConfigNotifiesTray(t *testing.T) {
 func TestSaveConfigCreateNotifiesTray(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.json")
-	configMu.Lock()
-	configFilePath = p
-	configMu.Unlock()
+	config.SetCurrentPath(p)
 	defer func() {
-		configMu.Lock()
-		configFilePath = ""
-		configMu.Unlock()
-		cfg.Store(&Config{})
+		config.SetCurrentPath("")
+		config.Store(&config.Config{})
 	}()
 	// Drain the notification channel first, excluding backlog left by other tests
 	select {
@@ -258,14 +245,10 @@ func TestSaveConfigCreateNotifiesTray(t *testing.T) {
 func TestConfigPostRemovedKeysRejected(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.json")
-	configMu.Lock()
-	configFilePath = p
-	configMu.Unlock()
+	config.SetCurrentPath(p)
 	defer func() {
-		configMu.Lock()
-		configFilePath = ""
-		configMu.Unlock()
-		cfg.Store(&Config{})
+		config.SetCurrentPath("")
+		config.Store(&config.Config{})
 	}()
 
 	req := httptest.NewRequest("POST", "/__config", strings.NewReader(`{"upstream":"http://127.0.0.1:1","translateNone2Low":true}`))

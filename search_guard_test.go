@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"proxy429/internal/config"
 	"strings"
 	"testing"
 )
@@ -97,7 +98,7 @@ func TestSynthesizeSearchGuardSSE(t *testing.T) {
 
 // TestEffectiveSearchGuardBaseRule locks the pre-lazyApply precedence: route local > fallback local > false.
 func TestEffectiveSearchGuardBaseRule(t *testing.T) {
-	base := &Config{}
+	base := &config.Config{}
 	on, off := true, false
 	tests := []struct {
 		name     string
@@ -115,20 +116,20 @@ func TestEffectiveSearchGuardBaseRule(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			rr := &RouteRule{NoBullshitOnEmptyClaudeSearch: tc.route}
-			sf := &SearchRoute{NoBullshitOnEmptyClaudeSearch: tc.fallback}
-			if got := effectiveSearchGuard(base, rr, sf); got != tc.want {
+			rr := &config.RouteRule{NoBullshitOnEmptyClaudeSearch: tc.route}
+			sf := &config.SearchRoute{NoBullshitOnEmptyClaudeSearch: tc.fallback}
+			if got := config.EffectiveSearchGuard(base, rr, sf); got != tc.want {
 				t.Errorf("effectiveSearchGuard() = %v, want %v", got, tc.want)
 			}
 		})
 	}
-	if effectiveSearchGuard(base, nil, nil) {
+	if config.EffectiveSearchGuard(base, nil, nil) {
 		t.Error("nil routes must default to guard off")
 	}
 }
 
 func TestSearchGuardJSONOptionName(t *testing.T) {
-	var route RouteRule
+	var route config.RouteRule
 	if err := json.Unmarshal([]byte(`{"noBullshitOnEmptyClaudeSearch":true}`), &route); err != nil {
 		t.Fatalf("unmarshal route option: %v", err)
 	}
@@ -136,7 +137,7 @@ func TestSearchGuardJSONOptionName(t *testing.T) {
 		t.Fatal("noBullshitOnEmptyClaudeSearch:true did not enable the route guard")
 	}
 
-	var fallback SearchRoute
+	var fallback config.SearchRoute
 	if err := json.Unmarshal([]byte(`{"noBullshitOnEmptyClaudeSearch":false}`), &fallback); err != nil {
 		t.Fatalf("unmarshal fallback option: %v", err)
 	}
@@ -148,7 +149,7 @@ func TestSearchGuardJSONOptionName(t *testing.T) {
 func TestSearchGuardMarkerInjection(t *testing.T) {
 	on := true
 	out, bodies, _, _ := runSearchE2EFull(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on},
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on},
 		nil, true, searchSubagentReq)
 	if len(bodies) != 1 {
 		t.Fatalf("route upstream should receive one POST, got %d", len(bodies))
@@ -162,8 +163,8 @@ func TestSearchGuardMarkerInjection(t *testing.T) {
 func TestSearchGuardFallbackMarkerInjection(t *testing.T) {
 	on := true
 	_, bodies, _, _ := runSearchE2EFull(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus", NoSearch: true},
-		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on},
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus", NoSearch: true},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on},
 		false, searchSubagentReq)
 	if len(bodies) != 1 {
 		t.Fatalf("fallback upstream should receive one POST, got %d", len(bodies))
@@ -177,7 +178,7 @@ func TestSearchGuardNoMarkerNoInjection(t *testing.T) {
 	on := true
 	body := `{"model":"claude-opus-4-8","stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search without the subagent marker"}]}`
 	_, bodies, _, _ := runSearchE2EFull(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on},
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on},
 		nil, true, body)
 	if len(bodies) != 1 {
 		t.Fatalf("route upstream should receive one POST, got %d", len(bodies))

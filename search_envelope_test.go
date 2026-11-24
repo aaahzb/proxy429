@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"proxy429/internal/config"
 	"strings"
 	"testing"
 	"time"
@@ -460,7 +461,7 @@ func TestSearchEnvelopeFailSoftRetry(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
+	config.Store(&config.Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -621,7 +622,7 @@ func TestSearchEnvelopeCutoffLearning(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
+	config.Store(&config.Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
 	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 	defer proxy.Close()
 

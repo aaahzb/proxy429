@@ -1,4 +1,4 @@
-package main
+package config
 
 // config.example.json is the template for new configs / first run (go:embed'ed into the exe); this test ensures every field
 // in the template really exists in the Config struct (DisallowUnknownFields strict decoding fails on hallucinated fields),
@@ -11,7 +11,7 @@ import (
 )
 
 func TestConfigExampleMatchesStruct(t *testing.T) {
-	dec := json.NewDecoder(bytes.NewReader(configExampleBytes))
+	dec := json.NewDecoder(bytes.NewReader(ConfigExampleBytes))
 	dec.DisallowUnknownFields()
 	var c Config
 	if err := dec.Decode(&c); err != nil {
@@ -43,7 +43,7 @@ func TestConfigExampleMatchesStruct(t *testing.T) {
 		t.Errorf("search_fallback.summary_level=%q 不是真实档位", c.SearchFallback.SummaryLevel)
 	}
 
-	// The claudeSearch* demo values (on search_fallback and routes entries alike) must be enums validateConfigEnums actually accepts.
+	// The claudeSearch* demo values (on search_fallback and routes entries alike) must be enums ValidateConfigEnums actually accepts.
 	validSearchThink := map[string]bool{"": true, "off": true, "low": true, "mid": true, "high": true, "max": true}
 	validSearchSummary := map[string]bool{"": true, "noForce": true, "forceLow": true, "forceMid": true, "forceHigh": true}
 	if c.SearchFallback != nil {
@@ -75,7 +75,7 @@ func TestConfigExampleMatchesStruct(t *testing.T) {
 
 	// The debug field is excluded from the template by convention.
 	var raw map[string]interface{}
-	if err := json.Unmarshal(configExampleBytes, &raw); err != nil {
+	if err := json.Unmarshal(ConfigExampleBytes, &raw); err != nil {
 		t.Fatalf("模板不是合法 JSON: %v", err)
 	}
 	if _, ok := raw["search_debug_dir"]; ok {
@@ -87,7 +87,7 @@ func TestConfigExampleMatchesStruct(t *testing.T) {
 // (except debug) should be demonstrated in the template, so adding a new field can't forget its demo.
 func TestConfigCoversAllStructFields(t *testing.T) {
 	var raw map[string]interface{}
-	if err := json.Unmarshal(configExampleBytes, &raw); err != nil {
+	if err := json.Unmarshal(ConfigExampleBytes, &raw); err != nil {
 		t.Fatalf("模板不是合法 JSON: %v", err)
 	}
 	// All Config struct fields (the debug field is exempted).

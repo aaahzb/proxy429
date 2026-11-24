@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"proxy429/internal/config"
 	"strings"
 	"sync"
 	"testing"
@@ -41,7 +42,7 @@ type searchGuardE2EResult struct {
 }
 
 // runSearchGuardE2E serves a caller-supplied upstream response through the real native handler and archives one flight.
-func runSearchGuardE2E(t *testing.T, rr RouteRule, sf *SearchRoute, routeServes bool, clientBody string, status int, contentType, responseBody string, lazy ...*LazyApplyConfig) searchGuardE2EResult {
+func runSearchGuardE2E(t *testing.T, rr config.RouteRule, sf *config.SearchRoute, routeServes bool, clientBody string, status int, contentType, responseBody string, lazy ...*config.LazyApplyConfig) searchGuardE2EResult {
 	t.Helper()
 	resetStats()
 	finishedMu.Lock()
@@ -53,8 +54,8 @@ func runSearchGuardE2E(t *testing.T, rr RouteRule, sf *SearchRoute, routeServes 
 		finished = oldFinished
 		finishedMu.Unlock()
 	}()
-	oldCfg := cfg.Load()
-	defer cfg.Store(oldCfg)
+	oldCfg := config.Current()
+	defer config.Store(oldCfg)
 
 	var mu sync.Mutex
 	var upstreamBody []byte
@@ -86,18 +87,18 @@ func runSearchGuardE2E(t *testing.T, rr RouteRule, sf *SearchRoute, routeServes 
 	if sf != nil {
 		sf.URL = upstream.URL
 	}
-	runtimeCfg := &Config{
+	runtimeCfg := &config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes:             []RouteRule{rr},
+		Routes:             []config.RouteRule{rr},
 		SearchFallback:     sf,
 	}
 	if len(lazy) > 0 {
 		runtimeCfg.LazyApply = lazy[0]
 	}
-	cfg.Store(runtimeCfg)
+	config.Store(runtimeCfg)
 	stats.resetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
@@ -141,7 +142,7 @@ func TestSearchGuardReplacesEmptyResponse(t *testing.T) {
 	on := true
 	upstream := searchGuardUpstreamSSE(`[]`, searchGuardFabricatedAnswer)
 	got := runSearchGuardE2E(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on},
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on},
 		nil, true, searchSubagentReq, http.StatusOK, "text/event-stream", upstream)
 
 	if !strings.Contains(got.client, searchGuardFixedText) {
@@ -200,7 +201,7 @@ func TestSearchGuardNonEmptyMatchesUnguarded(t *testing.T) {
 	on := true
 	result := `[{"type":"web_search_tool_result_content","url":"https://example.com","title":"real result"}]`
 	upstream := searchGuardUpstreamSSE(result, "REAL_SEARCH_ANSWER")
-	route := RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on}
+	route := config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on}
 	guarded := runSearchGuardE2E(t, route, nil, true, searchSubagentReq, http.StatusOK, "text/event-stream", upstream)
 	route.NoBullshitOnEmptyClaudeSearch = nil
 	plain := runSearchGuardE2E(t, route, nil, true, searchSubagentReq, http.StatusOK, "text/event-stream", upstream)
@@ -215,7 +216,7 @@ func TestSearchGuardNonEmptyMatchesUnguarded(t *testing.T) {
 func TestSearchGuardDisabledPassesEmptyResponse(t *testing.T) {
 	upstream := searchGuardUpstreamSSE(`[]`, searchGuardFabricatedAnswer)
 	got := runSearchGuardE2E(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding"},
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding"},
 		nil, true, searchSubagentReq, http.StatusOK, "text/event-stream", upstream)
 	if !strings.Contains(got.client, searchGuardFabricatedAnswer) || strings.Contains(got.client, searchGuardFixedText) {
 		t.Errorf("guard-off response must retain existing behavior: %s", got.client)
@@ -240,8 +241,8 @@ func TestSearchGuardFallbackResolutionEndToEnd(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := runSearchGuardE2E(t,
-				RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus", NoSearch: true, NoBullshitOnEmptyClaudeSearch: tc.route},
-				&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: tc.fallback},
+				config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus", NoSearch: true, NoBullshitOnEmptyClaudeSearch: tc.route},
+				&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: tc.fallback},
 				false, searchSubagentReq, http.StatusOK, "text/event-stream", searchGuardUpstreamSSE(`[]`, searchGuardFabricatedAnswer))
 			replaced := strings.Contains(got.client, searchGuardFixedText)
 			if replaced != tc.wantReplace {
@@ -259,7 +260,7 @@ func TestSearchGuardNoMarkerAndNonSSEPassThrough(t *testing.T) {
 	unmarked := `{"model":"claude-opus-4-8","stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"ordinary request"}]}`
 	upstream := searchGuardUpstreamSSE(`[]`, searchGuardFabricatedAnswer)
 	got := runSearchGuardE2E(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on},
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on},
 		nil, true, unmarked, http.StatusOK, "text/event-stream", upstream)
 	if !strings.Contains(got.client, searchGuardFabricatedAnswer) || strings.Contains(got.client, searchGuardFixedText) {
 		t.Errorf("unmarked response must not be replaced: %s", got.client)
@@ -267,7 +268,7 @@ func TestSearchGuardNoMarkerAndNonSSEPassThrough(t *testing.T) {
 
 	jsonBody := `{"type":"message","content":[{"type":"text","text":"` + searchGuardFabricatedAnswer + `"},{"type":"web_search_tool_result","content":[]}]}`
 	got = runSearchGuardE2E(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on},
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &on},
 		nil, true, searchSubagentReq, http.StatusOK, "application/json", jsonBody)
 	if got.client != jsonBody {
 		t.Errorf("non-SSE JSON changed under the guard:\n got: %s\nwant: %s", got.client, jsonBody)

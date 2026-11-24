@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"proxy429/internal/config"
 	"strconv"
 	"strings"
 	"testing"
@@ -231,13 +232,13 @@ func TestDualSideTranslatedFlow(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:       mock.URL,
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes:         []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"}},
+		Routes:         []config.RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"}},
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 	defer proxy.Close()
@@ -295,8 +296,8 @@ func TestDualSideDirectFlow(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
 
-	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
-	defer cfg.Store(&Config{})
+	config.Store(&config.Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
+	defer config.Store(&config.Config{})
 
 	post := func(model string) {
 		t.Helper()
@@ -338,11 +339,11 @@ func TestDualSideDirectFlow(t *testing.T) {
 		t.Errorf("同文流 contentDown 应为 nil（空非 nil 切片会让 respDown 旗标说谎）: %#v", ff.contentDown)
 	}
 	// Route-rewritten model: the body changed; the downstream side stores the client's original, the upstream side the rewritten body.
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:       mock.URL,
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes:         []RouteRule{{Pattern: "claude-y*", URL: mock.URL, Model: "k3-256k"}},
+		Routes:         []config.RouteRule{{Pattern: "claude-y*", URL: mock.URL, Model: "k3-256k"}},
 	})
 	post("claude-y1")
 	ff = findFF("k3-256k")
@@ -374,13 +375,13 @@ func TestDualSideModelWriteBack(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:       mock.URL,
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes:         []RouteRule{{Pattern: "claude-y*", URL: mock.URL, Model: "k3-256k"}},
+		Routes:         []config.RouteRule{{Pattern: "claude-y*", URL: mock.URL, Model: "k3-256k"}},
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()

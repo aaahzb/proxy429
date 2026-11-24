@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"proxy429/internal/config"
 	"strings"
 	"testing"
 	"time"
@@ -153,12 +154,12 @@ func TestHandlerConvertAllToStream(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           mock.URL,
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		ConvertAllToStream: true,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: mock.URL, Model: "deepseek-v4-flash"},
 		},
 	})
@@ -210,7 +211,7 @@ func TestHandlerConvertAllToStreamDisabled(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
+	config.Store(&config.Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()

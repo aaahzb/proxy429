@@ -23,34 +23,6 @@ type searchGuardUsage struct {
 	output        int64
 }
 
-// effectiveSearchGuard resolves the guard with lazyApply materialized: route local > route lazy >
-// fallback local > fallback lazy > false. Defaults never arm the guard without a matched route or
-// fallback object, so the unmatched default upstream stays unchanged. An object's own noLazyApply
-// removes only that object's inherited layer; an explicit local value always wins.
-func effectiveSearchGuard(c *Config, route *RouteRule, fallback *SearchRoute) bool {
-	// lazyApply behaves as if the key were written into every supported object. Resolve the route
-	// first (local then lazy), so a route-level default keeps the existing route-over-fallback
-	// precedence; a route noLazyApply removes only the inherited layer. The fallback resolves the
-	// same way, and an unmatched request (both nil) never arms the guard.
-	if route != nil {
-		if route.presence.written("noBullshitOnEmptyClaudeSearch", route.NoBullshitOnEmptyClaudeSearch != nil) {
-			return route.NoBullshitOnEmptyClaudeSearch != nil && *route.NoBullshitOnEmptyClaudeSearch
-		}
-		if la := lazyApplyFor(c, route.NoLazyApply); la != nil && la.presence.written("noBullshitOnEmptyClaudeSearch", la.NoBullshitOnEmptyClaudeSearch != nil) {
-			return la.NoBullshitOnEmptyClaudeSearch != nil && *la.NoBullshitOnEmptyClaudeSearch
-		}
-	}
-	if fallback != nil {
-		if fallback.presence.written("noBullshitOnEmptyClaudeSearch", fallback.NoBullshitOnEmptyClaudeSearch != nil) {
-			return fallback.NoBullshitOnEmptyClaudeSearch != nil && *fallback.NoBullshitOnEmptyClaudeSearch
-		}
-		if la := lazyApplyFor(c, fallback.NoLazyApply); la != nil && la.presence.written("noBullshitOnEmptyClaudeSearch", la.NoBullshitOnEmptyClaudeSearch != nil) {
-			return la.NoBullshitOnEmptyClaudeSearch != nil && *la.NoBullshitOnEmptyClaudeSearch
-		}
-	}
-	return false
-}
-
 // onlyEmptySearchResults reports whether an Anthropic SSE stream contains at least one web search result block
 // and every such block has the exact empty-array shape content:[]. Unknown or malformed shapes fail closed to passthrough.
 func onlyEmptySearchResults(raw []byte) bool {

@@ -1,11 +1,9 @@
-package main
+package config
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 )
 
@@ -64,14 +62,14 @@ type jsonEdit struct {
 	text []byte
 }
 
-// materializeLazyApply proves what lazyApply does to the edited JSON and returns it with the inherited
-// keys appended in place. It validates the whole config first (parseConfig), then works on the raw text
+// MaterializeLazyApply proves what lazyApply does to the edited JSON and returns it with the inherited
+// keys appended in place. It validates the whole config first (ParseConfig), then works on the raw text
 // as a text edit: existing bytes keep their order and formatting, $VAR references stay unexpanded, and
 // the lazyApply object itself is kept, so copying the preview back into the editor is behavior-preserving.
 // Every route-like object receives the lazyApply keys it supports and does not already write;
 // noLazyApply:true skips an object entirely, and optional routes are never created.
-func materializeLazyApply(data []byte) ([]byte, error) {
-	if _, _, err := parseConfig(data); err != nil {
+func MaterializeLazyApply(data []byte) ([]byte, error) {
+	if _, _, err := ParseConfig(data); err != nil {
 		return nil, err
 	}
 	rootMembers, err := objectMembers(data, jsonSpan{start: 0, end: len(data)})
@@ -408,33 +406,4 @@ func isJSONNull(raw []byte) bool {
 func jsonBoolTrue(raw []byte) bool {
 	var b bool
 	return json.Unmarshal(raw, &b) == nil && b
-}
-
-// lazyApplyPreviewHandler renders the edited config with lazyApply materialized, for the console's
-// "preview lazyApply" button. It never writes the file and never publishes a config: the body is the
-// editor's current text, and only the insertion-edited JSON is returned. Localhost only, like every
-// /__* route.
-func lazyApplyPreviewHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
-		http.Error(w, "forbidden (local only)", http.StatusForbidden)
-		return
-	}
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "POST only", http.StatusMethodNotAllowed)
-		return
-	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "failed to read request body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	out, err := materializeLazyApply(body)
-	if err != nil {
-		http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(out)
 }

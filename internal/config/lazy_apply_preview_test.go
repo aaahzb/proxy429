@@ -1,10 +1,8 @@
-package main
+package config
 
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -65,9 +63,9 @@ func TestMaterializeLazyApply(t *testing.T) {
 		"fast_route":{"url":"http://f","noLazyApply":true},
 		"classifier_route":{"url":"http://c"}
 	}`
-	out, err := materializeLazyApply([]byte(raw))
+	out, err := MaterializeLazyApply([]byte(raw))
 	if err != nil {
-		t.Fatalf("materializeLazyApply: %v", err)
+		t.Fatalf("MaterializeLazyApply: %v", err)
 	}
 	text := string(out)
 	if !strings.Contains(text, `"$TH"`) {
@@ -138,35 +136,35 @@ func TestMaterializeLazyApply(t *testing.T) {
 func lazyApplySnapshot(c *Config) string {
 	var b strings.Builder
 	conv := func(local string, written, optOut bool) string {
-		return effectiveConvertOff2Low(c, local, written, optOut)
+		return EffectiveConvertOff2Low(c, local, written, optOut)
 	}
 	for i := range c.Routes {
 		rr := &c.Routes[i]
-		inject, think := resolveSearchBehavior(effectiveDirectSearchSettings(c, rr))
+		inject, think := ResolveSearchBehavior(EffectiveDirectSearchSettings(c, rr))
 		fmt.Fprintf(&b, "route%d text=%v no_search=%v thinking=%q conv=%q direct=(%q,%q) guardDirect=%v guardFallback=%v\n",
-			i, effectiveRouteTextOnly(c, rr), effectiveRouteNoSearch(c, rr), effectiveRouteThinking(c, rr),
-			conv(rr.ConvertOff2Low, rr.presence.written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply),
-			inject, think, effectiveSearchGuard(c, rr, nil), effectiveSearchGuard(c, rr, c.SearchFallback))
+			i, EffectiveRouteTextOnly(c, rr), EffectiveRouteNoSearch(c, rr), EffectiveRouteThinking(c, rr),
+			conv(rr.ConvertOff2Low, rr.Presence.Written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply),
+			inject, think, EffectiveSearchGuard(c, rr, nil), EffectiveSearchGuard(c, rr, c.SearchFallback))
 		if c.SearchFallback != nil {
-			eff := effectiveFallbackSearchSettings(c, rr, c.SearchFallback)
-			inject, think = resolveSearchBehavior(eff)
-			fmt.Fprintf(&b, "route%d fallback=(%q,%q) conv=%q thinking=%q\n", i, inject, think, eff.ConvertOff2Low, effectiveFallbackThinking(c, c.SearchFallback))
+			eff := EffectiveFallbackSearchSettings(c, rr, c.SearchFallback)
+			inject, think = ResolveSearchBehavior(eff)
+			fmt.Fprintf(&b, "route%d fallback=(%q,%q) conv=%q thinking=%q\n", i, inject, think, eff.ConvertOff2Low, EffectiveFallbackThinking(c, c.SearchFallback))
 		}
 	}
 	if sf := c.SearchFallback; sf != nil {
-		eff := effectiveFallbackSearchSettings(c, nil, sf)
-		inject, think := resolveSearchBehavior(eff)
+		eff := EffectiveFallbackSearchSettings(c, nil, sf)
+		inject, think := ResolveSearchBehavior(eff)
 		fmt.Fprintf(&b, "fallback-only conv=%q search=(%q,%q) guard=%v thinking=%q\n",
-			conv(sf.ConvertOff2Low, sf.presence.written("convertOff2Low", sf.ConvertOff2Low != ""), sf.NoLazyApply),
-			inject, think, effectiveSearchGuard(c, nil, sf), effectiveFallbackThinking(c, sf))
+			conv(sf.ConvertOff2Low, sf.Presence.Written("convertOff2Low", sf.ConvertOff2Low != ""), sf.NoLazyApply),
+			inject, think, EffectiveSearchGuard(c, nil, sf), EffectiveFallbackThinking(c, sf))
 	}
 	fmt.Fprintf(&b, "classifier cc=%q codex=%q\n",
-		classifierThinkingModeFor(c, classifierCC), classifierThinkingModeFor(c, classifierCodex))
+		ClassifierThinkingModeFor(c, ClassifierCC), ClassifierThinkingModeFor(c, ClassifierCodex))
 	if fr := c.FastRoute; fr != nil {
-		fmt.Fprintf(&b, "fast conv=%q\n", conv(fr.ConvertOff2Low, fr.presence.written("convertOff2Low", fr.ConvertOff2Low != ""), fr.NoLazyApply))
+		fmt.Fprintf(&b, "fast conv=%q\n", conv(fr.ConvertOff2Low, fr.Presence.Written("convertOff2Low", fr.ConvertOff2Low != ""), fr.NoLazyApply))
 	}
 	if mf := c.MultimodalFallback; mf != nil {
-		fmt.Fprintf(&b, "multimodal conv=%q\n", conv(mf.ConvertOff2Low, mf.presence.written("convertOff2Low", mf.ConvertOff2Low != ""), mf.NoLazyApply))
+		fmt.Fprintf(&b, "multimodal conv=%q\n", conv(mf.ConvertOff2Low, mf.Presence.Written("convertOff2Low", mf.ConvertOff2Low != ""), mf.NoLazyApply))
 	}
 	return b.String()
 }
@@ -208,12 +206,12 @@ func TestMaterializeLazyApplyBehaviorEquivalence(t *testing.T) {
 	}
 	for i, body := range bodies {
 		before := mustParseLazy(t, body)
-		out, err := materializeLazyApply([]byte(body))
+		out, err := MaterializeLazyApply([]byte(body))
 		if err != nil {
-			t.Errorf("config %d: materializeLazyApply: %v", i, err)
+			t.Errorf("config %d: MaterializeLazyApply: %v", i, err)
 			continue
 		}
-		after, _, err := parseConfig(out)
+		after, _, err := ParseConfig(out)
 		if err != nil {
 			t.Errorf("config %d: materialized output does not parse: %v\n%s", i, err, out)
 			continue
@@ -222,57 +220,6 @@ func TestMaterializeLazyApplyBehaviorEquivalence(t *testing.T) {
 		if want != got {
 			t.Errorf("config %d: materialized behavior differs\nbefore:\n%s\nafter:\n%s\njson:\n%s", i, want, got, out)
 		}
-	}
-}
-
-// TestLazyApplyPreviewHandler locks the console endpoint: local-only POST, no cache, parse errors
-// rejected as 400, and non-POST methods refused.
-func TestLazyApplyPreviewHandler(t *testing.T) {
-	const valid = `{"upstream":"http://u","lazyApply":{"text_only":true},"routes":[{"pattern":"a","url":"http://a"}]}`
-	call := func(method, remote, body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(method, lazyPreviewPath, strings.NewReader(body))
-		req.RemoteAddr = remote
-		rec := httptest.NewRecorder()
-		lazyApplyPreviewHandler(rec, req)
-		return rec
-	}
-
-	rec := call(http.MethodPost, "127.0.0.1:1", valid)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("valid preview status = %d, body %s", rec.Code, rec.Body.String())
-	}
-	if rec.Header().Get("Cache-Control") != "no-store" {
-		t.Errorf("Cache-Control = %q, want no-store", rec.Header().Get("Cache-Control"))
-	}
-	if !strings.Contains(rec.Body.String(), `"text_only":true`) {
-		t.Errorf("preview should contain the materialized field:\n%s", rec.Body.String())
-	}
-	if _, err := materializeLazyApply(rec.Body.Bytes()); err != nil {
-		t.Errorf("preview output should itself be valid: %v", err)
-	}
-
-	if rec := call(http.MethodGet, "127.0.0.1:1", ""); rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("GET status = %d, want 405", rec.Code)
-	}
-	if rec := call(http.MethodPost, "192.168.1.5:1", valid); rec.Code != http.StatusForbidden {
-		t.Errorf("remote status = %d, want 403", rec.Code)
-	}
-	rec = call(http.MethodPost, "127.0.0.1:1", `{"upstream":`)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid config") {
-		t.Errorf("invalid config = %d %q, want 400 invalid config", rec.Code, rec.Body.String())
-	}
-
-	// No lazyApply: the preview returns the editor text unchanged.
-	rec = call(http.MethodPost, "127.0.0.1:1", `{"upstream":"http://u"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("no-lazy preview status = %d, body %s", rec.Code, rec.Body.String())
-	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(rec.Body.Bytes(), &top); err != nil {
-		t.Errorf("no-lazy preview is not JSON: %v", err)
-	}
-	if _, ok := top["lazyApply"]; ok {
-		t.Error("no-lazy preview must not invent a lazyApply object")
 	}
 }
 
@@ -304,9 +251,9 @@ func TestMaterializeLazyApplyPreservesLayout(t *testing.T) {
 		"  ],\n" +
 		"  \"fast_route\": {\"convertOff2Low\":\"translate\"}\n" +
 		"}\n"
-	out, err := materializeLazyApply([]byte(raw))
+	out, err := MaterializeLazyApply([]byte(raw))
 	if err != nil {
-		t.Fatalf("materializeLazyApply: %v", err)
+		t.Fatalf("MaterializeLazyApply: %v", err)
 	}
 	if string(out) != want {
 		t.Errorf("preview restructured the config\ngot:\n%s\nwant:\n%s", out, want)
@@ -322,9 +269,9 @@ func TestMaterializeLazyApplyLeavesUnchangedConfigAlone(t *testing.T) {
 		"{\"upstream\":\"http://u\",\"lazyApply\":{}}\n",
 		"{\"upstream\":\"http://u\",\"lazyApply\":{\"text_only\":true},\"routes\":[{\"pattern\":\"a\",\"url\":\"http://a\",\"text_only\":false}]}",
 	} {
-		out, err := materializeLazyApply([]byte(raw))
+		out, err := MaterializeLazyApply([]byte(raw))
 		if err != nil {
-			t.Errorf("%s: materializeLazyApply: %v", raw, err)
+			t.Errorf("%s: MaterializeLazyApply: %v", raw, err)
 			continue
 		}
 		if string(out) != raw {
@@ -338,9 +285,9 @@ func TestMaterializeLazyApplyLeavesUnchangedConfigAlone(t *testing.T) {
 func TestMaterializeLazyApplyCompactObjects(t *testing.T) {
 	raw := `{"upstream":"http://u","lazyApply":{"text_only":true,"thinking":"adaptive"},"routes":[{"pattern":"a","url":"http://a"}]}`
 	want := `{"upstream":"http://u","lazyApply":{"text_only":true,"thinking":"adaptive"},"routes":[{"pattern":"a","url":"http://a","text_only":true,"thinking":"adaptive"}]}`
-	out, err := materializeLazyApply([]byte(raw))
+	out, err := MaterializeLazyApply([]byte(raw))
 	if err != nil {
-		t.Fatalf("materializeLazyApply: %v", err)
+		t.Fatalf("MaterializeLazyApply: %v", err)
 	}
 	if string(out) != want {
 		t.Errorf("compact insertion\ngot:  %s\nwant: %s", out, want)
@@ -350,11 +297,11 @@ func TestMaterializeLazyApplyCompactObjects(t *testing.T) {
 // TestMaterializeLazyApplyTemplate locks the shipped config template: the preview keeps the document's
 // top-level order and existing route formatting, appends inherited keys, and stays behavior-equivalent.
 func TestMaterializeLazyApplyTemplate(t *testing.T) {
-	out, err := materializeLazyApply(configExampleBytes)
+	out, err := MaterializeLazyApply(ConfigExampleBytes)
 	if err != nil {
-		t.Fatalf("materializeLazyApply(config.example.json): %v", err)
+		t.Fatalf("MaterializeLazyApply(config.example.json): %v", err)
 	}
-	if string(out) == string(configExampleBytes) {
+	if string(out) == string(ConfigExampleBytes) {
 		t.Fatal("template preview should gain inherited keys")
 	}
 	last := -1
@@ -368,11 +315,11 @@ func TestMaterializeLazyApplyTemplate(t *testing.T) {
 	if !strings.Contains(string(out), `"pattern": "claude-opus*"`) {
 		t.Error("existing route formatting was rewritten")
 	}
-	after, _, err := parseConfig(out)
+	after, _, err := ParseConfig(out)
 	if err != nil {
 		t.Fatalf("materialized template does not parse: %v", err)
 	}
-	before, _, err := parseConfig(configExampleBytes)
+	before, _, err := ParseConfig(ConfigExampleBytes)
 	if err != nil {
 		t.Fatalf("template does not parse: %v", err)
 	}
@@ -399,9 +346,9 @@ func TestMaterializeLazyApplyOnlySupportedFields(t *testing.T) {
   "multimodal_fallback": {"url": "http://m"},
   "classifier_route": {"url": "http://c"}
 }`
-	out, err := materializeLazyApply([]byte(raw))
+	out, err := MaterializeLazyApply([]byte(raw))
 	if err != nil {
-		t.Fatalf("materializeLazyApply: %v", err)
+		t.Fatalf("MaterializeLazyApply: %v", err)
 	}
 	top, routes := lazyPreviewObjects(t, out)
 	route := routes[0]

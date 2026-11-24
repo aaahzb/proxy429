@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"proxy429/internal/config"
 	"strings"
 	"sync"
 	"testing"
@@ -198,27 +199,27 @@ func TestRewriteSearchThinking(t *testing.T) {
 func TestResolveSearchBehavior(t *testing.T) {
 	cases := []struct {
 		name       string
-		sf         *SearchRoute
+		sf         *config.SearchRoute
 		wantInject string
 		wantThink  string
 	}{
 		{"nil route", nil, "", ""},
-		{"bare route", &SearchRoute{}, "", ""},
-		{"legacy summary mode defaults to low", &SearchRoute{SummaryMode: true}, "low", ""},
-		{"legacy summary mode with level", &SearchRoute{SummaryMode: true, SummaryLevel: "max"}, "max", ""},
-		{"legacy summary thinking", &SearchRoute{SummaryMode: true, SummaryThinking: true}, "low", "low"},
-		{"legacy summary thinking without summary mode", &SearchRoute{SummaryThinking: true}, "", "low"},
-		{"forceLow", &SearchRoute{ClaudeSearchSummary: "forceLow"}, "low", ""},
-		{"forceMid", &SearchRoute{ClaudeSearchSummary: "forceMid"}, "mid", ""},
-		{"forceHigh", &SearchRoute{ClaudeSearchSummary: "forceHigh"}, "high", ""},
-		{"new field beats legacy level", &SearchRoute{ClaudeSearchSummary: "forceMid", SummaryMode: true, SummaryLevel: "high"}, "mid", ""},
-		{"noForce suppresses summary_mode", &SearchRoute{ClaudeSearchSummary: "noForce", SummaryMode: true, SummaryLevel: "max"}, "", ""},
-		{"claudeSearchThinking off", &SearchRoute{ClaudeSearchThinking: "off"}, "", "off"},
-		{"claudeSearchThinking beats legacy summary_thinking", &SearchRoute{ClaudeSearchThinking: "high", SummaryThinking: true}, "", "high"},
-		{"both new fields", &SearchRoute{ClaudeSearchSummary: "forceHigh", ClaudeSearchThinking: "max"}, "high", "max"},
+		{"bare route", &config.SearchRoute{}, "", ""},
+		{"legacy summary mode defaults to low", &config.SearchRoute{SummaryMode: true}, "low", ""},
+		{"legacy summary mode with level", &config.SearchRoute{SummaryMode: true, SummaryLevel: "max"}, "max", ""},
+		{"legacy summary thinking", &config.SearchRoute{SummaryMode: true, SummaryThinking: true}, "low", "low"},
+		{"legacy summary thinking without summary mode", &config.SearchRoute{SummaryThinking: true}, "", "low"},
+		{"forceLow", &config.SearchRoute{ClaudeSearchSummary: "forceLow"}, "low", ""},
+		{"forceMid", &config.SearchRoute{ClaudeSearchSummary: "forceMid"}, "mid", ""},
+		{"forceHigh", &config.SearchRoute{ClaudeSearchSummary: "forceHigh"}, "high", ""},
+		{"new field beats legacy level", &config.SearchRoute{ClaudeSearchSummary: "forceMid", SummaryMode: true, SummaryLevel: "high"}, "mid", ""},
+		{"noForce suppresses summary_mode", &config.SearchRoute{ClaudeSearchSummary: "noForce", SummaryMode: true, SummaryLevel: "max"}, "", ""},
+		{"claudeSearchThinking off", &config.SearchRoute{ClaudeSearchThinking: "off"}, "", "off"},
+		{"claudeSearchThinking beats legacy summary_thinking", &config.SearchRoute{ClaudeSearchThinking: "high", SummaryThinking: true}, "", "high"},
+		{"both new fields", &config.SearchRoute{ClaudeSearchSummary: "forceHigh", ClaudeSearchThinking: "max"}, "high", "max"},
 	}
 	for _, tc := range cases {
-		inject, think := resolveSearchBehavior(tc.sf)
+		inject, think := config.ResolveSearchBehavior(tc.sf)
 		if inject != tc.wantInject || think != tc.wantThink {
 			t.Errorf("%s: resolveSearchBehavior = (%q,%q), want (%q,%q)", tc.name, inject, think, tc.wantInject, tc.wantThink)
 		}
@@ -319,7 +320,7 @@ func searchE2EMock(t *testing.T) (srv *httptest.Server, bodies func() [][]byte) 
 
 // runSearchE2E wires a no_search route + the given search_fallback, posts clientBody to the proxy, and returns
 // the client's full response, the sf upstream's request bodies, and whether the original route was hit.
-func runSearchE2E(t *testing.T, sf *SearchRoute, clientBody string) (clientOut string, sfBodies [][]byte, routeCalled bool) {
+func runSearchE2E(t *testing.T, sf *config.SearchRoute, clientBody string) (clientOut string, sfBodies [][]byte, routeCalled bool) {
 	t.Helper()
 	resetStats()
 	sfMock, bodies := searchE2EMock(t)
@@ -334,17 +335,17 @@ func runSearchE2E(t *testing.T, sf *SearchRoute, clientBody string) (clientOut s
 	}))
 	defer routeMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "ark-opus", NoSearch: true},
 		},
 		SearchFallback: sf,
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 	stats.resetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
@@ -372,7 +373,7 @@ func checkPassthrough(t *testing.T, out string) {
 // into the search request itself — ONE upstream POST, response passed through, no synthesized stream.
 func TestSearchFallbackSummarySingleRequest(t *testing.T) {
 	out, bodies, routeCalled := runSearchE2E(t,
-		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", SummaryMode: true, SummaryLevel: "mid"},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", SummaryMode: true, SummaryLevel: "mid"},
 		searchSubagentReq)
 	if routeCalled {
 		t.Error("不应命中原 no_search 路由上游")
@@ -398,7 +399,7 @@ func TestSearchFallbackSummarySingleRequest(t *testing.T) {
 // client asked thinking off, the mock thinking block is stripped from the response it sees.
 func TestSearchFallbackClaudeSearchFields(t *testing.T) {
 	out, bodies, _ := runSearchE2E(t,
-		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceHigh", ClaudeSearchThinking: "low"},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceHigh", ClaudeSearchThinking: "low"},
 		searchSubagentReq)
 	if len(bodies) != 1 {
 		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
@@ -425,7 +426,7 @@ func TestSearchFallbackClaudeSearchFields(t *testing.T) {
 // except the model rewrite.
 func TestSearchFallbackNoForce(t *testing.T) {
 	_, bodies, _ := runSearchE2E(t,
-		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", SummaryMode: true, SummaryLevel: "max", ClaudeSearchSummary: "noForce"},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", SummaryMode: true, SummaryLevel: "max", ClaudeSearchSummary: "noForce"},
 		searchSubagentReq)
 	if len(bodies) != 1 {
 		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
@@ -440,7 +441,7 @@ func TestSearchFallbackNoForce(t *testing.T) {
 // standalone-search marker still reroutes to search_fallback (capability), but no instruction is injected.
 func TestSearchFallbackNoMarkerNoInjection(t *testing.T) {
 	_, bodies, routeCalled := runSearchE2E(t,
-		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", SummaryMode: true, SummaryLevel: "mid"},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", SummaryMode: true, SummaryLevel: "mid"},
 		`{"model":"claude-opus-4-8","stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"搜一下"}]}`)
 	if routeCalled {
 		t.Error("带搜索工具的请求仍应分流到 search_fallback，而不是原路由")
@@ -456,7 +457,7 @@ func TestSearchFallbackNoMarkerNoInjection(t *testing.T) {
 // TestSearchFallbackLegacySummaryThinking locks legacy summary_thinking:true mapping to a low-thinking rewrite.
 func TestSearchFallbackLegacySummaryThinking(t *testing.T) {
 	_, bodies, _ := runSearchE2E(t,
-		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", SummaryThinking: true},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", SummaryThinking: true},
 		searchSubagentReq)
 	if len(bodies) != 1 {
 		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
@@ -481,7 +482,7 @@ var bigMaxSearchReq = strings.Replace(searchSubagentReq, `"max_tokens":32000`, `
 // when routeServesSearch the route's own URL points at the recording search mock (a search-capable route serving
 // the request itself, no search_fallback involved), otherwise the route points at a hit-detecting dummy and
 // search_fallback (sf, nil allowed) serves the diverted request.
-func runSearchE2EFull(t *testing.T, rr RouteRule, sf *SearchRoute, routeServesSearch bool, clientBody string, lazy ...*LazyApplyConfig) (clientOut string, sfBodies [][]byte, routeCalled bool, recent string) {
+func runSearchE2EFull(t *testing.T, rr config.RouteRule, sf *config.SearchRoute, routeServesSearch bool, clientBody string, lazy ...*config.LazyApplyConfig) (clientOut string, sfBodies [][]byte, routeCalled bool, recent string) {
 	t.Helper()
 	resetStats()
 	sfMock, bodies := searchE2EMock(t)
@@ -503,19 +504,19 @@ func runSearchE2EFull(t *testing.T, rr RouteRule, sf *SearchRoute, routeServesSe
 		rr.URL = routeMock.URL
 	}
 
-	runtimeCfg := &Config{
+	runtimeCfg := &config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes:             []RouteRule{rr},
+		Routes:             []config.RouteRule{rr},
 		SearchFallback:     sf,
 	}
 	if len(lazy) > 0 {
 		runtimeCfg.LazyApply = lazy[0]
 	}
-	cfg.Store(runtimeCfg)
-	defer cfg.Store(&Config{})
+	config.Store(runtimeCfg)
+	defer config.Store(&config.Config{})
 	stats.resetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
@@ -547,9 +548,9 @@ func runSearchE2EFull(t *testing.T, rr RouteRule, sf *SearchRoute, routeServesSe
 // no_search route's forceHigh/max beat search_fallback's own forceLow/low, while sf still serves the request.
 func TestRouteSearchFieldsOverrideSearchFallback(t *testing.T) {
 	out, bodies, routeCalled, recent := runSearchE2EFull(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route-xxx", Model: "ark-opus", NoSearch: true,
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route-xxx", Model: "ark-opus", NoSearch: true,
 			ClaudeSearchSummary: "forceHigh", ClaudeSearchThinking: "max"},
-		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceLow", ClaudeSearchThinking: "low"},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceLow", ClaudeSearchThinking: "low"},
 		false, bigMaxSearchReq)
 	if routeCalled {
 		t.Error("不应命中原 no_search 路由上游")
@@ -579,9 +580,9 @@ func TestRouteSearchFieldsOverrideSearchFallback(t *testing.T) {
 // while search_fallback's own claudeSearchThinking still applies (the route left thinking unset).
 func TestRouteSearchFieldsPartialOverride(t *testing.T) {
 	_, bodies, _, recent := runSearchE2EFull(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route-xxx", Model: "ark-opus", NoSearch: true,
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route-xxx", Model: "ark-opus", NoSearch: true,
 			ClaudeSearchSummary: "noForce"},
-		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceMid", ClaudeSearchThinking: "low"},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceMid", ClaudeSearchThinking: "low"},
 		false, searchSubagentReq)
 	if len(bodies) != 1 {
 		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
@@ -607,7 +608,7 @@ func TestRouteSearchFieldsPartialOverride(t *testing.T) {
 // route's own upstream in one request.
 func TestRouteSearchFieldsOnSearchCapableRoute(t *testing.T) {
 	out, bodies, _, recent := runSearchE2EFull(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding",
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding",
 			ClaudeSearchSummary: "forceMid", ClaudeSearchThinking: "low"},
 		nil, true, searchSubagentReq)
 	if len(bodies) != 1 {
@@ -635,7 +636,7 @@ func TestSearchRewriteStripsThinkingForOffClient(t *testing.T) {
 	noThinkingReq := strings.Replace(searchSubagentReq, `"thinking":{"type":"disabled"},`, ``, 1)
 	for name, body := range map[string]string{"explicit disabled": searchSubagentReq, "no thinking field": noThinkingReq} {
 		out, bodies, _ := runSearchE2E(t,
-			&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchThinking: "low"},
+			&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchThinking: "low"},
 			body)
 		if len(bodies) != 1 {
 			t.Fatalf("%s: 上游应只收到 1 个 POST，实收 %d", name, len(bodies))
@@ -660,8 +661,8 @@ func TestSearchRewriteStripsThinkingForOffClient(t *testing.T) {
 func TestSearchRewriteKeepsThinkingForThinkingClient(t *testing.T) {
 	adaptiveReq := strings.Replace(searchSubagentReq, `"thinking":{"type":"disabled"}`, `"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}`, 1)
 	out, bodies, _, recent := runSearchE2EFull(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route-xxx", Model: "ark-opus", NoSearch: true},
-		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceLow", ClaudeSearchThinking: "low"},
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route-xxx", Model: "ark-opus", NoSearch: true},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchSummary: "forceLow", ClaudeSearchThinking: "low"},
 		false, adaptiveReq)
 	if len(bodies) != 1 {
 		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
@@ -683,8 +684,8 @@ func TestSearchRewriteKeepsThinkingForThinkingClient(t *testing.T) {
 // enhance_search legacy injection; the body reaches the route upstream unchanged except the model rewrite.
 func TestRouteSearchFieldsBeatEnhanceLegacy(t *testing.T) {
 	_, bodies, _, _ := runSearchE2EFull(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding",
-			EnhanceSearch: &EnhanceSearchConfig{SummaryLevel: "high"}, ClaudeSearchSummary: "noForce"},
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding",
+			EnhanceSearch: &config.EnhanceSearchConfig{SummaryLevel: "high"}, ClaudeSearchSummary: "noForce"},
 		nil, true, searchSubagentReq)
 	if len(bodies) != 1 {
 		t.Fatalf("路由上游应只收到 1 个 POST，实收 %d", len(bodies))
@@ -698,16 +699,16 @@ func TestRouteSearchFieldsBeatEnhanceLegacy(t *testing.T) {
 // TestValidateRouteClaudeSearchEnums locks config validation for the route-level fields: bad enums are
 // rejected naming the field, good ones pass.
 func TestValidateRouteClaudeSearchEnums(t *testing.T) {
-	badThink := &Config{Routes: []RouteRule{{Pattern: "x", URL: "http://u", ClaudeSearchThinking: "banana"}}}
-	if err := validateConfigEnums(badThink); err == nil || !strings.Contains(err.Error(), "claudeSearchThinking") {
+	badThink := &config.Config{Routes: []config.RouteRule{{Pattern: "x", URL: "http://u", ClaudeSearchThinking: "banana"}}}
+	if err := config.ValidateConfigEnums(badThink); err == nil || !strings.Contains(err.Error(), "claudeSearchThinking") {
 		t.Errorf("非法 claudeSearchThinking 应报错并点名字段: %v", err)
 	}
-	badSummary := &Config{Routes: []RouteRule{{Pattern: "x", URL: "http://u", ClaudeSearchSummary: "forceMax"}}}
-	if err := validateConfigEnums(badSummary); err == nil || !strings.Contains(err.Error(), "claudeSearchSummary") {
+	badSummary := &config.Config{Routes: []config.RouteRule{{Pattern: "x", URL: "http://u", ClaudeSearchSummary: "forceMax"}}}
+	if err := config.ValidateConfigEnums(badSummary); err == nil || !strings.Contains(err.Error(), "claudeSearchSummary") {
 		t.Errorf("非法 claudeSearchSummary 应报错并点名字段: %v", err)
 	}
-	ok := &Config{Routes: []RouteRule{{Pattern: "x", URL: "http://u", ClaudeSearchThinking: "mid", ClaudeSearchSummary: "forceHigh"}}}
-	if err := validateConfigEnums(ok); err != nil {
+	ok := &config.Config{Routes: []config.RouteRule{{Pattern: "x", URL: "http://u", ClaudeSearchThinking: "mid", ClaudeSearchSummary: "forceHigh"}}}
+	if err := config.ValidateConfigEnums(ok); err != nil {
 		t.Errorf("合法枚举不应报错: %v", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"proxy429/internal/config"
 	"strings"
 	"sync"
 	"testing"
@@ -14,9 +15,9 @@ import (
 // TestLazyApplyDirectSearchE2E locks the native handler wiring for a search-capable route: omitted
 // claudeSearch* keys are filled from lazyApply and drive the same injection/thinking rewrite as local fields.
 func TestLazyApplyDirectSearchE2E(t *testing.T) {
-	lazy := &LazyApplyConfig{ClaudeSearchThinking: "max", ClaudeSearchSummary: "forceHigh"}
+	lazy := &config.LazyApplyConfig{ClaudeSearchThinking: "max", ClaudeSearchSummary: "forceHigh"}
 	_, bodies, _, recent := runSearchE2EFull(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding"},
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding"},
 		nil, true, searchSubagentReq, lazy)
 	if len(bodies) != 1 {
 		t.Fatalf("upstream should receive one request, got %d", len(bodies))
@@ -38,10 +39,10 @@ func TestLazyApplyDirectSearchE2E(t *testing.T) {
 // written, so the route's inherited claudeSearch* values win over the fallback's explicit ones under the
 // existing route-over-fallback precedence; route noLazyApply exposes the fallback locals again.
 func TestLazyApplyFallbackSearchE2E(t *testing.T) {
-	lazy := &LazyApplyConfig{ClaudeSearchThinking: "max", ClaudeSearchSummary: "forceHigh"}
+	lazy := &config.LazyApplyConfig{ClaudeSearchThinking: "max", ClaudeSearchSummary: "forceHigh"}
 	_, bodies, _, _ := runSearchE2EFull(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus", NoSearch: true},
-		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchThinking: "low", ClaudeSearchSummary: "forceLow"},
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus", NoSearch: true},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchThinking: "low", ClaudeSearchSummary: "forceLow"},
 		false, bigMaxSearchReq, lazy)
 	if len(bodies) != 1 {
 		t.Fatalf("fallback should receive one request, got %d", len(bodies))
@@ -52,9 +53,9 @@ func TestLazyApplyFallbackSearchE2E(t *testing.T) {
 	}
 
 	// The same route with noLazyApply lets the fallback's explicit low policy apply.
-	rr := RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus", NoSearch: true, NoLazyApply: true}
+	rr := config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus", NoSearch: true, NoLazyApply: true}
 	_, bodies, _, _ = runSearchE2EFull(t, rr,
-		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchThinking: "low", ClaudeSearchSummary: "forceLow"},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", ClaudeSearchThinking: "low", ClaudeSearchSummary: "forceLow"},
 		false, bigMaxSearchReq, lazy)
 	if len(bodies) != 1 {
 		t.Fatalf("fallback should receive one request, got %d", len(bodies))
@@ -68,10 +69,10 @@ func TestLazyApplyFallbackSearchE2E(t *testing.T) {
 // TestLazyApplyNoSearchFallbackE2E locks the capability-fallback gate: lazy no_search diverts a search
 // request to search_fallback, while an explicit local false on the route prevents the diversion.
 func TestLazyApplyNoSearchFallbackE2E(t *testing.T) {
-	lazy := &LazyApplyConfig{NoSearch: true}
+	lazy := &config.LazyApplyConfig{NoSearch: true}
 	_, bodies, routeCalled, _ := runSearchE2EFull(t,
-		RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus"},
-		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding"},
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus"},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding"},
 		false, searchSubagentReq, lazy)
 	if routeCalled {
 		t.Error("lazy no_search should divert away from the route upstream")
@@ -82,10 +83,10 @@ func TestLazyApplyNoSearchFallbackE2E(t *testing.T) {
 
 	// Explicit local false must stop inheritance; presence metadata is set directly because the
 	// E2E helper takes a Go literal, where false would otherwise mean "unset".
-	rr := RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus",
-		presence: configPresence{"no_search": {}}}
+	rr := config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus",
+		Presence: config.ConfigPresence{"no_search": {}}}
 	_, bodies, routeCalled, _ = runSearchE2EFull(t, rr,
-		&SearchRoute{API: "sk-sf", Model: "kimi-for-coding"},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding"},
 		false, searchSubagentReq, lazy)
 	if !routeCalled {
 		t.Error("explicit no_search:false should keep the request on the route")
@@ -98,17 +99,17 @@ func TestLazyApplyNoSearchFallbackE2E(t *testing.T) {
 // TestLazyApplyTextOnlyMultimodalE2E locks the capability gate: lazy text_only diverts image requests to
 // multimodal_fallback, while an explicit local false or noLazyApply keeps them on the route.
 func TestLazyApplyTextOnlyMultimodalE2E(t *testing.T) {
-	lazy := &LazyApplyConfig{TextOnly: true}
+	lazy := &config.LazyApplyConfig{TextOnly: true}
 	imageBody := `{"model":"claude-opus-4-8","messages":[{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}]}]}`
 	cases := []struct {
 		name         string
-		route        RouteRule
+		route        config.RouteRule
 		wantRoute    bool
 		wantFallback bool
 	}{
-		{name: "lazy text_only diverts", route: RouteRule{}, wantFallback: true},
-		{name: "local false stops inheritance", route: RouteRule{presence: configPresence{"text_only": {}}}, wantRoute: true},
-		{name: "noLazyApply stops inheritance", route: RouteRule{NoLazyApply: true}, wantRoute: true},
+		{name: "lazy text_only diverts", route: config.RouteRule{}, wantFallback: true},
+		{name: "local false stops inheritance", route: config.RouteRule{Presence: config.ConfigPresence{"text_only": {}}}, wantRoute: true},
+		{name: "noLazyApply stops inheritance", route: config.RouteRule{NoLazyApply: true}, wantRoute: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -139,13 +140,13 @@ func TestLazyApplyTextOnlyMultimodalE2E(t *testing.T) {
 			rr.URL = routeMock.URL
 			rr.API = "sk-route"
 			rr.Model = "deepseek-V4-pro"
-			cfg.Store(&Config{
+			config.Store(&config.Config{
 				Upstream:           "http://no-default.example.com",
 				MaxRetries:         0,
 				TotalBudgetSec:     10,
 				RecentSampleWindow: 5,
-				Routes:             []RouteRule{rr},
-				MultimodalFallback: &MultimodalRoute{URL: fbMock.URL, API: "sk-mm", Model: "glm-4.5v"},
+				Routes:             []config.RouteRule{rr},
+				MultimodalFallback: &config.MultimodalRoute{URL: fbMock.URL, API: "sk-mm", Model: "glm-4.5v"},
 				LazyApply:          lazy,
 			})
 			stats.resetSampleCap(5)
@@ -178,36 +179,36 @@ func TestLazyApplyGuardE2E(t *testing.T) {
 	upstream := searchGuardUpstreamSSE(`[]`, searchGuardFabricatedAnswer)
 	cases := []struct {
 		name        string
-		route       RouteRule
-		fallback    *SearchRoute
+		route       config.RouteRule
+		fallback    *config.SearchRoute
 		routeServes bool
-		lazy        *LazyApplyConfig
+		lazy        *config.LazyApplyConfig
 		wantReplace bool
 	}{
 		{
 			name:        "lazy arms the route guard",
-			route:       RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding"},
+			route:       config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding"},
 			routeServes: true,
-			lazy:        &LazyApplyConfig{NoBullshitOnEmptyClaudeSearch: &on},
+			lazy:        &config.LazyApplyConfig{NoBullshitOnEmptyClaudeSearch: &on},
 			wantReplace: true,
 		},
 		{
 			name:        "route noLazyApply disarms the guard",
-			route:       RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoLazyApply: true},
+			route:       config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoLazyApply: true},
 			routeServes: true,
-			lazy:        &LazyApplyConfig{NoBullshitOnEmptyClaudeSearch: &on},
+			lazy:        &config.LazyApplyConfig{NoBullshitOnEmptyClaudeSearch: &on},
 		},
 		{
 			name:        "explicit local false beats lazy",
-			route:       RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &off},
+			route:       config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "kimi-for-coding", NoBullshitOnEmptyClaudeSearch: &off},
 			routeServes: true,
-			lazy:        &LazyApplyConfig{NoBullshitOnEmptyClaudeSearch: &on},
+			lazy:        &config.LazyApplyConfig{NoBullshitOnEmptyClaudeSearch: &on},
 		},
 		{
 			name:     "fallback lazy layer arms the fallback lane",
-			route:    RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus", NoSearch: true, NoLazyApply: true},
-			fallback: &SearchRoute{API: "sk-sf", Model: "kimi-for-coding"},
-			lazy:     &LazyApplyConfig{NoBullshitOnEmptyClaudeSearch: &on},
+			route:    config.RouteRule{Pattern: "claude-opus*", API: "sk-route", Model: "ark-opus", NoSearch: true, NoLazyApply: true},
+			fallback: &config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding"},
+			lazy:     &config.LazyApplyConfig{NoBullshitOnEmptyClaudeSearch: &on},
 			// The fallback object does not opt out, so it inherits lazyApply and arms the guard.
 			wantReplace: true,
 		},
@@ -235,34 +236,34 @@ func TestLazyApplyClassifierE2E(t *testing.T) {
 	cases := []struct {
 		name          string
 		config        string
-		kind          classifierSource
+		kind          config.ClassifierSource
 		wantMode      string
 		wantRewritten bool
 	}{
 		{
 			name:          "cc inherits lazy off",
 			config:        `{"upstream":"http://u","classifier_route":{"url":"http://c","api":"sk","model":"m"},"lazyApply":{"classifier_thinking_cc":"off"}}`,
-			kind:          classifierCC,
+			kind:          config.ClassifierCC,
 			wantMode:      "off",
 			wantRewritten: true,
 		},
 		{
 			name:     "noLazyApply disables inheritance",
 			config:   `{"upstream":"http://u","classifier_route":{"url":"http://c","api":"sk","model":"m","noLazyApply":true},"lazyApply":{"classifier_thinking_cc":"off"}}`,
-			kind:     classifierCC,
+			kind:     config.ClassifierCC,
 			wantMode: "",
 		},
 		{
 			name:          "explicit empty cc blocks lazy cc and falls back to shared",
 			config:        `{"upstream":"http://u","classifier_route":{"url":"http://c","api":"sk","model":"m","classifier_thinking_cc":""},"lazyApply":{"classifier_thinking":"off","classifier_thinking_cc":"low"}}`,
-			kind:          classifierCC,
+			kind:          config.ClassifierCC,
 			wantMode:      "off",
 			wantRewritten: true,
 		},
 		{
 			name:          "lazy per-source beats lazy shared",
 			config:        `{"upstream":"http://u","classifier_route":{"url":"http://c","api":"sk","model":"m"},"lazyApply":{"classifier_thinking":"off","classifier_thinking_codex":"low"}}`,
-			kind:          classifierCodex,
+			kind:          config.ClassifierCodex,
 			wantMode:      "low",
 			wantRewritten: true,
 		},
@@ -270,13 +271,13 @@ func TestLazyApplyClassifierE2E(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			resetStats()
-			c, _, err := parseConfig([]byte(tc.config))
+			c, _, err := config.ParseConfig([]byte(tc.config))
 			if err != nil {
 				t.Fatalf("parse config: %v", err)
 			}
-			cfg.Store(c)
-			defer cfg.Store(&Config{})
-			if got := classifierThinkingModeFor(c, tc.kind); got != tc.wantMode {
+			config.Store(c)
+			defer config.Store(&config.Config{})
+			if got := config.ClassifierThinkingModeFor(c, tc.kind); got != tc.wantMode {
 				t.Fatalf("classifierThinkingModeFor = %q, want %q", got, tc.wantMode)
 			}
 			body := []byte(`{"model":"x","system":"` + ccSystem + `","thinking":{"type":"enabled"},"max_tokens":1024}`)
@@ -299,15 +300,15 @@ func TestLazyApplyClassifierE2E(t *testing.T) {
 func TestLazyApplyResponsesThinkingE2E(t *testing.T) {
 	cases := []struct {
 		name   string
-		route  RouteRule
-		lazy   *LazyApplyConfig
+		route  config.RouteRule
+		lazy   *config.LazyApplyConfig
 		want   string
 		budget int64
 	}{
-		{name: "auto default stays adaptive", route: RouteRule{}},
-		{name: "lazy budget forces enabled", route: RouteRule{}, lazy: &LazyApplyConfig{Thinking: "budget"}, want: "enabled", budget: 16000},
-		{name: "route noLazyApply restores auto", route: RouteRule{NoLazyApply: true}, lazy: &LazyApplyConfig{Thinking: "budget"}},
-		{name: "local auto beats lazy budget", route: RouteRule{Thinking: "auto"}, lazy: &LazyApplyConfig{Thinking: "budget"}},
+		{name: "auto default stays adaptive", route: config.RouteRule{}},
+		{name: "lazy budget forces enabled", route: config.RouteRule{}, lazy: &config.LazyApplyConfig{Thinking: "budget"}, want: "enabled", budget: 16000},
+		{name: "route noLazyApply restores auto", route: config.RouteRule{NoLazyApply: true}, lazy: &config.LazyApplyConfig{Thinking: "budget"}},
+		{name: "local auto beats lazy budget", route: config.RouteRule{Thinking: "auto"}, lazy: &config.LazyApplyConfig{Thinking: "budget"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -325,14 +326,14 @@ func TestLazyApplyResponsesThinkingE2E(t *testing.T) {
 			rr.Pattern = "claude-opus*"
 			rr.URL = mock.URL
 			rr.Model = "kimi-for-coding"
-			cfg.Store(&Config{
+			config.Store(&config.Config{
 				Upstream:       mock.URL,
 				MaxRetries:     0,
 				TotalBudgetSec: 10,
-				Routes:         []RouteRule{rr},
+				Routes:         []config.RouteRule{rr},
 				LazyApply:      tc.lazy,
 			})
-			defer cfg.Store(&Config{})
+			defer config.Store(&config.Config{})
 			proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 			defer proxy.Close()
 
@@ -366,16 +367,16 @@ func TestLazyApplyResponsesThinkingE2E(t *testing.T) {
 func TestLazyApplyResponsesConvertOff2LowE2E(t *testing.T) {
 	cases := []struct {
 		name  string
-		route RouteRule
-		fast  *FastRoute
-		lazy  *LazyApplyConfig
+		route config.RouteRule
+		fast  *config.FastRoute
+		lazy  *config.LazyApplyConfig
 		want  string
 	}{
-		{name: "client off stays off", route: RouteRule{}},
-		{name: "route inherits lazy translate", route: RouteRule{}, lazy: &LazyApplyConfig{ConvertOff2Low: "translate"}, want: "translate"},
-		{name: "route noLazyApply keeps off", route: RouteRule{NoLazyApply: true}, lazy: &LazyApplyConfig{ConvertOff2Low: "translate"}},
-		{name: "fast_route inherits lazy translate", fast: &FastRoute{Model: "k3-256k"}, lazy: &LazyApplyConfig{ConvertOff2Low: "translate"}, want: "translate"},
-		{name: "fast_route noLazyApply keeps off", fast: &FastRoute{Model: "k3-256k", NoLazyApply: true}, lazy: &LazyApplyConfig{ConvertOff2Low: "translate"}},
+		{name: "client off stays off", route: config.RouteRule{}},
+		{name: "route inherits lazy translate", route: config.RouteRule{}, lazy: &config.LazyApplyConfig{ConvertOff2Low: "translate"}, want: "translate"},
+		{name: "route noLazyApply keeps off", route: config.RouteRule{NoLazyApply: true}, lazy: &config.LazyApplyConfig{ConvertOff2Low: "translate"}},
+		{name: "fast_route inherits lazy translate", fast: &config.FastRoute{Model: "k3-256k"}, lazy: &config.LazyApplyConfig{ConvertOff2Low: "translate"}, want: "translate"},
+		{name: "fast_route noLazyApply keeps off", fast: &config.FastRoute{Model: "k3-256k", NoLazyApply: true}, lazy: &config.LazyApplyConfig{ConvertOff2Low: "translate"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -397,15 +398,15 @@ func TestLazyApplyResponsesConvertOff2LowE2E(t *testing.T) {
 			if fast != nil {
 				fast.URL = mock.URL
 			}
-			cfg.Store(&Config{
+			config.Store(&config.Config{
 				Upstream:       mock.URL,
 				MaxRetries:     0,
 				TotalBudgetSec: 10,
-				Routes:         []RouteRule{route},
+				Routes:         []config.RouteRule{route},
 				FastRoute:      fast,
 				LazyApply:      tc.lazy,
 			})
-			defer cfg.Store(&Config{})
+			defer config.Store(&config.Config{})
 			proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 			defer proxy.Close()
 
@@ -446,43 +447,43 @@ func TestLazyApplyResponsesFallbackThinkingE2E(t *testing.T) {
 	const searchTool = `,"tools":[{"type":"web_search"}]`
 	cases := []struct {
 		name        string
-		route       RouteRule
-		sf          *SearchRoute
-		lazy        *LazyApplyConfig
+		route       config.RouteRule
+		sf          *config.SearchRoute
+		lazy        *config.LazyApplyConfig
 		tools       string
 		wantEnabled bool // true = budget shape enabled/16000; false = adaptive/high
 	}{
 		{
 			name:  "fallback thinking beats the hit route's",
-			route: RouteRule{NoSearch: true, Thinking: "budget"},
-			sf:    &SearchRoute{Thinking: "adaptive"},
+			route: config.RouteRule{NoSearch: true, Thinking: "budget"},
+			sf:    &config.SearchRoute{Thinking: "adaptive"},
 			tools: searchTool,
 		},
 		{
 			name:  "fallback local beats lazy",
-			route: RouteRule{NoSearch: true},
-			sf:    &SearchRoute{Thinking: "adaptive"},
-			lazy:  &LazyApplyConfig{Thinking: "budget"},
+			route: config.RouteRule{NoSearch: true},
+			sf:    &config.SearchRoute{Thinking: "adaptive"},
+			lazy:  &config.LazyApplyConfig{Thinking: "budget"},
 			tools: searchTool,
 		},
 		{
 			name:        "fallback inherits lazy",
-			route:       RouteRule{NoSearch: true},
-			sf:          &SearchRoute{},
-			lazy:        &LazyApplyConfig{Thinking: "budget"},
+			route:       config.RouteRule{NoSearch: true},
+			sf:          &config.SearchRoute{},
+			lazy:        &config.LazyApplyConfig{Thinking: "budget"},
 			tools:       searchTool,
 			wantEnabled: true,
 		},
 		{
 			name:        "no diversion keeps the route shape",
-			route:       RouteRule{NoSearch: true, Thinking: "budget"},
-			sf:          &SearchRoute{Thinking: "adaptive"},
+			route:       config.RouteRule{NoSearch: true, Thinking: "budget"},
+			sf:          &config.SearchRoute{Thinking: "adaptive"},
 			wantEnabled: true,
 		},
 		{
 			name:        "search-capable route keeps the route shape",
-			route:       RouteRule{Thinking: "budget"},
-			sf:          &SearchRoute{Thinking: "adaptive"},
+			route:       config.RouteRule{Thinking: "budget"},
+			sf:          &config.SearchRoute{Thinking: "adaptive"},
 			tools:       searchTool,
 			wantEnabled: true,
 		},
@@ -508,15 +509,15 @@ func TestLazyApplyResponsesFallbackThinkingE2E(t *testing.T) {
 			sf.URL = mock.URL
 			sf.Model = "ark-search"
 			sf.API = "sk-sf"
-			cfg.Store(&Config{
+			config.Store(&config.Config{
 				Upstream:       mock.URL,
 				MaxRetries:     0,
 				TotalBudgetSec: 10,
-				Routes:         []RouteRule{rr},
+				Routes:         []config.RouteRule{rr},
 				SearchFallback: sf,
 				LazyApply:      tc.lazy,
 			})
-			defer cfg.Store(&Config{})
+			defer config.Store(&config.Config{})
 			proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 			defer proxy.Close()
 

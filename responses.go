@@ -18,6 +18,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"proxy429/internal/config"
 	"strings"
 	"sync"
 	"time"
@@ -139,7 +140,7 @@ func reconcileResponsesServer(listen string) {
 // enhanced-search conditional branches aren't predicted — a prediction miss at worst makes a restored envelope hit a 400, and the main pipeline's fail-soft strips and
 // retries (see the handler's tool_call_id fallback); no wrong data is produced. When prediction is impossible (no route hit and
 // default upstream empty) returns nil = envelopes always pass.
-func predictSearchTriple(c *Config, r *http.Request, model string) *searchTriple {
+func predictSearchTriple(c *config.Config, r *http.Request, model string) *searchTriple {
 	if fr := c.FastRoute; fr != nil && fr.URL != "" && fr.Model != "" && model == "fast_route" {
 		return newSearchTriple(fr.URL, fr.Model, effectiveKey(fr.API, r))
 	}
@@ -159,10 +160,10 @@ func predictSearchTriple(c *Config, r *http.Request, model string) *searchTriple
 // matchRouteRule returns the first route matching model (skipping reserved-name patterns), nil on no hit.
 // Translation-time prediction (search triple, route thinking shape) shares this single match point, same order
 // and rules as the main handler's route loop. Note the fast literal-name lane doesn't go through this match (callers check fast themselves first).
-func matchRouteRule(c *Config, model string) *RouteRule {
+func matchRouteRule(c *config.Config, model string) *config.RouteRule {
 	for i := range c.Routes {
 		rr := &c.Routes[i]
-		if isReservedRoutePattern(rr.Pattern) {
+		if config.IsReservedRoutePattern(rr.Pattern) {
 			continue
 		}
 		if matchModel(rr.Pattern, model) {
@@ -191,7 +192,7 @@ func responsesHasWebSearch(body map[string]interface{}) bool {
 
 // responsesFastRouteTakes reports whether translation will inject speed:"fast" for this model, making
 // the main handler's fast branch win before the routes loop (so no search-fallback diversion happens).
-func responsesFastRouteTakes(c *Config, model string) bool {
+func responsesFastRouteTakes(c *config.Config, model string) bool {
 	return model == "fast_route" && c.FastRoute != nil && c.FastRoute.URL != "" && c.FastRoute.Model != ""
 }
 
@@ -206,7 +207,7 @@ func effectiveKey(routeAPI string, r *http.Request) string {
 
 // responsesHandler handles a Responses API request: translated to Anthropic, then internally calls the main handler.
 func responsesHandler(w http.ResponseWriter, r *http.Request) {
-	c := cfg.Load()
+	c := config.Current()
 	// Same semantics as the main handler: the forwarding lane is always localhost-only.
 	if !isLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
@@ -280,21 +281,21 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	thinkStyle := ""
 	off2Low := ""
 	if rr := matchRouteRule(c, origModel); rr != nil {
-		thinkStyle = effectiveRouteThinking(c, rr)
-		off2Low = effectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.presence.written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
+		thinkStyle = config.EffectiveRouteThinking(c, rr)
+		off2Low = config.EffectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.Presence.Written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
 		// search_fallback is a route too: when this request will be diverted there (effective no_search +
 		// a server-side web_search tool), the thinking shape must describe the fallback's target model.
 		// The main handler makes the same decision after translation; predict it here with the same inputs.
-		if sf := c.SearchFallback; sf != nil && effectiveRouteNoSearch(c, rr) && responsesHasWebSearch(body) && !responsesFastRouteTakes(c, origModel) {
-			thinkStyle = effectiveFallbackThinking(c, sf)
+		if sf := c.SearchFallback; sf != nil && config.EffectiveRouteNoSearch(c, rr) && responsesHasWebSearch(body) && !responsesFastRouteTakes(c, origModel) {
+			thinkStyle = config.EffectiveFallbackThinking(c, sf)
 		}
 	}
 	// The Codex menu's fast lane goes by the literal name "fast_route": its convertOff2Low comes from fast_route itself,
 	// taking priority over any catch-all routes[] entry the name may have pre-matched above.
 	if origModel == "fast_route" && c.FastRoute != nil {
-		off2Low = effectiveConvertOff2Low(c, c.FastRoute.ConvertOff2Low, c.FastRoute.presence.written("convertOff2Low", c.FastRoute.ConvertOff2Low != ""), c.FastRoute.NoLazyApply)
+		off2Low = config.EffectiveConvertOff2Low(c, c.FastRoute.ConvertOff2Low, c.FastRoute.Presence.Written("convertOff2Low", c.FastRoute.ConvertOff2Low != ""), c.FastRoute.NoLazyApply)
 	}
-	anth, reg, n2l, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle, off2Low == "translate" || off2Low == "all", allowNoThinkBlock4Anthropic(c))
+	anth, reg, n2l, err := responsesToAnthropicTriple(body, predictSearchTriple(c, r, origModel), replay, thinkStyle, off2Low == "translate" || off2Low == "all", config.AllowNoThinkBlock4Anthropic(c))
 	if err != nil {
 		writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"proxy429/internal/config"
 	"proxy429/internal/platform"
 
 	"bytes"
@@ -46,8 +47,8 @@ func setupTray() {
 
 // onReady is the tray-ready callback: sets the initial icon/tooltip, builds the menu, starts status polling.
 func onReady() {
-	problem := len(getConfigWarnings()) > 0 // Startup may already carry removed-key warnings (main loads config before the tray)
-	hijack := platform.ProxyHijackRisk()    // Or the loopback-hijack trap (system proxy on, NO_PROXY missing)
+	problem := len(config.GetConfigWarnings()) > 0 // Startup may already carry removed-key warnings (main loads config before the tray)
+	hijack := platform.ProxyHijackRisk()           // Or the loopback-hijack trap (system proxy on, NO_PROXY missing)
 	initial := 0
 	if problem || hijack {
 		initial = 3 // Red: config problem / hijack risk
@@ -77,14 +78,14 @@ func onReady() {
 			it.Hide()
 		}
 		cfgItems = nil
-		cur := filepath.Base(currentConfigPath())
-		for _, name := range listConfigFiles() {
+		cur := filepath.Base(config.CurrentConfigPath())
+		for _, name := range config.ListConfigFiles() {
 			n := name
 			item := mSwitch.AddSubMenuItemCheckbox(n, "", n == cur)
 			cfgItems = append(cfgItems, item)
 			go func(it *systray.MenuItem, fname string) {
 				for range it.ClickedCh {
-					full := filepath.Join(filepath.Dir(currentConfigPath()), fname)
+					full := filepath.Join(filepath.Dir(config.CurrentConfigPath()), fname)
 					if err := switchConfig(full); err != nil {
 						log.Printf("[switch] %s failed: %v", fname, err)
 						continue
@@ -145,8 +146,8 @@ func pollTrayColor() {
 		case <-time.After(200 * time.Millisecond):
 		}
 		state, active, waiting := trayInfo()
-		cfgWarn := len(getConfigWarnings()) > 0 // Red: config contains removed keys (the console Logs tab names them; the Docs describe the migration)
-		hijack := platform.ProxyHijackRisk()    // Red: system proxy would hijack loopback clients (banner on the console Status tab)
+		cfgWarn := len(config.GetConfigWarnings()) > 0 // Red: config contains removed keys (the console Logs tab names them; the Docs describe the migration)
+		hijack := platform.ProxyHijackRisk()           // Red: system proxy would hijack loopback clients (banner on the console Status tab)
 		if cfgWarn || hijack {
 			state = 3
 		}
@@ -161,7 +162,7 @@ func pollTrayColor() {
 
 // openLogViewer opens the local console page (http://<listen>/__logs) in the default browser.
 func openLogViewer() {
-	c := cfg.Load()
+	c := config.Current()
 	if c == nil {
 		return
 	}

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"proxy429/internal/config"
 	"strings"
 	"testing"
 )
@@ -1000,11 +1001,11 @@ func TestResponsesHandlerEndToEnd(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:       mock.URL,
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"},
 		},
 	})
@@ -1069,11 +1070,11 @@ func TestResponsesFastRouteEntry(t *testing.T) {
 	}))
 	defer fastMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		MaxRetries: 0, TotalBudgetSec: 10,
-		FastRoute: &FastRoute{URL: fastMock.URL, Model: "k3-256k"},
+		FastRoute: &config.FastRoute{URL: fastMock.URL, Model: "k3-256k"},
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 	defer proxy.Close()
@@ -1097,7 +1098,7 @@ func TestResponsesFastRouteEntry(t *testing.T) {
 // TestReconcileResponsesServer verifies the listener port starts/stops dynamically with config:
 // startup → same-address idempotent → re-address (old closed, new opened) → disabled (closed).
 func TestReconcileResponsesServer(t *testing.T) {
-	cfg.Store(&Config{}) // The handler does cfg.Load() per request; must not be nil
+	config.Store(&config.Config{}) // The handler does config.Current() per request; must not be nil
 	freeAddr := func() string {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {

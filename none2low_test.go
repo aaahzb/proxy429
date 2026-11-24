@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"proxy429/internal/config"
 	"strings"
 	"testing"
 )
@@ -426,13 +427,13 @@ func TestNone2LowFallbackRetry(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:       mock.URL,
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes:         []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash", ConvertOff2Low: "translate"}},
+		Routes:         []config.RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash", ConvertOff2Low: "translate"}},
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 	defer proxy.Close()
@@ -483,13 +484,13 @@ func TestNone2LowTryOnNoStrip(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:       mock.URL,
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes:         []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash", ConvertOff2Low: "translate"}},
+		Routes:         []config.RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash", ConvertOff2Low: "translate"}},
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 	defer proxy.Close()
@@ -546,13 +547,13 @@ func TestNone2LowOffByDefault(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:       mock.URL,
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes:         []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"}},
+		Routes:         []config.RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"}},
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 	defer proxy.Close()
@@ -581,13 +582,13 @@ func TestNone2LowAllAlsoTranslates(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:       mock.URL,
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes:         []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash", ConvertOff2Low: "all"}},
+		Routes:         []config.RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash", ConvertOff2Low: "all"}},
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 	defer proxy.Close()
@@ -618,14 +619,14 @@ func TestNone2LowFastRouteFlag(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:       mock.URL,
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes:         []RouteRule{{Pattern: "*", URL: mock.URL, Model: "deepseek-v4-flash"}},
-		FastRoute:      &FastRoute{URL: mock.URL, Model: "deepseek-v4-flash", ConvertOff2Low: "translate"},
+		Routes:         []config.RouteRule{{Pattern: "*", URL: mock.URL, Model: "deepseek-v4-flash"}},
+		FastRoute:      &config.FastRoute{URL: mock.URL, Model: "deepseek-v4-flash", ConvertOff2Low: "translate"},
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 	defer proxy.Close()
@@ -728,15 +729,15 @@ func TestAllowNoThinkBlock4Anthropic(t *testing.T) {
 
 // TestAllowNoThinkBlock4AnthropicConfigDefault: the top-level pointer defaults to true when unset (nil config / nil field).
 func TestAllowNoThinkBlock4AnthropicConfigDefault(t *testing.T) {
-	if !allowNoThinkBlock4Anthropic(nil) || !allowNoThinkBlock4Anthropic(&Config{}) {
+	if !config.AllowNoThinkBlock4Anthropic(nil) || !config.AllowNoThinkBlock4Anthropic(&config.Config{}) {
 		t.Errorf("未设置应默认 true")
 	}
 	f := false
-	if allowNoThinkBlock4Anthropic(&Config{AllowNoThinkBlock4Anthropic: &f}) {
+	if config.AllowNoThinkBlock4Anthropic(&config.Config{AllowNoThinkBlock4Anthropic: &f}) {
 		t.Errorf("显式 false 应生效")
 	}
 	tr := true
-	if !allowNoThinkBlock4Anthropic(&Config{AllowNoThinkBlock4Anthropic: &tr}) {
+	if !config.AllowNoThinkBlock4Anthropic(&config.Config{AllowNoThinkBlock4Anthropic: &tr}) {
 		t.Errorf("显式 true 应生效")
 	}
 }
@@ -756,13 +757,13 @@ func TestAllowNoThinkBlockDefaultEndToEnd(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:       mock.URL,
 		MaxRetries:     0,
 		TotalBudgetSec: 10,
-		Routes:         []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"}},
+		Routes:         []config.RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"}},
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 	defer proxy.Close()
@@ -820,14 +821,14 @@ func TestAllowNoThinkBlockFalseEndToEnd(t *testing.T) {
 	defer mock.Close()
 
 	off := false
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:                    mock.URL,
 		MaxRetries:                  0,
 		TotalBudgetSec:              10,
-		Routes:                      []RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"}},
+		Routes:                      []config.RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash"}},
 		AllowNoThinkBlock4Anthropic: &off,
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
 	defer proxy.Close()

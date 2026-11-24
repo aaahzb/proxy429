@@ -24,12 +24,13 @@ Every Claude Code request goes to the local proxy (`127.0.0.1:8080`) first, and 
 
 | File | Role |
 |------|------|
-| `main.go` | The proxy itself (including `resolveConfigPath` config-path resolution, `reloadConfig` hot reload, `logRing` in-memory log buffer) |
+| `main.go` | The proxy itself (including `reloadConfig` hot reload and the `logRing` in-memory log buffer) |
 | `tray.go` | Cross-platform tray / menu bar (`fyne.io/systray`): menu (「查看日志」/Open console, 「切换配置」/Switch config submenu, 「退出代理」/Quit proxy — identical on all platforms), status-light icon, tooltip, status polling |
 | `logview.go` | Web console (the only UI on every platform): mounted at `/__logs`, with Status/Logs/Config tabs; same-port local routes `/__logs/data`, `/__config`, `/__reload`, localhost-only |
 | `main_test.go` and the other `*_test.go` files | Unit tests (SSE parsing / status sampling / tray light & tooltip / translation layers) |
-| `config.json` | Runtime config (listen address, upstream, retry policy, classifier switches, etc.). Auto-generated from `//go:embed config.example.json` on first run when absent |
-| `config.example.json` | The embedded config template used to generate `config.json` on first start |
+| `config.json` | Runtime config (listen address, upstream, retry policy, classifier switches, etc.). Auto-generated from the embedded template on first run when absent |
+| `internal/config/` | Configuration types, loading, path resolution, validation, lazyApply expansion, and active-config state |
+| `internal/config/config.example.json` | The embedded config template used to generate `config.json` on first start |
 | `go.mod` | Go module definition |
 | `README.md` | Documentation |
 | `test/mock_429.go` | Local mock server for testing (see "Local testing") |
@@ -102,7 +103,7 @@ open release/Proxy429.app
 
 The startup log (containing `proxy started vc639d56-1606: listening http://127.0.0.1:8080 -> forwarding to https://ark.cn-beijing.volces.com/api/plan (max retries 5, classifier thinking: cc="off" codex="off")`, where `v` is followed by the version = git short hash + build HHMM) goes to the in-memory ring buffer and can be read on the web console's Logs tab; it's also written to `log_file` when that is non-empty.
 
-> By default `resolveConfigPath` resolves the config path as: `-config` flag > `./config.json` in the current directory (if present) > `os.UserConfigDir()/proxy429/config.json` (macOS `~/Library/Application Support/proxy429/`, Linux `~/.config/proxy429/`, Windows `%AppData%/proxy429/`). On first run without a config, one is generated from the embedded `config.example.json`. For local mock testing use `-config test/config_test.json` — see "Local testing" below.
+> By default `config.ResolveConfigPath` resolves the config path as: `-config` flag > `./config.json` in the current directory (if present) > `os.UserConfigDir()/proxy429/config.json` (macOS `~/Library/Application Support/proxy429/`, Linux `~/.config/proxy429/`, Windows `%AppData%/proxy429/`). On first run without a config, one is generated from the embedded `config.example.json`. For local mock testing use `-config test/config_test.json` — see "Local testing" below.
 >
 > After startup a status-light icon appears: in the menu bar on macOS (`.app` packaging, `LSUIElement=true`, no Dock icon), in the system tray on Windows/Linux. The right-click menu is identical across platforms: 「查看日志」 (Open console — opens the web console in a browser), 「切换配置」 (Switch config — a submenu listing the config files in the config directory, the current one ticked, plus 「刷新列表」/Refresh list), and 「退出代理」 (Quit proxy). Windows builds use the GUI subsystem (`-H=windowsgui`): no console window on launch, pure tray operation. Passing `-no-tray` skips the tray entirely (headless servers, CI): the process behaves like a bare HTTP server and stops on Ctrl+C/SIGTERM.
 

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"proxy429/internal/config"
 	"reflect"
 	"strings"
 	"sync"
@@ -393,7 +394,7 @@ func TestHandlerLatencySampling(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           mock.URL,
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
@@ -434,7 +435,7 @@ func TestCountTokensFlightTag(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
+	config.Store(&config.Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -525,13 +526,13 @@ func TestFlightAttemptMs(t *testing.T) {
 
 // TestHasCatchAllRoute verifies the pattern:"*" catch-all determination (with a catch-all, the top-level upstream may be empty).
 func TestHasCatchAllRoute(t *testing.T) {
-	if hasCatchAllRoute(nil) {
+	if config.HasCatchAllRoute(nil) {
 		t.Errorf("空 routes 不应判定有兜底")
 	}
-	if hasCatchAllRoute([]RouteRule{{Pattern: "claude-*"}}) {
+	if config.HasCatchAllRoute([]config.RouteRule{{Pattern: "claude-*"}}) {
 		t.Errorf("普通通配 claude-* 不应判定有兜底")
 	}
-	if !hasCatchAllRoute([]RouteRule{{Pattern: "claude-*"}, {Pattern: "*"}}) {
+	if !config.HasCatchAllRoute([]config.RouteRule{{Pattern: "claude-*"}, {Pattern: "*"}}) {
 		t.Errorf("含 pattern:\"*\" 应判定有兜底")
 	}
 }
@@ -541,7 +542,7 @@ func TestClearStatsFinished(t *testing.T) {
 	finishedMu.Lock()
 	finished = append(finished, finishedFlight{id: 999999})
 	finishedMu.Unlock()
-	clearStats(&Config{RecentSampleWindow: 5})
+	clearStats(&config.Config{RecentSampleWindow: 5})
 	finishedMu.Lock()
 	n := len(finished)
 	finishedMu.Unlock()
@@ -554,7 +555,7 @@ func TestClearStatsFinished(t *testing.T) {
 func TestClearStatsUpstreamBytes(t *testing.T) {
 	stats.bytesUp.Store(123)
 	stats.bytesDown.Store(456)
-	clearStats(&Config{RecentSampleWindow: 5})
+	clearStats(&config.Config{RecentSampleWindow: 5})
 	if got := stats.bytesUp.Load(); got != 0 {
 		t.Errorf("clearStats 后 bytesUp=%d, want 0", got)
 	}
@@ -591,11 +592,9 @@ func TestHeatSlotRotation(t *testing.T) {
 // older than the 48h window are dropped on load.
 func TestHeatPersistenceRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	configMu.Lock()
-	old := configFilePath
-	configFilePath = filepath.Join(dir, "config.json")
-	configMu.Unlock()
-	defer func() { configMu.Lock(); configFilePath = old; configMu.Unlock() }()
+	old := config.CurrentConfigPath()
+	config.SetCurrentPath(filepath.Join(dir, "config.json"))
+	defer config.SetCurrentPath(old)
 
 	heatMu.Lock()
 	heat = [heatSlots]heatSlot{}
@@ -661,11 +660,9 @@ func TestHeatPersistenceRoundTrip(t *testing.T) {
 // a .json sibling gets picked up by listConfigFilesIn and shows up in the tray/web config switchers.
 func TestHeatPathUsesDatName(t *testing.T) {
 	dir := t.TempDir()
-	configMu.Lock()
-	old := configFilePath
-	configFilePath = filepath.Join(dir, "config.json")
-	configMu.Unlock()
-	defer func() { configMu.Lock(); configFilePath = old; configMu.Unlock() }()
+	old := config.CurrentConfigPath()
+	config.SetCurrentPath(filepath.Join(dir, "config.json"))
+	defer config.SetCurrentPath(old)
 
 	if got := filepath.Base(heatPath()); got != "heatmap.dat" {
 		t.Fatalf("热图文件名应为 heatmap.dat(避免被配置切换枚举识别), got %s", got)
@@ -676,11 +673,9 @@ func TestHeatPathUsesDatName(t *testing.T) {
 // renamed to heatmap.dat on load with its data preserved, so it disappears from the config switchers.
 func TestHeatLegacyJSONMigration(t *testing.T) {
 	dir := t.TempDir()
-	configMu.Lock()
-	old := configFilePath
-	configFilePath = filepath.Join(dir, "config.json")
-	configMu.Unlock()
-	defer func() { configMu.Lock(); configFilePath = old; configMu.Unlock() }()
+	old := config.CurrentConfigPath()
+	config.SetCurrentPath(filepath.Join(dir, "config.json"))
+	defer config.SetCurrentPath(old)
 
 	heatMu.Lock()
 	heat = [heatSlots]heatSlot{}
@@ -712,7 +707,7 @@ func TestClearStatsHeat(t *testing.T) {
 	heat = [heatSlots]heatSlot{}
 	heatMu.Unlock()
 	heatAdd(time.Now(), 2, 10, 20, 5, 5)
-	clearStats(&Config{RecentSampleWindow: 5})
+	clearStats(&config.Config{RecentSampleWindow: 5})
 	if got := heatAt(time.Now()); got != [5]int64{} {
 		t.Errorf("clearStats 后热图槽=%v, want 全零", got)
 	}
@@ -964,14 +959,14 @@ func TestToolCallsTag(t *testing.T) {
 	}
 }
 
-// setCfg sets the test config (maybeRewriteClassifier reads the global cfg): thinkingOff maps to
+// setCfg sets the test config (maybeRewriteClassifier reads config.Current): thinkingOff maps to
 // classifier_route.classifier_thinking="off"; false leaves the classifier route unset (requests pass through untouched).
 func setCfg(thinkingOff bool) {
-	var cr *ClassifierRoute
+	var cr *config.ClassifierRoute
 	if thinkingOff {
-		cr = &ClassifierRoute{ClassifierThinking: "off"}
+		cr = &config.ClassifierRoute{ClassifierThinking: "off"}
 	}
-	cfg.Store(&Config{ClassifierRoute: cr})
+	config.Store(&config.Config{ClassifierRoute: cr})
 }
 
 // parseBody parses a JSON body into a map.
@@ -1070,15 +1065,15 @@ func TestDetectClassifierSource(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
-		want classifierSource
+		want config.ClassifierSource
 	}{
-		{"cc string system", `{"system":"You are a security monitor. Check this.","messages":[]}`, classifierCC},
-		{"cc array system", `{"system":[{"type":"text","text":"You are a security monitor."}],"messages":[]}`, classifierCC},
-		{"codex guardian", `{"system":"You are judging one planned coding-agent action.\nAssess the exact action.","messages":[]}`, classifierCodex},
-		{"codex guardian array", `{"system":[{"type":"text","text":"You are judging one planned coding-agent action."}],"messages":[]}`, classifierCodex},
-		{"prefix not at start", `{"system":"Note: You are a security monitor.","messages":[]}`, classifierNone},
-		{"ordinary system", `{"system":"You are a helpful assistant.","messages":[]}`, classifierNone},
-		{"no system field", `{"messages":[]}`, classifierNone},
+		{"cc string system", `{"system":"You are a security monitor. Check this.","messages":[]}`, config.ClassifierCC},
+		{"cc array system", `{"system":[{"type":"text","text":"You are a security monitor."}],"messages":[]}`, config.ClassifierCC},
+		{"codex guardian", `{"system":"You are judging one planned coding-agent action.\nAssess the exact action.","messages":[]}`, config.ClassifierCodex},
+		{"codex guardian array", `{"system":[{"type":"text","text":"You are judging one planned coding-agent action."}],"messages":[]}`, config.ClassifierCodex},
+		{"prefix not at start", `{"system":"Note: You are a security monitor.","messages":[]}`, config.ClassifierNone},
+		{"ordinary system", `{"system":"You are a helpful assistant.","messages":[]}`, config.ClassifierNone},
+		{"no system field", `{"messages":[]}`, config.ClassifierNone},
 	}
 	for _, tc := range tests {
 		if got := detectClassifier([]byte(tc.body)); got != tc.want {
@@ -1093,7 +1088,9 @@ func TestDetectClassifierSource(t *testing.T) {
 // Anthropic-native thinking knobs alone; everything else is normalized to thinking-off (the post-route quiet
 // upgrade then raises it to low upstream).
 func TestMaybeRewriteClassifierLow(t *testing.T) {
-	setLow := func() { cfg.Store(&Config{ClassifierRoute: &ClassifierRoute{ClassifierThinking: "low"}}) }
+	setLow := func() {
+		config.Store(&config.Config{ClassifierRoute: &config.ClassifierRoute{ClassifierThinking: "low"}})
+	}
 
 	// "low" = first normalize to thinking-off (the same edit as "off"), then the post-route quiet upgrade
 	// raises it to low upstream. maybeRewriteClassifier only performs the off phase.
@@ -1211,20 +1208,20 @@ func TestClassifierHitCounting(t *testing.T) {
 	}
 
 	// No classifier route: hits tally per source, no rewrites.
-	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
+	config.Store(&config.Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10})
 	post(ccCls)
 	post(codexCls)
 	check(2, 0, 1, 0, 1, 0, "no rewrite policy")
 
 	// "off": both sources get thinking disabled (the guardian's adaptive shape included).
-	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10, ClassifierRoute: &ClassifierRoute{URL: mock.URL, ClassifierThinking: "off"}})
+	config.Store(&config.Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10, ClassifierRoute: &config.ClassifierRoute{URL: mock.URL, ClassifierThinking: "off"}})
 	post(ccCls)
 	post(codexCls)
 	check(4, 2, 2, 1, 2, 1, "off rewrites both sources")
 
 	// "low": both sources are off-normalized, then quietly upgraded (max_tokens 100 is under the 2048 floor-fit
 	// threshold: the classifier path bumps max_tokens by 1024 instead of abandoning).
-	cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10, ClassifierRoute: &ClassifierRoute{URL: mock.URL, ClassifierThinking: "low"}})
+	config.Store(&config.Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10, ClassifierRoute: &config.ClassifierRoute{URL: mock.URL, ClassifierThinking: "low"}})
 	post(ccCls)
 	post(codexCls)
 	check(6, 4, 3, 2, 3, 2, "low off-normalizes both sources")
@@ -1352,11 +1349,11 @@ func TestLoadConfigThinkingValidation(t *testing.T) {
 		return p
 	}
 	for _, v := range []string{"", "auto", "adaptive", "budget"} {
-		if _, _, err := loadConfig(writeCfg(t, v)); err != nil {
+		if _, _, err := config.LoadConfig(writeCfg(t, v)); err != nil {
 			t.Errorf("thinking=%q 应合法: %v", v, err)
 		}
 	}
-	if _, _, err := loadConfig(writeCfg(t, "turbo")); err == nil {
+	if _, _, err := config.LoadConfig(writeCfg(t, "turbo")); err == nil {
 		t.Errorf("thinking=turbo 应报错")
 	}
 }
@@ -1376,7 +1373,7 @@ func TestLoadConfigRemovedKeys(t *testing.T) {
 		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
 			t.Fatal(err)
 		}
-		c, warns, err := loadConfig(p)
+		c, warns, err := config.LoadConfig(p)
 		if err != nil {
 			t.Errorf("旧键 %q 不应再拒载（降级启动）: %v", tc.key, err)
 			continue
@@ -1388,7 +1385,7 @@ func TestLoadConfigRemovedKeys(t *testing.T) {
 			t.Errorf("旧键 %q 应产生对应警告: %v", tc.key, warns)
 			continue
 		}
-		if got := removedKeyWarningEN(tc.key); !strings.Contains(got, tc.hint) {
+		if got := config.RemovedKeyWarningEN(tc.key); !strings.Contains(got, tc.hint) {
 			t.Errorf("旧键 %q 的英文警告应含迁移提示 %q: %s", tc.key, tc.hint, got)
 		}
 	}
@@ -1402,9 +1399,9 @@ func TestLoadConfigRemovedKeys(t *testing.T) {
 // a well-formed reference to an undefined name fails with the config path; $ not introducing a well-formed
 // reference stays literal; vars values must be strings and may reference other vars (one level).
 func TestParseConfigVars(t *testing.T) {
-	mustParse := func(t *testing.T, body string) *Config {
+	mustParse := func(t *testing.T, body string) *config.Config {
 		t.Helper()
-		c, _, err := parseConfig([]byte(body))
+		c, _, err := config.ParseConfig([]byte(body))
 		if err != nil {
 			t.Fatalf("parseConfig: %v", err)
 		}
@@ -1442,7 +1439,7 @@ func TestParseConfigVars(t *testing.T) {
 	})
 
 	t.Run("undefined variable names the path", func(t *testing.T) {
-		_, _, err := parseConfig([]byte(`{"routes": [{"pattern": "a", "url": "http://h", "api": "$KIMI_KET"}]}`))
+		_, _, err := config.ParseConfig([]byte(`{"routes": [{"pattern": "a", "url": "http://h", "api": "$KIMI_KET"}]}`))
 		if err == nil {
 			t.Fatal("want error for undefined variable")
 		}
@@ -1454,14 +1451,14 @@ func TestParseConfigVars(t *testing.T) {
 	})
 
 	t.Run("undefined inside vars names vars path", func(t *testing.T) {
-		_, _, err := parseConfig([]byte(`{"vars": {"A": "$NOPE"}, "routes": []}`))
+		_, _, err := config.ParseConfig([]byte(`{"vars": {"A": "$NOPE"}, "routes": []}`))
 		if err == nil || !strings.Contains(err.Error(), "vars.A") {
 			t.Fatalf("want error naming vars.A, got %v", err)
 		}
 	})
 
 	t.Run("non-string var value", func(t *testing.T) {
-		_, _, err := parseConfig([]byte(`{"vars": {"KIMI_KEY": 123}, "routes": []}`))
+		_, _, err := config.ParseConfig([]byte(`{"vars": {"KIMI_KEY": 123}, "routes": []}`))
 		if err == nil || !strings.Contains(err.Error(), "vars.KIMI_KEY must be a string") {
 			t.Fatalf("want vars.KIMI_KEY must be a string, got %v", err)
 		}
@@ -1605,7 +1602,7 @@ func TestParseConfigPatternArray(t *testing.T) {
 						{"pattern": "post*", "url": "http://post"}
 				]
 		}`)
-		c, _, err := parseConfig(data)
+		c, _, err := config.ParseConfig(data)
 		if err != nil {
 			t.Fatalf("parseConfig: %v", err)
 		}
@@ -1630,7 +1627,7 @@ func TestParseConfigPatternArray(t *testing.T) {
 				"upstream": "http://default",
 				"routes": [{"pattern": ["*fable*", "*opus*"], "url": "http://kimi", "api": "k"}]
 		}`)
-		c, _, err := parseConfig(data)
+		c, _, err := config.ParseConfig(data)
 		if err != nil {
 			t.Fatalf("parseConfig: %v", err)
 		}
@@ -1647,7 +1644,7 @@ func TestParseConfigPatternArray(t *testing.T) {
 
 	t.Run("empty array rejected", func(t *testing.T) {
 		data := []byte(`{"upstream": "http://d", "routes": [{"pattern": [], "url": "http://x"}]}`)
-		_, _, err := parseConfig(data)
+		_, _, err := config.ParseConfig(data)
 		if err == nil || !strings.Contains(err.Error(), "route #1 pattern array is empty") {
 			t.Fatalf("want empty-array error, got %v", err)
 		}
@@ -1656,7 +1653,7 @@ func TestParseConfigPatternArray(t *testing.T) {
 	t.Run("non-string member rejected", func(t *testing.T) {
 		for _, bad := range []string{`["a", 5]`, `["a", null]`, `["a", ["b"]]`, `["a", true]`} {
 			data := []byte(`{"upstream": "http://d", "routes": [{"pattern": ` + bad + `, "url": "http://x"}]}`)
-			_, _, err := parseConfig(data)
+			_, _, err := config.ParseConfig(data)
 			if err == nil || !strings.Contains(err.Error(), "route #1 pattern must be a string or an array of strings") {
 				t.Fatalf("pattern %s: want member-type error, got %v", bad, err)
 			}
@@ -1668,7 +1665,7 @@ func TestParseConfigPatternArray(t *testing.T) {
 				"upstream": "http://d",
 				"routes": [{"pattern": "a", "url": "http://x"}, {"url": "http://y"}, {"pattern": null, "url": "http://z"}]
 		}`)
-		c, _, err := parseConfig(data)
+		c, _, err := config.ParseConfig(data)
 		if err != nil {
 			t.Fatalf("parseConfig: %v", err)
 		}
@@ -1679,18 +1676,18 @@ func TestParseConfigPatternArray(t *testing.T) {
 
 	t.Run("catch-all inside array counts", func(t *testing.T) {
 		data := []byte(`{"routes": [{"pattern": ["a", "*"], "url": "http://x"}]}`)
-		c, _, err := parseConfig(data)
+		c, _, err := config.ParseConfig(data)
 		if err != nil {
 			t.Fatalf("parseConfig: %v", err)
 		}
-		if !hasCatchAllRoute(c.Routes) {
+		if !config.HasCatchAllRoute(c.Routes) {
 			t.Fatal("array member * should satisfy hasCatchAllRoute")
 		}
 	})
 
 	t.Run("reserved name disables only that copy", func(t *testing.T) {
 		data := []byte(`{"upstream": "http://d", "routes": [{"pattern": ["Fallback", "*opus*"], "url": "http://kimi"}]}`)
-		c, _, err := parseConfig(data)
+		c, _, err := config.ParseConfig(data)
 		if err != nil {
 			t.Fatalf("parseConfig: %v", err)
 		}
@@ -1711,7 +1708,7 @@ func TestParseConfigPatternArray(t *testing.T) {
 				"upstream": "http://d",
 				"routes": [{"pattern": ["$P1", "*opus*"], "url": "http://kimi"}]
 		}`)
-		c, _, err := parseConfig(data)
+		c, _, err := config.ParseConfig(data)
 		if err != nil {
 			t.Fatalf("parseConfig: %v", err)
 		}
@@ -1730,23 +1727,23 @@ func TestLoadConfigEnumValidation(t *testing.T) {
 		return p
 	}
 	// classifier_thinking: "off" and "low" are legal; anything else is rejected.
-	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"off"}}`)); err != nil {
+	if _, _, err := config.LoadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"off"}}`)); err != nil {
 		t.Errorf("classifier_thinking=off should be legal: %v", err)
 	}
-	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"low"}}`)); err != nil {
+	if _, _, err := config.LoadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"low"}}`)); err != nil {
 		t.Errorf("classifier_thinking=low should be legal: %v", err)
 	}
-	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"medium"}}`)); err == nil {
+	if _, _, err := config.LoadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking":"medium"}}`)); err == nil {
 		t.Errorf("classifier_thinking=medium should be rejected (only off/low)")
 	}
 	// Per-source overrides accept ""/"off"/"low" as well; anything else is rejected.
-	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking_cc":"off","classifier_thinking_codex":"low"}}`)); err != nil {
+	if _, _, err := config.LoadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking_cc":"off","classifier_thinking_codex":"low"}}`)); err != nil {
 		t.Errorf("per-source overrides off/low should be legal: %v", err)
 	}
-	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking_codex":"medium"}}`)); err == nil {
+	if _, _, err := config.LoadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking_codex":"medium"}}`)); err == nil {
 		t.Errorf("classifier_thinking_codex=medium should be rejected (only off/low)")
 	}
-	if _, _, err := loadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking_cc":"medium"}}`)); err == nil {
+	if _, _, err := config.LoadConfig(writeCfg(t, `{"upstream":"http://x","classifier_route":{"url":"http://y","classifier_thinking_cc":"medium"}}`)); err == nil {
 		t.Errorf("classifier_thinking_cc=medium should be rejected (only off/low)")
 	}
 	// convertOff2Low: translate/all legal on all four kinds...
@@ -1757,7 +1754,7 @@ func TestLoadConfigEnumValidation(t *testing.T) {
 		`{"upstream":"http://x","search_fallback":{"url":"http://y","model":"m","convertOff2Low":"all"}}`,
 	}
 	for _, body := range good {
-		if _, _, err := loadConfig(writeCfg(t, body)); err != nil {
+		if _, _, err := config.LoadConfig(writeCfg(t, body)); err != nil {
 			t.Errorf("应合法: %v (%s)", err, body)
 		}
 	}
@@ -1769,7 +1766,7 @@ func TestLoadConfigEnumValidation(t *testing.T) {
 		`{"upstream":"http://x","search_fallback":{"url":"http://y","model":"m","convertOff2Low":"on"}}`,
 	}
 	for _, body := range bad {
-		if _, _, err := loadConfig(writeCfg(t, body)); err == nil {
+		if _, _, err := config.LoadConfig(writeCfg(t, body)); err == nil {
 			t.Errorf("应报错拒载: %s", body)
 		}
 	}
@@ -1848,12 +1845,12 @@ func TestRouteHandler(t *testing.T) {
 	}))
 	defer defaultMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           defaultMock.URL,
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "deepseek-V4-pro"},
 		},
 	})
@@ -1910,16 +1907,16 @@ func TestReservedRoutePattern(t *testing.T) {
 	defer srvWild.Close()
 	defer srvAll.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		MaxRetries: 0, TotalBudgetSec: 10, RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "Fallback", URL: srvFB.URL},
 			{Pattern: "fast_route", URL: srvFR.URL},
 			{Pattern: "Fall*", URL: srvWild.URL},
 			{Pattern: "*", URL: srvAll.URL},
 		},
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 	stats.resetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
@@ -1986,7 +1983,7 @@ func TestNoRouteFallback(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           mock.URL,
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
@@ -2062,17 +2059,17 @@ func TestClassifierRouteHit(t *testing.T) {
 	}))
 	defer defaultMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           defaultMock.URL,
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		ClassifierRoute: &ClassifierRoute{
+		ClassifierRoute: &config.ClassifierRoute{
 			URL:   clfMock.URL,
 			API:   "sk-clf-xxx",
 			Model: "deepseek-v4-flash",
 		},
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: modelRouteMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
 	})
@@ -2138,13 +2135,13 @@ func TestClassifierRouteFallback(t *testing.T) {
 	}))
 	defer defaultMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           defaultMock.URL,
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
 		// ClassifierRoute deliberately unset: classifier requests should fall back to model routing
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: modelMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
 	})
@@ -2211,17 +2208,17 @@ func TestClassifierRouteNotClassifier(t *testing.T) {
 	}))
 	defer defaultMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           defaultMock.URL,
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		ClassifierRoute: &ClassifierRoute{
+		ClassifierRoute: &config.ClassifierRoute{
 			URL:   clfMock.URL,
 			API:   "sk-clf-xxx",
 			Model: "deepseek-v4-flash",
 		},
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: modelMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
 	})
@@ -2298,17 +2295,17 @@ func TestFastRouteHit(t *testing.T) {
 	}))
 	defer defaultMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           defaultMock.URL,
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		FastRoute: &FastRoute{
+		FastRoute: &config.FastRoute{
 			URL:   fastMock.URL,
 			API:   "sk-fast-xxx",
 			Model: "deepseek-v4-pro",
 		},
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: modelRouteMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
 	})
@@ -2379,12 +2376,12 @@ func TestFastRouteNotConfigured(t *testing.T) {
 	}))
 	defer modelRouteMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default-should-not-hit.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: modelRouteMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
 	})
@@ -2435,17 +2432,17 @@ func TestFastRouteClassifierPriority(t *testing.T) {
 	}))
 	defer fastMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default-should-not-hit.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		ClassifierRoute: &ClassifierRoute{
+		ClassifierRoute: &config.ClassifierRoute{
 			URL:   clfMock.URL,
 			API:   "sk-clf-xxx",
 			Model: "deepseek-v4-flash",
 		},
-		FastRoute: &FastRoute{
+		FastRoute: &config.FastRoute{
 			URL:   fastMock.URL,
 			API:   "sk-fast-xxx",
 			Model: "deepseek-v4-pro",
@@ -2494,17 +2491,17 @@ func TestFastRouteHeaderOnly(t *testing.T) {
 	}))
 	defer modelRouteMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default-should-not-hit.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		FastRoute: &FastRoute{
+		FastRoute: &config.FastRoute{
 			URL:   fastMock.URL,
 			API:   "sk-fast-xxx",
 			Model: "deepseek-v4-pro",
 		},
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-sonnet*", URL: modelRouteMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
 	})
@@ -2554,12 +2551,12 @@ func TestFastRouteBodyWhitespace(t *testing.T) {
 	}))
 	defer fastMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default-should-not-hit.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		FastRoute: &FastRoute{
+		FastRoute: &config.FastRoute{
 			URL:   fastMock.URL,
 			API:   "sk-fast-xxx",
 			Model: "deepseek-v4-pro",
@@ -2643,15 +2640,15 @@ func TestImageFallbackRoute(t *testing.T) {
 	}))
 	defer routeMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "deepseek-V4-pro", TextOnly: true},
 		},
-		MultimodalFallback: &MultimodalRoute{URL: fbMock.URL, API: "sk-mm-xxx", Model: "glm-4.5v"},
+		MultimodalFallback: &config.MultimodalRoute{URL: fbMock.URL, API: "sk-mm-xxx", Model: "glm-4.5v"},
 	})
 	stats.resetSampleCap(5)
 
@@ -2712,15 +2709,15 @@ func TestImageFallbackNoImage(t *testing.T) {
 	}))
 	defer fbMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "deepseek-V4-pro", TextOnly: true},
 		},
-		MultimodalFallback: &MultimodalRoute{URL: fbMock.URL, API: "sk-mm-xxx", Model: "glm-4.5v"},
+		MultimodalFallback: &config.MultimodalRoute{URL: fbMock.URL, API: "sk-mm-xxx", Model: "glm-4.5v"},
 	})
 	stats.resetSampleCap(5)
 
@@ -2775,15 +2772,15 @@ func TestImageFallbackNotTextOnly(t *testing.T) {
 	}))
 	defer fbMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "deepseek-V4-pro", TextOnly: false},
 		},
-		MultimodalFallback: &MultimodalRoute{URL: fbMock.URL, API: "sk-mm-xxx", Model: "glm-4.5v"},
+		MultimodalFallback: &config.MultimodalRoute{URL: fbMock.URL, API: "sk-mm-xxx", Model: "glm-4.5v"},
 	})
 	stats.resetSampleCap(5)
 
@@ -2826,12 +2823,12 @@ func TestImageFallbackNotConfigured(t *testing.T) {
 	}))
 	defer routeMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "deepseek-V4-pro", TextOnly: true},
 		},
 		// MultimodalFallback not configured
@@ -2907,15 +2904,15 @@ func TestSearchFallbackRoute(t *testing.T) {
 	}))
 	defer routeMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "ark-opus", NoSearch: true},
 		},
-		SearchFallback: &SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
+		SearchFallback: &config.SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
 	})
 	stats.resetSampleCap(5)
 
@@ -2975,15 +2972,15 @@ func TestSearchFallbackNoSearch(t *testing.T) {
 	}))
 	defer sfMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "ark-opus", NoSearch: true},
 		},
-		SearchFallback: &SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
+		SearchFallback: &config.SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
 	})
 	stats.resetSampleCap(5)
 
@@ -3037,15 +3034,15 @@ func TestSearchFallbackNotNoSearch(t *testing.T) {
 	}))
 	defer sfMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "ark-opus", NoSearch: false},
 		},
-		SearchFallback: &SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
+		SearchFallback: &config.SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
 	})
 	stats.resetSampleCap(5)
 
@@ -3101,16 +3098,16 @@ func TestEnhanceSearchRoute(t *testing.T) {
 	routeMock := httptest.NewServer(mux)
 	defer routeMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
-			{Pattern: "claude-haiku*", URL: routeMock.URL, API: "sk-route-xxx", Model: "deepseek-V4-pro", EnhanceSearch: &EnhanceSearchConfig{SummaryLevel: "mid"}},
+		Routes: []config.RouteRule{
+			{Pattern: "claude-haiku*", URL: routeMock.URL, API: "sk-route-xxx", Model: "deepseek-V4-pro", EnhanceSearch: &config.EnhanceSearchConfig{SummaryLevel: "mid"}},
 		},
 	})
-	defer cfg.Store(&Config{})
+	defer config.Store(&config.Config{})
 	stats.resetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
@@ -3181,16 +3178,16 @@ func TestSearchFallbackWithImage(t *testing.T) {
 	}))
 	defer routeMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "ark-opus", TextOnly: true, NoSearch: true},
 		},
-		SearchFallback:     &SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
-		MultimodalFallback: &MultimodalRoute{URL: mfMock.URL, API: "sk-mf-xxx", Model: "kimi-vl"}, // NoSearch defaults to false; search supported
+		SearchFallback:     &config.SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
+		MultimodalFallback: &config.MultimodalRoute{URL: mfMock.URL, API: "sk-mf-xxx", Model: "kimi-vl"}, // NoSearch defaults to false; search supported
 	})
 	stats.resetSampleCap(5)
 
@@ -3247,16 +3244,16 @@ func TestSearchFallbackWithImageSfSupports(t *testing.T) {
 	}))
 	defer mfMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: "http://no-route.example.com", API: "sk-route-xxx", Model: "ark-opus", TextOnly: true, NoSearch: true},
 		},
-		SearchFallback:     &SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "kimi-vl"},
-		MultimodalFallback: &MultimodalRoute{URL: mfMock.URL, API: "sk-mf-xxx", Model: "kimi-vl"},
+		SearchFallback:     &config.SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "kimi-vl"},
+		MultimodalFallback: &config.MultimodalRoute{URL: mfMock.URL, API: "sk-mf-xxx", Model: "kimi-vl"},
 	})
 	stats.resetSampleCap(5)
 
@@ -3302,12 +3299,12 @@ func TestSearchFallbackNotConfigured(t *testing.T) {
 	}))
 	defer routeMock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           "http://no-default.example.com",
 		MaxRetries:         0,
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
-		Routes: []RouteRule{
+		Routes: []config.RouteRule{
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "ark-opus", NoSearch: true},
 		},
 		// Neither SearchFallback nor MultimodalFallback configured
@@ -3353,7 +3350,7 @@ func TestRetryPingKeepalive(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           mock.URL,
 		RetryStatusCodes:   []int{429, 500, 502, 503, 504},
 		MaxRetries:         5,
@@ -3397,7 +3394,7 @@ func TestRetryBackoffCancellable(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           mock.URL,
 		RetryStatusCodes:   []int{429, 500, 502, 503, 504},
 		MaxRetries:         50,
@@ -3443,7 +3440,7 @@ func TestRetryExhaustedSSEError(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cfg.Store(&Config{
+	config.Store(&config.Config{
 		Upstream:           mock.URL,
 		RetryStatusCodes:   []int{429, 500, 502, 503, 504},
 		MaxRetries:         1,
@@ -3513,7 +3510,7 @@ func TestClassifierThinkingPerSource(t *testing.T) {
 
 	t.Run("cc override off wins over shared low", func(t *testing.T) {
 		resetStats()
-		cfg.Store(&Config{ClassifierRoute: &ClassifierRoute{ClassifierThinking: "low", ClassifierThinkingCC: "off"}})
+		config.Store(&config.Config{ClassifierRoute: &config.ClassifierRoute{ClassifierThinking: "low", ClassifierThinkingCC: "off"}})
 		out, _ := maybeRewriteClassifier(ccAdaptive)
 		p := parseBody(t, out)
 		if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "disabled" {
@@ -3532,7 +3529,7 @@ func TestClassifierThinkingPerSource(t *testing.T) {
 
 	t.Run("codex-only policy leaves cc untouched", func(t *testing.T) {
 		resetStats()
-		cfg.Store(&Config{ClassifierRoute: &ClassifierRoute{ClassifierThinkingCodex: "low"}})
+		config.Store(&config.Config{ClassifierRoute: &config.ClassifierRoute{ClassifierThinkingCodex: "low"}})
 		if out, _ := maybeRewriteClassifier(ccAdaptive); !bytes.Equal(out, ccAdaptive) {
 			t.Errorf("cc has no effective policy (shared unset, cc override unset): should pass through untouched")
 		}
@@ -3548,7 +3545,7 @@ func TestClassifierThinkingPerSource(t *testing.T) {
 
 	t.Run("empty override falls back to shared, not to empty", func(t *testing.T) {
 		resetStats()
-		cfg.Store(&Config{ClassifierRoute: &ClassifierRoute{ClassifierThinking: "off", ClassifierThinkingCodex: "low"}})
+		config.Store(&config.Config{ClassifierRoute: &config.ClassifierRoute{ClassifierThinking: "off", ClassifierThinkingCodex: "low"}})
 		out, _ := maybeRewriteClassifier(ccAdaptive)
 		p := parseBody(t, out)
 		if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "disabled" {
@@ -3594,9 +3591,9 @@ func TestClassifierLowOffThenUpgrade(t *testing.T) {
 			io.WriteString(w, thinkSSE)
 		}))
 		defer mock.Close()
-		cfg.Store(&Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10,
-			ClassifierRoute: &ClassifierRoute{URL: mock.URL, ClassifierThinking: "low"}})
-		defer cfg.Store(&Config{})
+		config.Store(&config.Config{Upstream: mock.URL, MaxRetries: 0, TotalBudgetSec: 10,
+			ClassifierRoute: &config.ClassifierRoute{URL: mock.URL, ClassifierThinking: "low"}})
+		defer config.Store(&config.Config{})
 		proxy := httptest.NewServer(http.HandlerFunc(handler))
 		defer proxy.Close()
 		resp, err := http.Post(proxy.URL+"/v1/messages", "application/json", strings.NewReader(body))
@@ -3742,8 +3739,8 @@ func TestClassifierAlreadyTargetPassThrough(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			resetStats()
-			cfg.Store(&Config{ClassifierRoute: &ClassifierRoute{ClassifierThinking: tc.mode}})
-			defer cfg.Store(&Config{})
+			config.Store(&config.Config{ClassifierRoute: &config.ClassifierRoute{ClassifierThinking: tc.mode}})
+			defer config.Store(&config.Config{})
 			out, _ := maybeRewriteClassifier([]byte(tc.body))
 			if tc.wantPass && !bytes.Equal(out, []byte(tc.body)) {
 				t.Errorf("want byte-identical passthrough, got %s", out)
@@ -3783,11 +3780,11 @@ func TestLoadConfigSearchFallbackThinkingValidation(t *testing.T) {
 		return p
 	}
 	for _, v := range []string{"", "auto", "adaptive", "budget"} {
-		if _, _, err := loadConfig(writeCfg(t, v)); err != nil {
+		if _, _, err := config.LoadConfig(writeCfg(t, v)); err != nil {
 			t.Errorf("search_fallback thinking=%q should be legal: %v", v, err)
 		}
 	}
-	if _, _, err := loadConfig(writeCfg(t, "turbo")); err == nil {
+	if _, _, err := config.LoadConfig(writeCfg(t, "turbo")); err == nil {
 		t.Error("search_fallback thinking=turbo should fail")
 	}
 }

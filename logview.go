@@ -1,6 +1,7 @@
 package main
 
 import (
+	"proxy429/internal/config"
 	"proxy429/internal/platform"
 
 	"bytes"
@@ -87,7 +88,7 @@ func uiLangHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if r.Method == http.MethodGet {
 		source := "system"
-		if l := readProgramSetting("ui-lang"); l == "zh" || l == "en" {
+		if l := config.ReadProgramSetting("ui-lang"); l == "zh" || l == "en" {
 			source = "program"
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "lang": platform.CurrentUILang(), "source": source})
@@ -108,12 +109,12 @@ func uiLangHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "lang must be zh / en / empty (follow system)", http.StatusBadRequest)
 		return
 	}
-	if err := writeProgramSetting("ui-lang", b.Lang); err != nil {
+	if err := config.WriteProgramSetting("ui-lang", b.Lang); err != nil {
 		http.Error(w, "failed to write program settings: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	platform.ApplyUILang(b.Lang) // Effective hot; no reloadConfig — language and routing config don't entangle
-	log.Printf("[lang] UI language switched to %s (%s)", platform.CurrentUILang(), programSettingsFile)
+	log.Printf("[lang] UI language switched to %s (%s)", platform.CurrentUILang(), config.ProgramSettingsFile)
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "lang": platform.CurrentUILang()})
 }
 
@@ -191,7 +192,7 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
-	d := logData{Lines: logBuf.window(0, maxLogBuf), Version: Version, CurrentCfg: filepath.Base(currentConfigPath()), FinishedCap: finishedCap.Load(), FullStore: fullStore.Load(), HijackRisk: platform.ProxyHijackRisk()}
+	d := logData{Lines: logBuf.window(0, maxLogBuf), Version: Version, CurrentCfg: filepath.Base(config.CurrentConfigPath()), FinishedCap: finishedCap.Load(), FullStore: fullStore.Load(), HijackRisk: platform.ProxyHijackRisk()}
 	stats.mu.Lock()
 	d.Active = stats.active
 	d.Waiting = stats.waiting
@@ -265,7 +266,7 @@ func configGetHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
-	data, err := os.ReadFile(currentConfigPath())
+	data, err := os.ReadFile(config.CurrentConfigPath())
 	content := ""
 	if err == nil {
 		content = string(data)
@@ -273,14 +274,14 @@ func configGetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"path":    currentConfigPath(),
+		"path":    config.CurrentConfigPath(),
 		"content": content,
 		"exists":  err == nil,
 	})
 }
 
 // configPostHandler saves the edited config and reloads it.
-// It first probes the content with parseConfig — the same validation loadConfig uses (JSON syntax, removed keys with
+// It first probes the content with config.ParseConfig — the same validation config.LoadConfig uses (JSON syntax, removed keys with
 // migration hints, enum values) — writing to disk only on success. A rejected config never reaches the file, so it
 // cannot brick the next startup. reloadConfig applies it after the write.
 func configPostHandler(w http.ResponseWriter, r *http.Request) {
@@ -293,22 +294,22 @@ func configPostHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to read request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Probe with parseConfig (not bare json.Unmarshal): bad JSON and invalid enum values are rejected before anything
+	// Probe with config.ParseConfig (not bare json.Unmarshal): bad JSON and invalid enum values are rejected before anything
 	// touches the disk. Removed keys are non-fatal at startup, but saving is interactive (the user sees this message in
 	// #cfgMsg), so they are rejected here too — a removed key must not be written back to disk from the console.
-	if _, warns, err := parseConfig(body); err != nil {
+	if _, warns, err := config.ParseConfig(body); err != nil {
 		http.Error(w, "invalid config; not saved: "+err.Error(), http.StatusBadRequest)
 		return
 	} else if len(warns) > 0 {
 		msgs := make([]string, 0, len(warns))
 		for _, k := range warns {
-			msgs = append(msgs, removedKeyWarningEN(k))
+			msgs = append(msgs, config.RemovedKeyWarningEN(k))
 		}
 		http.Error(w, "invalid config; not saved: "+strings.Join(msgs, "; "), http.StatusBadRequest)
 		return
 	}
-	_, statErr := os.Stat(currentConfigPath()) // Didn't exist before the save → this save creates the file; the file list changes
-	if err := os.WriteFile(currentConfigPath(), body, 0644); err != nil {
+	_, statErr := os.Stat(config.CurrentConfigPath()) // Didn't exist before the save → this save creates the file; the file list changes
+	if err := os.WriteFile(config.CurrentConfigPath(), body, 0644); err != nil {
 		http.Error(w, "failed to write file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -346,13 +347,13 @@ func configsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
-	cur := currentConfigPath()
+	cur := config.CurrentConfigPath()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"current": filepath.Base(cur),
 		"dir":     filepath.Dir(cur),
-		"files":   listConfigFiles(),
+		"files":   config.ListConfigFiles(),
 	})
 }
 
@@ -380,7 +381,7 @@ func switchHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid config file name", http.StatusBadRequest)
 		return
 	}
-	full := filepath.Join(filepath.Dir(currentConfigPath()), name)
+	full := filepath.Join(filepath.Dir(config.CurrentConfigPath()), name)
 	if err := switchConfig(full); err != nil {
 		http.Error(w, "switch failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -403,11 +404,11 @@ func validConfigName(name string) (string, bool) {
 }
 
 // readConfigTemplate returns the blank template for new configs.
-// It uses the compile-time embedded config.example.json (configExampleBytes) directly, guaranteeing it's always the latest version shipped with the exe,
+// It uses the compile-time embedded config.example.json (config.ConfigExampleBytes) directly, guaranteeing it's always the latest version shipped with the exe,
 // and never reads the disk copy — a disk config.example.json may be an old version not updated with the exe, producing stale new configs.
 // To view/edit the reference template, see config.example.json in the release directory.
 func readConfigTemplate() []byte {
-	return configExampleBytes
+	return config.ConfigExampleBytes
 }
 
 // Bake anchors: character-for-character identical to how they're written in the template files (codex_setup_test.go locks each to appear exactly once).
@@ -526,7 +527,7 @@ func newConfigHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid config file name (plain file name only, no path)", http.StatusBadRequest)
 		return
 	}
-	full := filepath.Join(filepath.Dir(currentConfigPath()), name)
+	full := filepath.Join(filepath.Dir(config.CurrentConfigPath()), name)
 	if _, err := os.Stat(full); err == nil {
 		http.Error(w, "file already exists: "+name, http.StatusConflict)
 		return
@@ -573,7 +574,7 @@ func renameConfigHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid target file name", http.StatusBadRequest)
 		return
 	}
-	dir := filepath.Dir(currentConfigPath())
+	dir := filepath.Dir(config.CurrentConfigPath())
 	oldFull := filepath.Join(dir, oldName)
 	newFull := filepath.Join(dir, newName)
 	if _, err := os.Stat(oldFull); err != nil {
@@ -588,21 +589,16 @@ func renameConfigHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rename failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// If the renamed file is the current config, update configFilePath so subsequent reads/writes point at the new file
-	configMu.Lock()
-	renamed := configFilePath == oldFull
+	// If the renamed file is the current config, update the active path so subsequent reads/writes point at the new file
+	renamed := config.RenameCurrentPath(oldFull, newFull)
 	if renamed {
-		configFilePath = newFull
-	}
-	configMu.Unlock()
-	if renamed {
-		writeActiveConfigState(newFull)
+		config.WriteActiveConfigState(newFull)
 	}
 	log.Printf("[config] renamed %s -> %s", oldName, newName)
 	// The file list changed (if the renamed one is the current config, the tray checkmark follows the new name): notify the tray to rebuild the submenu
 	notifyTrayCfgChanged()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "current": filepath.Base(currentConfigPath())})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "current": filepath.Base(config.CurrentConfigPath())})
 }
 
 // delConfigHandler deletes a config file. Deleting the config currently in use is refused (switch away first).
@@ -628,8 +624,8 @@ func delConfigHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid config file name", http.StatusBadRequest)
 		return
 	}
-	full := filepath.Join(filepath.Dir(currentConfigPath()), name)
-	if full == currentConfigPath() {
+	full := filepath.Join(filepath.Dir(config.CurrentConfigPath()), name)
+	if full == config.CurrentConfigPath() {
 		http.Error(w, "cannot delete the active config; switch to another config first", http.StatusBadRequest)
 		return
 	}
@@ -659,7 +655,7 @@ func resetStatsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	clearStats(cfg.Load())
+	clearStats(config.Current())
 	log.Printf("[stats] cleared")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})

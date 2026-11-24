@@ -26,846 +26,19 @@ import (
 
 	"fyne.io/systray"
 
+	"proxy429/internal/config"
 	"proxy429/internal/platform"
 )
-
-// Config is the proxy's configuration, mirroring config.json.
-type Config struct {
-	Listen                   string            `json:"listen"`
-	Upstream                 string            `json:"upstream"`
-	Vars                     map[string]string `json:"vars,omitempty"` // Named string variables: any string value in this file can reference them as $NAME / ${NAME}; resolved at load (the file keeps the references)
-	MaxRetries               int               `json:"max_retries"`
-	BaseDelaySec             float64           `json:"base_delay_s"`
-	MaxDelaySec              float64           `json:"max_delay_s"`
-	TotalBudgetSec           float64           `json:"total_budget_s"`
-	RetryStatusCodes         []int             `json:"retry_status_codes"`
-	RespectRetryAfter        bool              `json:"respect_retry_after"`
-	UpstreamHeaderTimeoutSec float64           `json:"upstream_header_timeout_s"` // Max seconds to wait for the upstream's first byte; on timeout the request is considered stuck and resent internally. 0 = default 70s
-	PingIntervalSec          float64           `json:"ping_interval_s"`           // Interval (seconds) for SSE ping keep-alives sent to the client during 429 retries; 0 = default 5s
-	LogRequestDetail         bool              `json:"log_request_detail"`
-	LogFile                  string            `json:"log_file"`                      // Log file path; when set, logs are also appended to this file so they can be viewed/copied without a console (e.g. RemoteApp)
-	RecentSampleWindow       int               `json:"recent_sample_window"`          // Window size for the status row's "last X" latency/throughput stats; 0 = default 20
-	LazyApply                *LazyApplyConfig  `json:"lazyApply,omitempty"`           // Global defaults for behavior fields shared by route-like objects; a local explicit value wins, noLazyApply opts an object out
-	Routes                   []RouteRule       `json:"routes"`                        // Model routing rules; empty = no routing, use the default upstream
-	ClassifierRoute          *ClassifierRoute  `json:"classifier_route,omitempty"`    // Dedicated route for classifier requests; classifier hits are routed here regardless of the original model; empty = disabled
-	FastRoute                *FastRoute        `json:"fast_route,omitempty"`          // Dedicated route for fast-mode requests; non-classifier requests carrying "speed":"fast" are routed here; empty = disabled
-	MultimodalFallback       *MultimodalRoute  `json:"multimodal_fallback,omitempty"` // Multimodal fallback route; requests containing images that hit a text_only model are rerouted here; empty = disabled
-	SearchFallback           *SearchRoute      `json:"search_fallback,omitempty"`     // Search fallback route; requests with search tools that hit a no_search upstream are rerouted here; empty = disabled
-	ConvertAllToStream       bool              `json:"convertAlltoStream"`            // Global stream conversion: when on, all non-streaming requests are sent upstream as streams, then rebuilt into a single non-streaming JSON response (transparent to the client; the web console shows live output/first-token/tok/s)
-	ResponsesListen          string            `json:"responses_listen"`              // OpenAI Responses API listener (e.g. 127.0.0.1:8081); empty = disabled. Translates Responses-protocol requests into Anthropic and feeds the main pipeline, for Codex CLI and similar tools. Starts/stops dynamically on save/reload
-
-	// AllowNoThinkBlock4Anthropic (Responses translation port only; nil/unset = true): a tool-continuation whose history has no
-	// replayable signed thinking block gets 400'd by real Anthropic when thinking is on. true (default) = send the requested thinking
-	// mode anyway; the main handler's one-shot fallback retries with thinking off if the upstream really rejects it. false = cc-switch
-	// mode: thinking preemptively off over such histories. Explicit thinking-off requests never take this door (convertOff2Low still
-	// governs those); the native port doesn't check history at all.
-	AllowNoThinkBlock4Anthropic *bool `json:"allowNoThinkBlock4Anthropic,omitempty"`
-}
-
-// The web console UI language is a program-level preference, not routing config: stored in program-settings.txt
-// in the config directory (same family as active-config.txt, see below); config files no longer carry ui_lang (legacy field migrated once at startup).
-
-// allowNoThinkBlock4Anthropic resolves the Config toggle: nil config / nil field = true (the try-first default; see the field's comment).
-func allowNoThinkBlock4Anthropic(c *Config) bool {
-	return c == nil || c.AllowNoThinkBlock4Anthropic == nil || *c.AllowNoThinkBlock4Anthropic
-}
-
-// RouteRule defines one model route: matched requests go to the specified upstream with the model name and API key replaced.
-// Pattern wildcards the model name with *; on hit, URL overrides the default upstream, API overrides the client token, Model rewrites the request body's model field.
-type RouteRule struct {
-	Pattern        string               `json:"pattern"`                    // Model-name wildcard, only * supported (matches any characters of any length), e.g. "claude-opus*"
-	URL            string               `json:"url"`                        // Target upstream base URL, e.g. https://api.deepseek.com
-	API            string               `json:"api"`                        // Target API key, sent as Authorization: Bearer; empty = pass through the client's token
-	Model          string               `json:"model"`                      // Target model name to rewrite to; empty = leave the model field unchanged
-	TextOnly       bool                 `json:"text_only"`                  // Target model is text-only; requests containing images fall back to multimodal_fallback
-	NoSearch       bool                 `json:"no_search"`                  // Target upstream does not support search; requests with search tools fall back to search_fallback
-	EnhanceSearch  *EnhanceSearchConfig `json:"enhance_search,omitempty"`   // Enhanced search: enabled when non-nil. Standalone search sub-agent requests get the summary instruction injected into the request itself, served by this route's own upstream (single-request mode)
-	URLResponseAPI string               `json:"url_response_api,omitempty"` // Native Responses API upstream base URL: when set, Responses-port requests hitting this route are passed through untranslated (affects only the Responses port; Anthropic-port traffic still uses url). Implemented but not battle-tested, hence undocumented
-	Thinking       string               `json:"thinking,omitempty"`         // Thinking shape of the target model (Responses translation only): ""/"auto" = look up by client model name; "adaptive" = force adaptive+effort; "budget" = force enabled+budget_tokens
-	ConvertOff2Low string               `json:"convertOff2Low,omitempty"`   // Per-route thinking-off conversion: ""/unset = off (requests go through untouched); "translate" = Responses translation port only; "all" = translation port + Anthropic native port. When on, an explicit downstream thinking-off is quietly sent upstream as low thinking, with thinking blocks stripped from the response (client unaware)
-
-	ClaudeSearchThinking          string `json:"claudeSearchThinking,omitempty"`          // Standalone search sub-agent requests hitting this route: rewrite thinking to off/low/mid/high/max; unset = fall back (to enhance_search legacy when this route serves, to search_fallback's own setting when diverted there)
-	ClaudeSearchSummary           string `json:"claudeSearchSummary,omitempty"`           // Same requests: forceLow/forceMid/forceHigh inject the matching summary instruction, noForce disables injection; unset = fall back as above. A set value beats this route's enhance_search legacy fields and (per field) search_fallback's own
-	NoBullshitOnEmptyClaudeSearch *bool  `json:"noBullshitOnEmptyClaudeSearch,omitempty"` // Same requests: replace an all-empty web-search response with a fixed no-results stream; unset = off here, or inherit search_fallback when diverted. Explicit false beats a fallback true
-	NoLazyApply                   bool   `json:"noLazyApply,omitempty"`                   // This route ignores every lazyApply default; its own explicit fields stay authoritative
-
-	presence configPresence // JSON key presence captured after variable/pattern expansion
-}
-
-// EnhanceSearchConfig holds optional enhanced-search parameters inside a routes entry. When the route hits and the request carries
-// search tools, standalone search sub-agent requests get the summary instruction injected into the search request itself
-// (single-request mode), served by the route's own url/api/model — the upstream's response passes through untouched.
-// Equivalent to no_search via search_fallback, except the search upstream is the route's own.
-type EnhanceSearchConfig struct {
-	SummaryThinking bool   `json:"summary_thinking"` // Rewrite the injected search request's thinking to low (default off)
-	SummaryLevel    string `json:"summary_level"`    // Injected summary instruction's detail level: low (default) / mid / high / max
-}
-
-// ClassifierRoute defines the dedicated route for classifier requests: requests matching the classifier (safety check) signature
-// are routed to the specified upstream regardless of the original model. Used to push Claude Code's lightweight safety checks to a cheap model, saving main-model quota.
-type ClassifierRoute struct {
-	URL                     string `json:"url"`                                 // Target upstream base URL
-	API                     string `json:"api"`                                 // Target API key; empty = pass through the client's token
-	Model                   string `json:"model"`                               // Target model name to rewrite to; empty = leave the model field unchanged
-	ClassifierThinking      string `json:"classifier_thinking,omitempty"`       // Shared classifier thinking policy: ""/unset = leave the request's thinking untouched; "off" = rewrite the body to thinking-off so classification returns fast; "low" = lower adaptive thinking to effort low (non-adaptive shapes pass through untouched)
-	ClassifierThinkingCC    string `json:"classifier_thinking_cc,omitempty"`    // Claude Code override of classifier_thinking; unset = fall back to the shared value
-	ClassifierThinkingCodex string `json:"classifier_thinking_codex,omitempty"` // Codex guardian override of classifier_thinking; unset = fall back to the shared value
-	NoLazyApply             bool   `json:"noLazyApply,omitempty"`               // This route ignores every lazyApply default; its own explicit fields stay authoritative
-
-	presence configPresence // JSON key presence captured after variable/pattern expansion
-}
-
-// FastRoute defines the dedicated route for fast-mode requests: non-classifier requests carrying "speed":"fast" go to the specified upstream.
-// Claude Code /fast doesn't change the model name, only speeds up output; the proxy injects fake fast rate-limit headers into responses.
-type FastRoute struct {
-	URL            string `json:"url"`                      // Target upstream base URL
-	API            string `json:"api"`                      // Target API key; empty = pass through the client's token
-	Model          string `json:"model"`                    // Target model name to rewrite to; empty = leave the model field unchanged
-	ConvertOff2Low string `json:"convertOff2Low,omitempty"` // Same semantics as RouteRule.ConvertOff2Low
-	NoLazyApply    bool   `json:"noLazyApply,omitempty"`    // This route ignores every lazyApply default
-
-	presence configPresence // JSON key presence captured after variable expansion
-}
-
-// MultimodalRoute defines the multimodal fallback: when a request contains images but hits a text_only text-only model,
-// it is automatically rerouted to the multimodal upstream specified here.
-type MultimodalRoute struct {
-	URL            string `json:"url"`                      // Target upstream base URL
-	API            string `json:"api"`                      // Target API key; empty = pass through the client's token
-	Model          string `json:"model"`                    // Target model name to rewrite to; empty = leave the model field unchanged
-	ConvertOff2Low string `json:"convertOff2Low,omitempty"` // Same semantics as RouteRule.ConvertOff2Low
-	NoLazyApply    bool   `json:"noLazyApply,omitempty"`    // This route ignores every lazyApply default
-
-	presence configPresence // JSON key presence captured after variable expansion
-}
-
-// SearchRoute defines the search fallback: when a request carries search tools but hits a no_search search-incapable upstream,
-// it is automatically rerouted to the search-capable upstream specified here.
-type SearchRoute struct {
-	URL             string `json:"url"`                      // Target upstream base URL
-	API             string `json:"api"`                      // Target API key; empty = pass through the client's token
-	Model           string `json:"model"`                    // Target model name to rewrite to; empty = leave the model field unchanged
-	ConvertOff2Low  string `json:"convertOff2Low,omitempty"` // Same semantics as RouteRule.ConvertOff2Low
-	Thinking        string `json:"thinking,omitempty"`       // Thinking shape of the target model (Responses translation only): ""/"auto" = look up by client model name; "adaptive" = force adaptive+effort; "budget" = force enabled+budget_tokens
-	SummaryMode     bool   `json:"summary_mode"`             // Standalone search sub-agent requests: inject the summary instruction (at summary_level) into the search request itself — single request, the upstream's response passed through (legacy; claudeSearchSummary overrides)
-	SummaryThinking bool   `json:"summary_thinking"`         // Legacy thinking switch for search sub-agent requests: true rewrites thinking to low (claudeSearchThinking overrides)
-	SummaryLevel    string `json:"summary_level"`            // Summary detail under summary_mode: low (default, brief) / mid (medium) / high (thorough) / max (verbatim steps/code/formulas)
-
-	ClaudeSearchThinking          string `json:"claudeSearchThinking,omitempty"`          // Standalone search sub-agent requests: rewrite thinking to off / low / mid / high / max (beats summary_thinking; unset = legacy behavior)
-	ClaudeSearchSummary           string `json:"claudeSearchSummary,omitempty"`           // Standalone search sub-agent requests: forceLow / forceMid / forceHigh inject the matching summary instruction into the search request itself; noForce disables injection (beats summary_mode; unset = legacy behavior)
-	NoBullshitOnEmptyClaudeSearch *bool  `json:"noBullshitOnEmptyClaudeSearch,omitempty"` // Standalone search sub-agent requests: replace an all-empty web-search response with a fixed no-results stream; unset = off unless the matched route explicitly overrides it
-	NoLazyApply                   bool   `json:"noLazyApply,omitempty"`                   // This fallback ignores every lazyApply default; its own explicit fields stay authoritative
-
-	presence configPresence // JSON key presence captured after variable expansion
-}
-
-// configPresence records which JSON object keys were actually written, so lazyApply resolution can
-// distinguish an omitted key from an explicit false / "" / null. A nil map means "no JSON metadata"
-// (programmatic Go literals keep the existing non-zero-means-set convention); a non-nil empty map
-// means a real JSON object that contained no recognized keys.
-type configPresence map[string]struct{}
-
-// written reports whether key was present in the source JSON. Without presence metadata it falls
-// back to the caller-provided non-zero test, keeping Go-literal configs working.
-func (p configPresence) written(key string, nonzero bool) bool {
-	if p == nil {
-		return nonzero
-	}
-	_, ok := p[key]
-	return ok
-}
-
-// LazyApplyConfig supplies defaults for behavior fields that route-like objects already accept.
-// Resolution is per field: an explicitly written local value wins over lazyApply, and an omitted
-// local key inherits lazyApply. noLazyApply on a route-like object disables all of its defaults.
-type LazyApplyConfig struct {
-	TextOnly       bool   `json:"text_only,omitempty"`      // Default for routes[].text_only
-	NoSearch       bool   `json:"no_search,omitempty"`      // Default for routes[].no_search
-	Thinking       string `json:"thinking,omitempty"`       // Default for routes[].thinking (Responses translation pre-match)
-	ConvertOff2Low string `json:"convertOff2Low,omitempty"` // Default for every route-like object that accepts convertOff2Low
-
-	EnhanceSearch *EnhanceSearchConfig `json:"enhance_search,omitempty"` // Default direct-route enhance_search (object; a local object or null wins whole)
-
-	SummaryMode     bool   `json:"summary_mode,omitempty"`     // Default for search_fallback.summary_mode
-	SummaryThinking bool   `json:"summary_thinking,omitempty"` // Default for search_fallback.summary_thinking
-	SummaryLevel    string `json:"summary_level,omitempty"`    // Default for search_fallback.summary_level
-
-	ClaudeSearchThinking          string `json:"claudeSearchThinking,omitempty"`          // Default for matching claudeSearchThinking fields
-	ClaudeSearchSummary           string `json:"claudeSearchSummary,omitempty"`           // Default for matching claudeSearchSummary fields
-	NoBullshitOnEmptyClaudeSearch *bool  `json:"noBullshitOnEmptyClaudeSearch,omitempty"` // Default for matching empty-search guard fields
-
-	ClassifierThinking      string `json:"classifier_thinking,omitempty"`       // Default for classifier_route.classifier_thinking
-	ClassifierThinkingCC    string `json:"classifier_thinking_cc,omitempty"`    // Default for classifier_route.classifier_thinking_cc
-	ClassifierThinkingCodex string `json:"classifier_thinking_codex,omitempty"` // Default for classifier_route.classifier_thinking_codex
-
-	presence configPresence // JSON key presence captured after variable expansion
-}
 
 // Version is the build stamp, injected by build.sh via -ldflags "-X main.Version=...": "release vX.Y.Z.N" when
 // HEAD is exactly a version tag (CD tag builds), otherwise "beta <git-short>-<HHMM>"; bare go builds show "dev".
 var Version = "dev"
-
-var cfg atomic.Pointer[Config]
-
-// configFilePath is the config file path, set at main startup and reused by tray reload.
-// Rewritten by switchConfig on config switches, hence guarded by configMu for concurrent access.
-var configFilePath string
-
-// configMu guards concurrent access to configFilePath:
-// config switching (write) and reload/web config reads (read) can race; the lock avoids reading a half-updated path.
-var configMu sync.RWMutex
-
-// currentConfigPath returns the current config file path under lock.
-func currentConfigPath() string {
-	configMu.RLock()
-	defer configMu.RUnlock()
-	return configFilePath
-}
-
-// listConfigFiles scans the current config directory for .json files (excluding config.example.json)
-// and returns the sorted file names (no directories). Feeds the tray "switch config" submenu and the web dropdown.
-func listConfigFilesIn(dir string) []string {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var files []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(name, ".json") || name == "config.example.json" {
-			continue
-		}
-		files = append(files, name)
-	}
-	sort.Strings(files)
-	return files
-}
-
-// listConfigFiles lists every .json config in the current config directory (for the web "switch config" menu).
-func listConfigFiles() []string {
-	return listConfigFilesIn(filepath.Dir(currentConfigPath()))
-}
-
-// configWarnings holds the names of removed config keys present in the running config (empty = clean). Set at startup
-// and on every successful reload/switch; read by the tray poll (red icon + tooltip).
-var configWarnings atomic.Value // []string
-
-// setConfigWarnings replaces the removed-keys warning set (nil/empty clears it).
-func setConfigWarnings(keys []string) {
-	configWarnings.Store(keys)
-}
-
-// getConfigWarnings returns the removed-keys warning set (nil when clean).
-func getConfigWarnings() []string {
-	v, _ := configWarnings.Load().([]string)
-	return v
-}
-
-// loadConfig reads and parses the config file and applies defaults. Shared by main startup and tray reload.
-// Removed config keys are non-fatal warnings: the proxy starts and runs with them inert (old behavior is NOT emulated);
-// only malformed JSON or invalid values of live keys come back as errors.
-func loadConfig(path string) (*Config, []string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	return parseConfig(data)
-}
-
-// expandConfigVars resolves $NAME / ${NAME} references inside every JSON string value of the top-level config
-// object against the top-level "vars" object (whose own values expand too, one level — replacement text is never
-// re-scanned, so reference cycles are impossible). Object keys are never touched. A well-formed reference to an
-// undefined name fails with the config path; "vars" members must be strings.
-func expandConfigVars(top map[string]json.RawMessage) error {
-	final := map[string]string{}
-	if raw, ok := top["vars"]; ok {
-		base, err := varStringMap(raw)
-		if err != nil {
-			return err
-		}
-		if base != nil {
-			expanded, err := expandVarsInJSON(raw, "vars", func(name string) (string, bool) {
-				v, ok := base[name]
-				return v, ok
-			})
-			if err != nil {
-				return err
-			}
-			final, err = varStringMap(expanded) // Values already validated as strings; cannot fail
-			if err != nil {
-				return err
-			}
-		}
-	}
-	lookup := func(name string) (string, bool) {
-		v, ok := final[name]
-		return v, ok
-	}
-	return expandVarsInMap(top, "", lookup)
-}
-
-// varStringMap decodes a "vars" object into name -> value. Returns nil for an absent/null object; anything that
-// is not an object of strings is an error naming the offending member.
-func varStringMap(raw json.RawMessage) (map[string]string, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return nil, nil
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(trimmed, &m); err != nil {
-		return nil, fmt.Errorf("vars must be an object of string values: %v", err)
-	}
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		var s string
-		if err := json.Unmarshal(v, &s); err != nil {
-			return nil, fmt.Errorf("vars.%s must be a string", k)
-		}
-		out[k] = s
-	}
-	return out, nil
-}
-
-// expandVarsInMap expands every value of m in place; path is the dotted/bracketed location prefix for errors.
-func expandVarsInMap(m map[string]json.RawMessage, path string, lookup func(string) (string, bool)) error {
-	for k, v := range m {
-		ev, err := expandVarsInJSON(v, joinConfigPath(path, k), lookup)
-		if err != nil {
-			return err
-		}
-		m[k] = ev
-	}
-	return nil
-}
-
-// joinConfigPath appends a key to a dotted/bracketed config path ("routes" -> "routes[0]" -> "routes[0].api").
-func joinConfigPath(path, key string) string {
-	if path == "" {
-		return key
-	}
-	return path + "." + key
-}
-
-// expandVarsInJSON expands references in every string value reachable from node (object values and array
-// elements). Non-string scalars pass through as their original bytes; containers holding them re-marshal with
-// each RawMessage embedded verbatim, so numeric text is never round-tripped.
-func expandVarsInJSON(node json.RawMessage, path string, lookup func(string) (string, bool)) (json.RawMessage, error) {
-	trimmed := bytes.TrimSpace(node)
-	if len(trimmed) == 0 {
-		return node, nil
-	}
-	switch trimmed[0] {
-	case '"':
-		var s string
-		if err := json.Unmarshal(trimmed, &s); err != nil {
-			return node, nil
-		}
-		out, err := expandVarRefs(s, path, lookup)
-		if err != nil {
-			return nil, err
-		}
-		b, _ := json.Marshal(out)
-		return json.RawMessage(b), nil
-	case '{':
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal(trimmed, &m); err != nil {
-			return node, nil
-		}
-		if err := expandVarsInMap(m, path, lookup); err != nil {
-			return nil, err
-		}
-		b, _ := json.Marshal(m)
-		return json.RawMessage(b), nil
-	case '[':
-		var a []json.RawMessage
-		if err := json.Unmarshal(trimmed, &a); err != nil {
-			return node, nil
-		}
-		for i, v := range a {
-			ev, err := expandVarsInJSON(v, fmt.Sprintf("%s[%d]", path, i), lookup)
-			if err != nil {
-				return nil, err
-			}
-			a[i] = ev
-		}
-		b, _ := json.Marshal(a)
-		return json.RawMessage(b), nil
-	default:
-		return node, nil
-	}
-}
-
-// expandVarRefs replaces $NAME and ${NAME} references using lookup. A name is ASCII letters/digits/underscore
-// starting with a letter or underscore. '$' not introducing a well-formed reference stays literal; a well-formed
-// reference to an undefined name is an error naming the config path.
-func expandVarRefs(s, path string, lookup func(string) (string, bool)) (string, error) {
-	var b strings.Builder
-	b.Grow(len(s))
-	for i := 0; i < len(s); {
-		if s[i] != '$' || i+1 >= len(s) {
-			b.WriteByte(s[i])
-			i++
-			continue
-		}
-		var name string
-		var n int // length of the whole "$name" token consumed
-		if s[i+1] == '{' {
-			rest := s[i+2:]
-			end := strings.IndexByte(rest, '}')
-			if end < 0 {
-				b.WriteByte(s[i])
-				i++
-				continue // Unclosed brace: literal
-			}
-			if !isVarName(rest[:end]) {
-				b.WriteByte(s[i])
-				i++
-				continue // Malformed braced name: literal
-			}
-			name, n = rest[:end], end+3
-		} else {
-			j := i + 1
-			for j < len(s) && isVarNameChar(s[j]) {
-				j++
-			}
-			if j == i+1 || !isVarNameStart(s[i+1]) {
-				b.WriteByte(s[i])
-				i++
-				continue // Not a well-formed reference: literal
-			}
-			name, n = s[i+1:j], j-i
-		}
-		v, ok := lookup(name)
-		if !ok {
-			return "", fmt.Errorf("undefined variable %q in %s", name, path)
-		}
-		b.WriteString(v)
-		i += n
-	}
-	return b.String(), nil
-}
-
-func isVarNameStart(c byte) bool {
-	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-}
-
-func isVarNameChar(c byte) bool {
-	return isVarNameStart(c) || (c >= '0' && c <= '9')
-}
-
-func isVarName(s string) bool {
-	if s == "" || !isVarNameStart(s[0]) {
-		return false
-	}
-	for i := 1; i < len(s); i++ {
-		if !isVarNameChar(s[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-// expandRoutePatterns desugars routes[] entries whose pattern is an array into N adjacent copies (one pattern per
-// copy, every other field identical): an array entry is exactly equivalent to hand-written duplicate routes, so all
-// matchers, cache anchors, and validations keep seeing plain string patterns. Runs on the raw JSON tree after vars
-// expansion, so $VAR references inside pattern arrays are already resolved. Single-string, missing, and null patterns
-// pass through untouched; an empty array or a non-string member is an error naming the route (1-based).
-func expandRoutePatterns(top map[string]json.RawMessage) error {
-	raw, ok := top["routes"]
-	if !ok {
-		return nil
-	}
-	var entries []json.RawMessage
-	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil // Not an array: leave it for the final struct decode to report
-	}
-	out := make([]json.RawMessage, 0, len(entries))
-	for i, entry := range entries {
-		trimmed := bytes.TrimSpace(entry)
-		if len(trimmed) == 0 || trimmed[0] != '{' {
-			out = append(out, entry)
-			continue
-		}
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal(trimmed, &m); err != nil {
-			out = append(out, entry)
-			continue
-		}
-		pr, ok := m["pattern"]
-		if !ok {
-			out = append(out, entry)
-			continue
-		}
-		pr = bytes.TrimSpace(pr)
-		if len(pr) == 0 || pr[0] != '[' {
-			out = append(out, entry) // String / null / anything non-array: keep today's behavior
-			continue
-		}
-		var pats []json.RawMessage
-		if err := json.Unmarshal(pr, &pats); err != nil {
-			out = append(out, entry)
-			continue
-		}
-		if len(pats) == 0 {
-			return fmt.Errorf("route #%d pattern array is empty", i+1)
-		}
-		for _, p := range pats {
-			pt := bytes.TrimSpace(p)
-			// First-byte check instead of unmarshaling into a string: Go's unmarshal of null into a string
-			// succeeds silently, which would let [null] through.
-			if len(pt) == 0 || pt[0] != '"' {
-				return fmt.Errorf("route #%d pattern must be a string or an array of strings", i+1)
-			}
-			cp := make(map[string]json.RawMessage, len(m))
-			for k, v := range m {
-				cp[k] = v
-			}
-			cp["pattern"] = p
-			b, err := json.Marshal(cp)
-			if err != nil {
-				return err
-			}
-			out = append(out, b)
-		}
-	}
-	b, err := json.Marshal(out)
-	if err != nil {
-		return err
-	}
-	top["routes"] = b
-	return nil
-}
-
-// removedConfigKeys lists top-level config keys removed in this version, each with its migration hint. A config
-// containing them still loads and runs (the removed keys stay inert — their old behavior is NOT emulated); they surface
-// as warnings (startup log lines naming the key, red tray icon; the console Docs describe the migration). Only the web
-// save handler rejects them outright (HTTP 400), so a removed key never gets written back to disk from the console.
-var removedConfigKeys = []struct{ key, hint string }{
-	{"classifier_thinking_disabled", `set "classifier_thinking": "off" inside classifier_route instead`},
-	{"classifier_max_tokens", `max_tokens is no longer modified on classifier requests`},
-	{"translateNone2Low", `set "convertOff2Low": "translate" or "all" on routes[]/fast_route/multimodal_fallback/search_fallback entries instead`},
-	{"search_debug_dir", `search-summary two-step mode was removed; search requests are ordinary forwarded streams, fully inspectable in the console`},
-}
-
-// removedKeyWarningEN renders the stable English warning line for a removed key (startup log, web save rejection).
-func removedKeyWarningEN(key string) string {
-	for _, rk := range removedConfigKeys {
-		if rk.key == key {
-			return fmt.Sprintf("config key %q was removed: %s", key, rk.hint)
-		}
-	}
-	return fmt.Sprintf("config key %q was removed", key)
-}
-
-// parseConfig parses and validates config bytes (shared by loadConfig and the web save probe). Removed keys come back as
-// non-fatal warnings (the config still loads; removed keys are simply inert), while malformed JSON and invalid values of
-// live keys come back as errors. Defaults are applied and caveats logged.
-func parseConfig(data []byte) (*Config, []string, error) {
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(data, &top); err != nil {
-		return nil, nil, err
-	}
-	var warnings []string
-	for _, rk := range removedConfigKeys {
-		if _, ok := top[rk.key]; ok {
-			warnings = append(warnings, rk.key)
-		}
-	}
-	// Resolve $VAR references before struct decoding: the in-memory Config carries final values while the file
-	// (and the web console, which edits raw text) keeps the references verbatim.
-	if err := expandConfigVars(top); err != nil {
-		return nil, nil, err
-	}
-	if err := expandRoutePatterns(top); err != nil {
-		return nil, nil, err
-	}
-	// lazyApply and its nested enhance_search are the only strictly decoded objects: a typo there would
-	// silently disable a global default. Decode it separately so the error names the exact path.
-	var lazyApply *LazyApplyConfig
-	var lazyApplyPresence configPresence
-	if raw, ok := top["lazyApply"]; ok {
-		var err error
-		lazyApply, lazyApplyPresence, err = decodeLazyApply(raw)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	full, err := json.Marshal(top)
-	if err != nil {
-		return nil, nil, err
-	}
-	var c Config
-	if err := json.Unmarshal(full, &c); err != nil {
-		return nil, nil, err
-	}
-	if lazyApply != nil {
-		lazyApply.presence = lazyApplyPresence
-	}
-	c.LazyApply = lazyApply
-	attachConfigPresence(top, &c)
-	if err := validateConfigEnums(&c); err != nil {
-		return nil, nil, err
-	}
-	if c.UpstreamHeaderTimeoutSec <= 0 {
-		c.UpstreamHeaderTimeoutSec = 70 // Default 70s: resend internally if the upstream's first byte times out
-	}
-	if c.PingIntervalSec <= 0 {
-		c.PingIntervalSec = 5 // Default 5s: SSE ping keep-alive interval sent to the client during 429 retries
-	}
-	if c.RecentSampleWindow <= 0 {
-		c.RecentSampleWindow = 20 // Default: first-token latency and token/s over the last 20 requests
-	}
-	if c.Upstream == "" && !hasCatchAllRoute(c.Routes) {
-		log.Printf("[config] warning: upstream is empty and routes has no pattern:\"*\" catch-all; unmatched requests will get 502")
-	}
-	for i := range c.Routes {
-		if isReservedRoutePattern(c.Routes[i].Pattern) {
-			log.Printf("[config] warning: route #%d pattern exactly matches reserved name %q (Codex menu reserved names: * catch-all=Fallback, fast lane=fast_route); this route is disabled, please rename it", i+1, c.Routes[i].Pattern)
-		}
-	}
-	return &c, warnings, nil
-}
-
-// keysPresence turns a decoded JSON object into key-presence metadata. A nil map (JSON null) becomes an
-// empty non-nil map, so "present but no keys" stays distinguishable from "no metadata at all".
-func keysPresence(m map[string]json.RawMessage) configPresence {
-	p := make(configPresence, len(m))
-	for k := range m {
-		p[k] = struct{}{}
-	}
-	return p
-}
-
-// decodeLazyApply strictly decodes the top-level lazyApply object and its nested enhance_search object.
-// Unknown fields (including connection fields such as url/api/model/pattern/url_response_api) are rejected
-// with a path-specific error; the rest of the configuration keeps its existing tolerant decoding.
-func decodeLazyApply(raw json.RawMessage) (*LazyApplyConfig, configPresence, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return nil, nil, nil
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(trimmed, &m); err != nil {
-		return nil, nil, fmt.Errorf("lazyApply: %w", err)
-	}
-	if er, ok := m["enhance_search"]; ok {
-		if et := bytes.TrimSpace(er); len(et) > 0 && !bytes.Equal(et, []byte("null")) {
-			var es EnhanceSearchConfig
-			dec := json.NewDecoder(bytes.NewReader(et))
-			dec.DisallowUnknownFields()
-			if err := dec.Decode(&es); err != nil {
-				return nil, nil, fmt.Errorf("lazyApply.enhance_search: %w", err)
-			}
-		}
-	}
-	var la LazyApplyConfig
-	dec := json.NewDecoder(bytes.NewReader(trimmed))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&la); err != nil {
-		return nil, nil, fmt.Errorf("lazyApply: %w", err)
-	}
-	return &la, keysPresence(m), nil
-}
-
-// attachConfigPresence copies the raw expanded JSON's key presence onto the typed configuration objects.
-// It runs after both the variable expansion and the route-pattern-array expansion, so every expanded route
-// receives the same presence as its source object.
-func attachConfigPresence(top map[string]json.RawMessage, c *Config) {
-	attach := func(key string, dst *configPresence) {
-		raw, ok := top[key]
-		if !ok {
-			return
-		}
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &m); err != nil {
-			return
-		}
-		*dst = keysPresence(m)
-	}
-	if raw, ok := top["routes"]; ok {
-		var entries []json.RawMessage
-		if json.Unmarshal(raw, &entries) == nil {
-			for i := range c.Routes {
-				if i >= len(entries) {
-					break
-				}
-				var m map[string]json.RawMessage
-				if err := json.Unmarshal(entries[i], &m); err != nil {
-					c.Routes[i].presence = configPresence{}
-					continue
-				}
-				c.Routes[i].presence = keysPresence(m)
-			}
-		}
-	}
-	if c.ClassifierRoute != nil {
-		attach("classifier_route", &c.ClassifierRoute.presence)
-	}
-	if c.FastRoute != nil {
-		attach("fast_route", &c.FastRoute.presence)
-	}
-	if c.MultimodalFallback != nil {
-		attach("multimodal_fallback", &c.MultimodalFallback.presence)
-	}
-	if c.SearchFallback != nil {
-		attach("search_fallback", &c.SearchFallback.presence)
-	}
-}
-
-// validateConfigEnums rejects config values outside their supported sets (route thinking shapes, classifier thinking
-// policy, convertOff2Low scope), so a typo fails loudly at load/save time instead of silently doing nothing.
-func validateConfigEnums(c *Config) error {
-	if err := validateLazyApplyEnums(c.LazyApply); err != nil {
-		return err
-	}
-	if cr := c.ClassifierRoute; cr != nil {
-		switch cr.ClassifierThinking {
-		case "", "off", "low":
-		default:
-			return fmt.Errorf("classifier_route has invalid classifier_thinking value %q: only \"off\" and \"low\" are supported (unset = leave the request's thinking untouched)", cr.ClassifierThinking)
-		}
-		switch cr.ClassifierThinkingCC {
-		case "", "off", "low":
-		default:
-			return fmt.Errorf("classifier_route has invalid classifier_thinking_cc value %q: only \"off\" and \"low\" are supported (unset = fall back to classifier_thinking)", cr.ClassifierThinkingCC)
-		}
-		switch cr.ClassifierThinkingCodex {
-		case "", "off", "low":
-		default:
-			return fmt.Errorf("classifier_route has invalid classifier_thinking_codex value %q: only \"off\" and \"low\" are supported (unset = fall back to classifier_thinking)", cr.ClassifierThinkingCodex)
-		}
-	}
-	checkOff2Low := func(owner, v string) error {
-		switch v {
-		case "", "translate", "all":
-			return nil
-		default:
-			return fmt.Errorf("%s has invalid convertOff2Low value %q: only \"translate\" / \"all\" are supported (unset = off)", owner, v)
-		}
-	}
-	for i := range c.Routes {
-		switch c.Routes[i].Thinking {
-		case "", "auto", "adaptive", "budget":
-		default:
-			return fmt.Errorf("route #%d (pattern %q) has invalid thinking value %q: only auto / adaptive / budget are supported", i+1, c.Routes[i].Pattern, c.Routes[i].Thinking)
-		}
-		switch c.Routes[i].ClaudeSearchThinking {
-		case "", "off", "low", "mid", "high", "max":
-		default:
-			return fmt.Errorf("route #%d (pattern %q) has invalid claudeSearchThinking value %q: only off / low / mid / high / max are supported (unset = leave the request's thinking untouched)", i+1, c.Routes[i].Pattern, c.Routes[i].ClaudeSearchThinking)
-		}
-		switch c.Routes[i].ClaudeSearchSummary {
-		case "", "noForce", "forceLow", "forceMid", "forceHigh":
-		default:
-			return fmt.Errorf("route #%d (pattern %q) has invalid claudeSearchSummary value %q: only noForce / forceLow / forceMid / forceHigh are supported (unset = no summary-prompt injection)", i+1, c.Routes[i].Pattern, c.Routes[i].ClaudeSearchSummary)
-		}
-		if err := checkOff2Low(fmt.Sprintf("route #%d (pattern %q)", i+1, c.Routes[i].Pattern), c.Routes[i].ConvertOff2Low); err != nil {
-			return err
-		}
-	}
-	if c.FastRoute != nil {
-		if err := checkOff2Low("fast_route", c.FastRoute.ConvertOff2Low); err != nil {
-			return err
-		}
-	}
-	if c.MultimodalFallback != nil {
-		if err := checkOff2Low("multimodal_fallback", c.MultimodalFallback.ConvertOff2Low); err != nil {
-			return err
-		}
-	}
-	if c.SearchFallback != nil {
-		if err := checkOff2Low("search_fallback", c.SearchFallback.ConvertOff2Low); err != nil {
-			return err
-		}
-		switch c.SearchFallback.Thinking {
-		case "", "auto", "adaptive", "budget":
-		default:
-			return fmt.Errorf("search_fallback has invalid thinking value %q: only auto / adaptive / budget are supported", c.SearchFallback.Thinking)
-		}
-		switch c.SearchFallback.ClaudeSearchThinking {
-		case "", "off", "low", "mid", "high", "max":
-		default:
-			return fmt.Errorf("search_fallback has invalid claudeSearchThinking value %q: only off / low / mid / high / max are supported (unset = leave the request's thinking untouched)", c.SearchFallback.ClaudeSearchThinking)
-		}
-		switch c.SearchFallback.ClaudeSearchSummary {
-		case "", "noForce", "forceLow", "forceMid", "forceHigh":
-		default:
-			return fmt.Errorf("search_fallback has invalid claudeSearchSummary value %q: only noForce / forceLow / forceMid / forceHigh are supported (unset = no summary-prompt injection)", c.SearchFallback.ClaudeSearchSummary)
-		}
-	}
-	return nil
-}
-
-// validateDefaultSummaryLevel accepts exactly the levels summaryLevelConfig consumes (including its aliases).
-func validateDefaultSummaryLevel(owner, level string) error {
-	switch level {
-	case "", "low", "mid", "medium", "high", "max", "full":
-		return nil
-	default:
-		return fmt.Errorf("%s has invalid summary_level value %q: only low / mid / medium / high / max / full are supported", owner, level)
-	}
-}
-
-// validateLazyApplyEnums validates every enum in lazyApply, including the nested enhance_search object.
-func validateLazyApplyEnums(la *LazyApplyConfig) error {
-	if la == nil {
-		return nil
-	}
-	switch la.Thinking {
-	case "", "auto", "adaptive", "budget":
-	default:
-		return fmt.Errorf("lazyApply has invalid thinking value %q: only auto / adaptive / budget are supported", la.Thinking)
-	}
-	switch la.ConvertOff2Low {
-	case "", "translate", "all":
-	default:
-		return fmt.Errorf("lazyApply has invalid convertOff2Low value %q: only \"translate\" / \"all\" are supported (unset = off)", la.ConvertOff2Low)
-	}
-	switch la.ClaudeSearchThinking {
-	case "", "off", "low", "mid", "high", "max":
-	default:
-		return fmt.Errorf("lazyApply has invalid claudeSearchThinking value %q: only off / low / mid / high / max are supported", la.ClaudeSearchThinking)
-	}
-	switch la.ClaudeSearchSummary {
-	case "", "noForce", "forceLow", "forceMid", "forceHigh":
-	default:
-		return fmt.Errorf("lazyApply has invalid claudeSearchSummary value %q: only noForce / forceLow / forceMid / forceHigh are supported", la.ClaudeSearchSummary)
-	}
-	for _, f := range []struct{ name, value string }{
-		{"classifier_thinking", la.ClassifierThinking},
-		{"classifier_thinking_cc", la.ClassifierThinkingCC},
-		{"classifier_thinking_codex", la.ClassifierThinkingCodex},
-	} {
-		switch f.value {
-		case "", "off", "low":
-		default:
-			return fmt.Errorf("lazyApply has invalid %s value %q: only \"off\" and \"low\" are supported", f.name, f.value)
-		}
-	}
-	if err := validateDefaultSummaryLevel("lazyApply.summary_level", la.SummaryLevel); err != nil {
-		return err
-	}
-	if la.EnhanceSearch != nil {
-		if err := validateDefaultSummaryLevel("lazyApply.enhance_search.summary_level", la.EnhanceSearch.SummaryLevel); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 // defaultCacheTTL is the fixed protection window for finished-stream trimming: the newest row of each anchor key
 // cannot be evicted by finishedCap within 5 minutes of stream start. The upstream cache lifetime is empirically
 // dynamic (see cache observations), so there is no configurable "TTL" — the cache_time option is gone,
 // leaving this one fixed window, enough to cover typical conversation pacing.
 const defaultCacheTTL = 5 * time.Minute
-
-// configExampleBytes is the embedded default config template, written to the user config directory on first run.
-//
-//go:embed config.example.json
-var configExampleBytes []byte
 
 // codexSetupPS1 / codexSetupSH are the embedded Codex one-click setup script templates (Windows / macOS·Linux),
 // served via /__codexsetup.ps1 and /__codexsetup.sh: the server bakes their BAKED anchors per query params
@@ -877,10 +50,6 @@ var codexSetupPS1 []byte
 //go:embed codex-setup.sh
 var codexSetupSH []byte
 
-// activeConfigStateFile records the last selected routing config's file name (basename), stored next to the routing configs.
-// A .txt extension (not .json) keeps it out of listConfigFiles results and avoids clashing with user-created .json files.
-const activeConfigStateFile = "active-config.txt"
-
 // classifierSystemPrefix is the fixed system-field prefix of Claude Code classifier (safety check) requests.
 // The proxy uses it to recognize classifier requests, route them to a cheap model, and disable thinking. Hardcoded: a client implementation detail that users shouldn't configure.
 const classifierSystemPrefix = "You are a security monitor"
@@ -889,115 +58,29 @@ const classifierSystemPrefix = "You are a security monitor"
 // Codex sends it as the Responses API's "instructions" field; the Responses->Anthropic translation maps it to system, so the same prefix-match mechanism recognizes it. Hardcoded: a client implementation detail that users shouldn't configure.
 const codexGuardianSystemPrefix = "You are judging one planned coding-agent action."
 
-// readActiveConfigState reads the state file in the config directory and returns the full path of the last selected config it records.
-// Returns an empty string when the state file is missing, empty, or points to a file that no longer exists; the caller falls back to the default config.json.
-func readActiveConfigState(dir string) string {
-	data, err := os.ReadFile(filepath.Join(dir, activeConfigStateFile))
-	if err != nil {
-		return ""
-	}
-	name := strings.TrimSpace(string(data))
-	if name == "" {
-		return ""
-	}
-	full := filepath.Join(dir, name)
-	if _, err := os.Stat(full); err != nil {
-		return ""
-	}
-	return full
-}
-
-// writeActiveConfigState writes the given config's file name (basename) into the state file in its directory, for restore on next launch.
-// Write failures are only logged; the switch itself is unaffected.
-func writeActiveConfigState(path string) {
-	statePath := filepath.Join(filepath.Dir(path), activeConfigStateFile)
-	if err := os.WriteFile(statePath, []byte(filepath.Base(path)), 0644); err != nil {
-		log.Printf("[config] failed to write state file: %v", err)
-	}
-}
-
-// programSettingsFile is the dedicated carrier of program-level settings: preferences like the UI language that
-// have nothing to do with any upstream stay separate from routing config and never enter config*.json (legacy versions
-// wrote ui_lang into the config file; since migrated out). The file lives in the current config directory, same family
-// as active-config.txt; line-based key=value, lines starting with # are comments, extensible.
-const programSettingsFile = "program-settings.txt"
-
-// programSettingsPath returns the full path of the program-settings file (follows the current config directory).
-func programSettingsPath() string {
-	return filepath.Join(filepath.Dir(currentConfigPath()), programSettingsFile)
-}
-
-// readProgramSetting returns the value of key in program settings (trimmed); missing file or key returns "".
-func readProgramSetting(key string) string {
-	data, err := os.ReadFile(programSettingsPath())
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if k, v, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == key {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
-}
-
-// writeProgramSetting sets (non-empty value) or deletes (empty value) a program-settings key.
-// All other lines (comments, order, formatting) are preserved byte-for-byte; a missing key with a non-empty value is appended at the end.
-// Always LF line endings with a trailing newline; write failures are returned for the caller to surface.
-func writeProgramSetting(key, value string) error {
-	data, _ := os.ReadFile(programSettingsPath())
-	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-	out := make([]string, 0, len(lines)+2)
-	replaced := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-			if k, _, ok := strings.Cut(trimmed, "="); ok && strings.TrimSpace(k) == key {
-				replaced = true
-				if value != "" {
-					out = append(out, key+"="+value)
-				}
-				continue // value empty: delete the whole line
-			}
-		}
-		out = append(out, line)
-	}
-	if !replaced && value != "" {
-		for len(out) > 0 && out[len(out)-1] == "" { // Strip trailing blank lines before appending, so the key doesn't drag blank lines along
-			out = out[:len(out)-1]
-		}
-		out = append(out, key+"="+value, "")
-	}
-	return os.WriteFile(programSettingsPath(), []byte(strings.Join(out, "\n")), 0644)
-}
-
 // resolveProgramUILang determines the web console UI language at startup: program-settings.txt's ui-lang
 // wins; otherwise a one-time migration moves any legacy ui_lang left in config files into program-settings.txt
 // and deletes it from the config (setTopLevelJSONValue text-level surgery, every other byte untouched); otherwise follow the OS.
 // After migration, no code path writes to existing config files programmatically (the config editor saves the user's verbatim text).
 func resolveProgramUILang() {
-	if l := readProgramSetting("ui-lang"); l == "zh" || l == "en" {
+	if l := config.ReadProgramSetting("ui-lang"); l == "zh" || l == "en" {
 		platform.ApplyUILang(l)
 		return
 	}
-	if data, err := os.ReadFile(currentConfigPath()); err == nil {
+	if data, err := os.ReadFile(config.CurrentConfigPath()); err == nil {
 		var probe struct {
 			UILang string `json:"ui_lang"` // Legacy field: only used for migration; the Config struct no longer carries it
 		}
 		if json.Unmarshal(data, &probe) == nil && (probe.UILang == "zh" || probe.UILang == "en") {
-			if err := writeProgramSetting("ui-lang", probe.UILang); err != nil {
-				log.Printf("[lang] failed to write %s: %v", programSettingsFile, err)
+			if err := config.WriteProgramSetting("ui-lang", probe.UILang); err != nil {
+				log.Printf("[lang] failed to write %s: %v", config.ProgramSettingsFile, err)
 			}
 			if out, ok := setTopLevelJSONValue(data, "ui_lang", nil); ok {
-				if err := os.WriteFile(currentConfigPath(), out, 0644); err != nil {
-					log.Printf("[lang] failed to remove migrated ui_lang from %s: %v", filepath.Base(currentConfigPath()), err)
+				if err := os.WriteFile(config.CurrentConfigPath(), out, 0644); err != nil {
+					log.Printf("[lang] failed to remove migrated ui_lang from %s: %v", filepath.Base(config.CurrentConfigPath()), err)
 				}
 			}
-			log.Printf("[lang] migrated ui_lang=%q from %s to %s", probe.UILang, filepath.Base(currentConfigPath()), programSettingsFile)
+			log.Printf("[lang] migrated ui_lang=%q from %s to %s", probe.UILang, filepath.Base(config.CurrentConfigPath()), config.ProgramSettingsFile)
 			platform.ApplyUILang(probe.UILang)
 			return
 		}
@@ -1005,62 +88,10 @@ func resolveProgramUILang() {
 	platform.ApplyUILang("")
 }
 
-// resolveConfigPath decides the config file path, by priority:
-//  1. -config explicitly given (highest, used as-is)
-//  2. ./config.json exists (terminal running in the project directory)
-//  3. user config directory proxy429/ (.app double-click, post-install runs)
-//
-// Rule 3 lets a double-clicked macOS .app find its config: a .app's cwd is / with no ./config.json,
-// so it lands on ~/Library/Application Support/proxy429/ (macOS),
-// ~/.config/proxy429/ (Linux), %AppData%/proxy429/ (Windows).
-//
-// Once the directory is settled, restore order:
-//   - the config recorded in active-config.txt still exists → restore it;
-//   - else any .json config already in the directory → use the first (alphabetical), don't auto-generate config.json;
-//   - else first run: no config in the directory → write the embedded default template as config.json.
-//
-// This way users who never used the name config.json (only their own file names) won't find a surprise standard template after a restart.
-func resolveConfigPath(flagPath string) string {
-	if flagPath != "" {
-		return flagPath
-	}
-	var dir, defaultPath string
-	if _, err := os.Stat("config.json"); err == nil {
-		dir = "."
-		defaultPath = "config.json"
-	} else {
-		ud, err := os.UserConfigDir()
-		if err != nil || ud == "" {
-			return "config.json"
-		}
-		dir = filepath.Join(ud, "proxy429")
-		defaultPath = filepath.Join(dir, "config.json")
-	}
-	// Restore the last selected config (if the file still exists), so a restart returns to the config in use at shutdown.
-	if active := readActiveConfigState(dir); active != "" {
-		return active
-	}
-	// The directory already holds other config files (user runs non-config.json names) — don't auto-generate config.json,
-	// fall back to the first config in the directory (alphabetical).
-	if files := listConfigFilesIn(dir); len(files) > 0 {
-		return filepath.Join(dir, files[0])
-	}
-	// First run: no config in the directory — create it and write the embedded default template, avoiding a config-less startup failure after a .app double-click.
-	// The user then sets their own upstream/key in the web "Config" tab.
-	if dir != "." {
-		if mkErr := os.MkdirAll(dir, 0755); mkErr == nil {
-			if wErr := os.WriteFile(defaultPath, configExampleBytes, 0644); wErr == nil {
-				log.Printf("[config] first run; default config created: %s", defaultPath)
-			}
-		}
-	}
-	return defaultPath
-}
-
 // clearStats clears cumulative stats, latency/throughput samples, and the "recently finished streams" list (including each one's archived pass-through content),
 // and rebuilds sample capacity per the given config's RecentSampleWindow. In-flight streams and stream numbering are kept (avoids id collisions).
 // Called only by the web "clear stats" button (switches/reloads don't clear stats; stats persist across configs).
-func clearStats(c *Config) {
+func clearStats(c *config.Config) {
 	stats.mu.Lock()
 	stats.cacheRead = 0
 	stats.cacheCreation = 0
@@ -1089,36 +120,34 @@ func clearStats(c *Config) {
 	_ = heatSave()
 }
 
-// reloadConfig re-reads the current config file and atomically swaps the global cfg, without clearing stats (only the "clear stats" button clears).
-// On failure the global cfg keeps the old config. Removed keys in the reloaded file succeed but refresh the warning set (red tray icon).
+// reloadConfig re-reads the current config file and atomically swaps the active config, without clearing stats (only the "clear stats" button clears).
+// On failure the active config keeps its old value. Removed keys in the reloaded file succeed but refresh the warning set (red tray icon).
 func reloadConfig() error {
-	c, warns, err := loadConfig(currentConfigPath())
+	c, warns, err := config.LoadConfig(config.CurrentConfigPath())
 	if err != nil {
 		log.Printf("[reload] failed: %v", err)
 		return err
 	}
-	cfg.Store(c)
-	setConfigWarnings(warns)
+	config.Store(c)
+	config.SetConfigWarnings(warns)
 	reconcileResponsesServer(c.ResponsesListen) // Responses port starts/stops dynamically with config reload
 	log.Printf("[reload] config reloaded: http://%s -> %s (max retries %d, classifier thinking: cc=%q codex=%q, removed-key warnings=%d)",
-		c.Listen, c.Upstream, c.MaxRetries, classifierThinkingModeFor(c, classifierCC), classifierThinkingModeFor(c, classifierCodex), len(warns))
+		c.Listen, c.Upstream, c.MaxRetries, config.ClassifierThinkingModeFor(c, config.ClassifierCC), config.ClassifierThinkingModeFor(c, config.ClassifierCodex), len(warns))
 	return nil
 }
 
-// switchConfig switches to the given config file with immediate effect: after loading succeeds, configFilePath + cfg.Store are updated.
-// Stats are NOT cleared (they persist across configs; the "clear stats" button clears independently). On failure configFilePath stays and the old config keeps running.
+// switchConfig switches to the given config file with immediate effect: after loading succeeds, the config path and active config are updated.
+// Stats are NOT cleared (they persist across configs; the "clear stats" button clears independently). On failure the config path and active config stay unchanged.
 func switchConfig(newPath string) error {
-	c, warns, err := loadConfig(newPath)
+	c, warns, err := config.LoadConfig(newPath)
 	if err != nil {
 		log.Printf("[switch] failed to load %s: %v", newPath, err)
 		return err
 	}
-	configMu.Lock()
-	configFilePath = newPath
-	configMu.Unlock()
-	writeActiveConfigState(newPath)
-	cfg.Store(c)
-	setConfigWarnings(warns)
+	config.SetCurrentPath(newPath)
+	config.WriteActiveConfigState(newPath)
+	config.Store(c)
+	config.SetConfigWarnings(warns)
 	reconcileResponsesServer(c.ResponsesListen) // Responses port starts/stops dynamically with the config
 	// Notify the tray to rebuild the "switch config" submenu and refresh checkmarks (web-initiated switches don't go through tray clicks)
 	notifyTrayCfgChanged()
@@ -1243,10 +272,10 @@ type heatFile struct {
 }
 
 // heatPath returns the heatmap.dat path beside the active config, or "" when no config path is set (tests).
-// A .dat extension (not .json) keeps it out of listConfigFiles results — the same trick as the
+// A .dat extension (not .json) keeps it out of config.ListConfigFiles results — the same trick as the
 // active-config state file; a .json sibling would show up in the tray and web config switchers.
 func heatPath() string {
-	p := currentConfigPath()
+	p := config.CurrentConfigPath()
 	if p == "" {
 		return ""
 	}
@@ -2961,7 +1990,7 @@ func parseNonStreamUsage(content []byte) (input, cacheRead, cacheCreation, outpu
 
 // shouldRetry reports whether the given status code is on the retry list.
 func shouldRetry(code int) bool {
-	c := cfg.Load()
+	c := config.Current()
 	for _, rc := range c.RetryStatusCodes {
 		if rc == code {
 			return true
@@ -2973,7 +2002,7 @@ func shouldRetry(code int) bool {
 // computeBackoff computes the wait before this retry:
 // prefer the upstream's Retry-After header (seconds), otherwise exponential backoff + jitter.
 func computeBackoff(resp *http.Response, attempt int) time.Duration {
-	c := cfg.Load()
+	c := config.Current()
 	if c.RespectRetryAfter && resp != nil {
 		if ra := resp.Header.Get("Retry-After"); ra != "" {
 			if secs, err := strconv.Atoi(ra); err == nil {
@@ -3522,80 +2551,31 @@ func disableThinkingInBody(body []byte) ([]byte, bool) {
 	return setTopLevelJSONValue(nb, "output_config", nil)
 }
 
-// classifierSource identifies which client's classifier signature a request matched.
-type classifierSource int
-
-const (
-	classifierNone  classifierSource = iota // No classifier signature
-	classifierCC                            // Claude Code safety check ("You are a security monitor")
-	classifierCodex                         // Codex guardian approval assessment ("You are judging one planned coding-agent action.")
-)
-
 // detectClassifier reports which classifier signature the body's system field matches (prefix at the very start of the system text).
 // A bytes.Contains pre-filter keeps normal requests (without either prefix substring) away from JSON parsing — near-zero cost.
 // Codex's guardian prefix arrives via the Responses port's instructions->system mapping, so this one check covers both ports.
-func detectClassifier(body []byte) classifierSource {
+func detectClassifier(body []byte) config.ClassifierSource {
 	hasCC := bytes.Contains(body, []byte(classifierSystemPrefix))
 	hasCodex := bytes.Contains(body, []byte(codexGuardianSystemPrefix))
 	if !hasCC && !hasCodex {
-		return classifierNone
+		return config.ClassifierNone
 	}
 	spans, ok := locateTopFields(body)
 	if !ok {
-		return classifierNone
+		return config.ClassifierNone
 	}
 	if hasCC && classifierSystemMatches(body, spans, classifierSystemPrefix) {
-		return classifierCC
+		return config.ClassifierCC
 	}
 	if hasCodex && classifierSystemMatches(body, spans, codexGuardianSystemPrefix) {
-		return classifierCodex
+		return config.ClassifierCodex
 	}
-	return classifierNone
-}
-
-// classifierThinkingModeFor resolves the effective thinking policy for a classifier source:
-// the per-source override (classifier_thinking_cc / classifier_thinking_codex) wins;
-// unset falls back to the shared classifier_thinking; "" = the request's thinking goes through untouched.
-func classifierThinkingModeFor(c *Config, kind classifierSource) string {
-	if c == nil || c.ClassifierRoute == nil {
-		return ""
-	}
-	cr := c.ClassifierRoute
-	la := lazyApplyFor(c, cr.NoLazyApply)
-	// Resolve each field independently: explicit local > lazyApply > built-in empty.
-	shared := cr.ClassifierThinking
-	if !cr.presence.written("classifier_thinking", shared != "") {
-		shared = ""
-		if la != nil && la.presence.written("classifier_thinking", la.ClassifierThinking != "") {
-			shared = la.ClassifierThinking
-		}
-	}
-	cc := cr.ClassifierThinkingCC
-	if !cr.presence.written("classifier_thinking_cc", cc != "") {
-		cc = ""
-		if la != nil && la.presence.written("classifier_thinking_cc", la.ClassifierThinkingCC != "") {
-			cc = la.ClassifierThinkingCC
-		}
-	}
-	codex := cr.ClassifierThinkingCodex
-	if !cr.presence.written("classifier_thinking_codex", codex != "") {
-		codex = ""
-		if la != nil && la.presence.written("classifier_thinking_codex", la.ClassifierThinkingCodex != "") {
-			codex = la.ClassifierThinkingCodex
-		}
-	}
-	if kind == classifierCodex && codex != "" {
-		return codex
-	}
-	if kind == classifierCC && cc != "" {
-		return cc
-	}
-	return shared
+	return config.ClassifierNone
 }
 
 // classifierTag returns the per-source log tag fragment ("(codex)" for Codex guardian hits, "" for Claude Code).
-func classifierTag(kind classifierSource) string {
-	if kind == classifierCodex {
+func classifierTag(kind config.ClassifierSource) string {
+	if kind == config.ClassifierCodex {
 		return "(codex)"
 	}
 	return ""
@@ -3677,10 +2657,10 @@ func classifierThinkingShape(body []byte, spans []fieldSpan) string {
 // rewritten reports whether a real rewrite happened (and was counted); false covers non-hits, pass-throughs, and no-op edits.
 func maybeRewriteClassifier(body []byte) (newBody []byte, rewritten bool) {
 	kind := detectClassifier(body)
-	if kind == classifierNone {
+	if kind == config.ClassifierNone {
 		return body, false
 	}
-	mode := classifierThinkingModeFor(cfg.Load(), kind)
+	mode := config.ClassifierThinkingModeFor(config.Current(), kind)
 	if mode == "" {
 		return body, false
 	}
@@ -3706,7 +2686,7 @@ func maybeRewriteClassifier(body []byte) (newBody []byte, rewritten bool) {
 	}
 	log.Printf("[rewrite] classifier%s signature hit; thinking disabled (body %d->%d bytes)", classifierTag(kind), len(body), len(newBody))
 	stats.classifierRewrites.Add(1) // Live status row count: classifier thinking rewrites (off, or the off phase of low)
-	if kind == classifierCodex {
+	if kind == config.ClassifierCodex {
 		stats.classifierRewritesCodex.Add(1)
 	} else {
 		stats.classifierRewritesCC.Add(1)
@@ -4217,41 +3197,6 @@ func injectAfterMarker(body []byte, instruction string) ([]byte, bool) {
 	return out, true
 }
 
-// resolveSearchBehavior computes the effective summary-injection level and thinking-rewrite level for a standalone
-// search sub-agent request handled by sf (the real search_fallback with any route-level claudeSearch* overrides merged
-// in per field, or one synthesized from a route's enhance_search legacy fields plus its claudeSearch* fields).
-// The new claudeSearch* fields win; the legacy summary_mode/summary_level/summary_thinking triple applies only when
-// the corresponding new field is unset.
-// sf: the search route in effect (nil tolerated). Returns (injectLevel ""/low/mid/high/max, thinkLevel ""/off/low/mid/high/max).
-func resolveSearchBehavior(sf *SearchRoute) (injectLevel, thinkLevel string) {
-	if sf == nil {
-		return "", ""
-	}
-	switch sf.ClaudeSearchSummary {
-	case "forceLow":
-		injectLevel = "low"
-	case "forceMid":
-		injectLevel = "mid"
-	case "forceHigh":
-		injectLevel = "high"
-	case "noForce":
-		// Explicit opt-out: beats summary_mode, nothing injected.
-	default: // Unset: legacy summary_mode governs
-		if sf.SummaryMode {
-			injectLevel = sf.SummaryLevel
-			if injectLevel == "" {
-				injectLevel = "low"
-			}
-		}
-	}
-	if sf.ClaudeSearchThinking != "" {
-		thinkLevel = sf.ClaudeSearchThinking
-	} else if sf.SummaryThinking {
-		thinkLevel = "low"
-	}
-	return injectLevel, thinkLevel
-}
-
 // rewriteSearchThinking rewrites a standalone search sub-agent request's thinking per claudeSearchThinking,
 // convertOff2Low-style: whatever shape the request carried, the upstream gets the configured level in the
 // adaptive shape — "off" forces {"type":"disabled"} (output_config dropped, sampling knobs kept);
@@ -4314,22 +3259,15 @@ func rewriteResponseModel(line []byte, origModel string) ([]byte, string, bool) 
 	return out, curModel, true
 }
 
-// isReservedRoutePattern reports whether a pattern exactly matches a reserved name (colliding routes don't take effect): "Fallback" is
-// the * catch-all route, "fast_route" is the fast channel's entry name in the Codex menu — Codex scripts send these names as
-// model (fast_route gets speed:"fast" injected by the translation layer and goes down the fast branch); a colliding route would intercept that traffic.
-func isReservedRoutePattern(p string) bool {
-	return p == "Fallback" || p == "fast_route"
-}
-
 // matchPassthroughResponsesRoute pre-checks whether a Responses-port request should pass through natively: the model matches
 // the route table's first ordered non-reserved pattern (same rule as the handler's routing loop), and the matched route has url_response_api.
 // Only for responsesHandler's "translate or passthrough" decision; the actual upstream switch happens again in the handler's routing loop.
-func matchPassthroughResponsesRoute(c *Config, model string) *RouteRule {
+func matchPassthroughResponsesRoute(c *config.Config, model string) *config.RouteRule {
 	if model == "" {
 		return nil
 	}
 	for i := range c.Routes {
-		if isReservedRoutePattern(c.Routes[i].Pattern) {
+		if config.IsReservedRoutePattern(c.Routes[i].Pattern) {
 			continue
 		}
 		if matchModel(c.Routes[i].Pattern, model) && c.Routes[i].URLResponseAPI != "" {
@@ -4374,17 +3312,6 @@ func matchModel(pattern, name string) bool {
 	}
 	// Last segment as suffix.
 	return strings.HasSuffix(name, parts[len(parts)-1])
-}
-
-// hasCatchAllRoute reports whether routes contains a pattern:"*" catch-all rule (matches every model).
-// With one, the top-level upstream may be left empty — every model-bearing request is taken over by the catch-all route and the default upstream goes unused.
-func hasCatchAllRoute(routes []RouteRule) bool {
-	for i := range routes {
-		if routes[i].Pattern == "*" {
-			return true
-		}
-	}
-	return false
 }
 
 // writeSSEPing writes an Anthropic-standard SSE ping event to the client and flushes, keeping the connection alive during 429 retries.
@@ -4975,7 +3902,7 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 const countTokensPath = "/v1/messages/count_tokens"
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	c := cfg.Load()
+	c := config.Current()
 
 	// Access control: the forwarding channel only ever allows localhost — even mistakenly setting listen to 0.0.0.0 won't
 	// let LAN devices freeload on the API keys configured in routes. The management endpoints (/__logs, /__config, /__reload) have their own isLocalRequest guard.
@@ -5125,9 +4052,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// 1.5 Apply the thinking policy on classifier hits, so classification returns fast.
 	// The classifier source also feeds the routing decision: classifier routing takes priority over model routing.
 	clsKind := detectClassifier(body)
-	if clsKind != classifierNone {
+	if clsKind != config.ClassifierNone {
 		stats.classifierHits.Add(1) // Count on match: tallied whether or not rerouted/rewritten (observing safety-check request volume)
-		if clsKind == classifierCodex {
+		if clsKind == config.ClassifierCodex {
 			stats.classifierHitsCodex.Add(1)
 		} else {
 			stats.classifierHitsCC.Add(1)
@@ -5163,7 +4090,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	searchInjectLevel := ""     // ""/low/mid/high/max: inject the summary instruction into the search request itself
 	searchThinkLevel := ""      // ""/off/low/mid/high/max: rewrite the search request's thinking
 	searchGuardEnabled := false // Effective route's noBullshitOnEmptyClaudeSearch; armed below only after the request marker is confirmed
-	if clsKind != classifierNone && c.ClassifierRoute != nil && c.ClassifierRoute.URL != "" {
+	if clsKind != config.ClassifierNone && c.ClassifierRoute != nil && c.ClassifierRoute.URL != "" {
 		// Classifier route: shunt safety-check requests to the designated upstream, saving main-model quota.
 		// (url empty = no reroute: a bare {"classifier_thinking":"off"} configures the thinking rewrite only.)
 		cr := c.ClassifierRoute
@@ -5182,7 +4109,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		upstream = fr.URL
 		authToken = fr.API
 		fastRouteHit = true
-		convFlag = effectiveConvertOff2Low(c, fr.ConvertOff2Low, fr.presence.written("convertOff2Low", fr.ConvertOff2Low != ""), fr.NoLazyApply)
+		convFlag = config.EffectiveConvertOff2Low(c, fr.ConvertOff2Low, fr.Presence.Written("convertOff2Low", fr.ConvertOff2Low != ""), fr.NoLazyApply)
 		if fr.Model != "" && fr.Model != origModel {
 			body = replaceModelValue(body, fr.Model)
 			targetModel = fr.Model
@@ -5194,8 +4121,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	} else if len(c.Routes) > 0 && origModel != "" {
 		for i := range c.Routes {
 			// "Fallback"/"fast_route" are reserved names (the * catch-all route, the fast channel's name in the Codex menu):
-			// patterns may not match them exactly; colliding routes don't take effect (loadConfig warns), so they can't intercept Codex traffic.
-			if isReservedRoutePattern(c.Routes[i].Pattern) {
+			// patterns may not match them exactly; colliding routes don't take effect (config.LoadConfig warns), so they can't intercept Codex traffic.
+			if config.IsReservedRoutePattern(c.Routes[i].Pattern) {
 				continue
 			}
 			if matchModel(c.Routes[i].Pattern, origModel) {
@@ -5223,8 +4150,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 				// Capability fallback: when the target upstream lacks image/search capability the request needs, switch to the corresponding fallback upstream.
-				needImage := effectiveRouteTextOnly(c, rr) && hasImage(body)
-				needSearch := effectiveRouteNoSearch(c, rr) && hasWebSearch(body)
+				needImage := config.EffectiveRouteTextOnly(c, rr) && hasImage(body)
+				needSearch := config.EffectiveRouteNoSearch(c, rr) && hasWebSearch(body)
 				if needImage || needSearch {
 					// applyFB assigns the selected fallback upstream to the current request (changing upstream/API/model).
 					applyFB := func(url, api, model, label string, reason int32) {
@@ -5245,16 +4172,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					if needSearch && sf != nil {
 						applyFB(sf.URL, sf.API, sf.Model, "search-fallback", routeSearch)
 						// Per field: route claudeSearch* > search_fallback > lazyApply > built-in.
-						effFB := effectiveFallbackSearchSettings(c, rr, sf)
+						effFB := config.EffectiveFallbackSearchSettings(c, rr, sf)
 						convFlag = effFB.ConvertOff2Low // The fallback's own effective flag overwrites the matched route's
-						searchInjectLevel, searchThinkLevel = resolveSearchBehavior(effFB)
-						searchGuardEnabled = effectiveSearchGuard(c, rr, sf)
+						searchInjectLevel, searchThinkLevel = config.ResolveSearchBehavior(effFB)
+						searchGuardEnabled = config.EffectiveSearchGuard(c, rr, sf)
 						break
 					}
 					// Pure images (no search): use multimodal_fallback when configured; search requests never land on mf (degrade to passthrough when there's no sf).
 					if needImage && mf != nil && !needSearch {
 						applyFB(mf.URL, mf.API, mf.Model, "image-fallback", routeMultimodal)
-						convFlag = effectiveConvertOff2Low(c, mf.ConvertOff2Low, mf.presence.written("convertOff2Low", mf.ConvertOff2Low != ""), mf.NoLazyApply)
+						convFlag = config.EffectiveConvertOff2Low(c, mf.ConvertOff2Low, mf.Presence.Written("convertOff2Low", mf.ConvertOff2Low != ""), mf.NoLazyApply)
 						break
 					}
 					// Degrade: search without sf, or pure images without mf — pass through to the original route (the upstream handles it, possibly with an error).
@@ -5267,16 +4194,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.id, origModel, rr.URL, origModel, rr.Model)
 				f.routeReason.Store(routePattern)
-				convFlag = effectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.presence.written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
-				searchGuardEnabled = effectiveSearchGuard(c, rr, nil)
+				convFlag = config.EffectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.Presence.Written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
+				searchGuardEnabled = config.EffectiveSearchGuard(c, rr, nil)
 				// Enhance search / route-level claudeSearch*: when the route effectively supports search (no_search:false),
 				// a standalone search sub-agent request gets the summary instruction injected into the request itself
 				// and/or its thinking rewritten (single-request mode), served by the route's own upstream — the request
 				// forwards to the route as usual; only the body transform after the routing block applies. Local
 				// claudeSearch* fields win over the legacy enhance_search summary_* fields; lazyApply fills omitted fields.
-				if hasWebSearch(body) && !effectiveRouteNoSearch(c, rr) && !(effectiveRouteTextOnly(c, rr) && hasImage(body)) {
-					synth := effectiveDirectSearchSettings(c, rr)
-					searchInjectLevel, searchThinkLevel = resolveSearchBehavior(synth)
+				if hasWebSearch(body) && !config.EffectiveRouteNoSearch(c, rr) && !(config.EffectiveRouteTextOnly(c, rr) && hasImage(body)) {
+					synth := config.EffectiveDirectSearchSettings(c, rr)
+					searchInjectLevel, searchThinkLevel = config.ResolveSearchBehavior(synth)
 					if searchInjectLevel != "" || searchThinkLevel != "" {
 						log.Printf("[route] #%d enhanced search %s -> %s (model %s)", f.id, origModel, rr.URL, rr.Model)
 					}
@@ -5370,8 +4297,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// for an already-off request the upgrade below is the one real rewrite, so it is counted here rather than in the off phase).
 	// Only the classifier path passes floorBump: a max_tokens too small for the 1024 budget floor is raised by 1024
 	// upstream-side instead of abandoning the upgrade (guardian requests arrive with max_tokens as small as 64).
-	clsLow := clsKind != classifierNone && classifierThinkingModeFor(c, clsKind) == "low"
-	if clsLow || (convFlag == "all" && clsKind == classifierNone && f.translated == "" && r.URL.Path == "/v1/messages") {
+	clsLow := clsKind != config.ClassifierNone && config.ClassifierThinkingModeFor(c, clsKind) == "low"
+	if clsLow || (convFlag == "all" && clsKind == config.ClassifierNone && f.translated == "" && r.URL.Path == "/v1/messages") {
 		effModel := targetModel
 		if effModel == "" {
 			effModel = origModel
@@ -5380,7 +4307,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			if clsLow && !clsRewrote {
 				// The off phase passed this already-off request through untouched: the upgrade here is the one real rewrite, so it counts here.
 				stats.classifierRewrites.Add(1)
-				if clsKind == classifierCodex {
+				if clsKind == config.ClassifierCodex {
 					stats.classifierRewritesCodex.Add(1)
 				} else {
 					stats.classifierRewritesCC.Add(1)
@@ -5723,14 +4650,14 @@ var noTrayFlag = flag.Bool("no-tray", false, "run without the system tray (headl
 func main() {
 	configPath := flag.String("config", "", "config file path (empty = look up ./config.json then the user config dir)")
 	flag.Parse()
-	configFilePath = resolveConfigPath(*configPath)
+	config.SetCurrentPath(config.ResolveConfigPath(*configPath))
 
-	c, warns, err := loadConfig(configFilePath)
+	c, warns, err := config.LoadConfig(config.CurrentConfigPath())
 	if err != nil {
-		log.Fatalf("failed to read %s: %v", configFilePath, err)
+		log.Fatalf("failed to read %s: %v", config.CurrentConfigPath(), err)
 	}
-	cfg.Store(c)
-	setConfigWarnings(warns)
+	config.Store(c)
+	config.SetConfigWarnings(warns)
 	stats.resetSampleCap(c.RecentSampleWindow) // Initialize the "last X" latency/throughput sliding-window capacity
 	resolveProgramUILang()                     // First launch: program-settings.txt wins, legacy config ui_lang is migrated, otherwise follow the OS
 	// The flight registry and log buffer are always initialized (handlers always register flights; the map must not be nil).
@@ -5766,11 +4693,11 @@ func main() {
 	// Startup removed-key warnings are logged only now: earlier log lines bypass logRing (the standard logger is not
 	// redirected yet), and a GUI-subsystem exe has no console for stderr, so they would be invisible everywhere.
 	for _, k := range warns {
-		log.Printf("[config] WARNING: %s (the key is inert; the proxy runs without its old behavior)", removedKeyWarningEN(k))
+		log.Printf("[config] WARNING: %s (the key is inert; the proxy runs without its old behavior)", config.RemovedKeyWarningEN(k))
 	}
 
 	log.Printf("proxy started %s: listening http://%s -> forwarding to %s (max retries %d, classifier thinking: cc=%q codex=%q)",
-		Version, c.Listen, c.Upstream, c.MaxRetries, classifierThinkingModeFor(c, classifierCC), classifierThinkingModeFor(c, classifierCodex))
+		Version, c.Listen, c.Upstream, c.MaxRetries, config.ClassifierThinkingModeFor(c, config.ClassifierCC), config.ClassifierThinkingModeFor(c, config.ClassifierCodex))
 
 	// The HTTP server runs in a goroutine: the tray event loop (systray.Run) must occupy the main thread (macOS requires UI on the main thread),
 	// so the main thread's blocking spot belongs to the tray and HTTP runs in the background.
@@ -5781,7 +4708,7 @@ func main() {
 	// Loopback-hijack watchdog (read-only): system proxy on + NO_PROXY missing -> red tray light + console banner,
 	// so a silently-vanished codex NO_PROXY fix is noticed before Codex 503s, not after.
 	go platform.WatchProxyHijack(func() string {
-		if c := cfg.Load(); c != nil {
+		if c := config.Current(); c != nil {
 			return c.ResponsesListen
 		}
 		return ""
@@ -5804,7 +4731,7 @@ func main() {
 }
 
 // runServer registers the handlers and listens; a listen failure (e.g. port in use) log.Fatals the whole process.
-func runServer(c *Config) {
+func runServer(c *config.Config) {
 	// The web console hangs on the same port under /__* (localhost only); Claude Code uses /v1/... — no conflict.
 	// Must be registered before "/": Go's DefaultServeMux prefers exact matches over the / wildcard.
 	http.HandleFunc(logViewerPath, logViewerHandler)
@@ -5817,7 +4744,7 @@ func runServer(c *Config) {
 		}
 	})
 	http.HandleFunc(reloadPath, reloadHandler)
-	http.HandleFunc(lazyPreviewPath, lazyApplyPreviewHandler)
+	http.HandleFunc(lazyPreviewPath, LazyApplyPreviewHandler)
 	http.HandleFunc(configsPath, configsHandler)
 	http.HandleFunc(switchPath, switchHandler)
 	http.HandleFunc(newConfigPath, newConfigHandler)

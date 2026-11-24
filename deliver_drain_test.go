@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"proxy429/internal/config"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -49,7 +50,7 @@ func lastFinishedStatus(t *testing.T, baseN int) int {
 
 func drainTestProxy(t *testing.T, upstream *httptest.Server) *httptest.Server {
 	t.Helper()
-	cfg.Store(&Config{Upstream: upstream.URL, MaxRetries: 0, TotalBudgetSec: 10, RecentSampleWindow: 5})
+	config.Store(&config.Config{Upstream: upstream.URL, MaxRetries: 0, TotalBudgetSec: 10, RecentSampleWindow: 5})
 	stats.resetSampleCap(5)
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	t.Cleanup(proxy.Close)
