@@ -7,7 +7,7 @@ import (
 // maxLogBuf is the log ring buffer's max line count, and the scrollback limit of the web "view logs" page.
 const MaxLogBuf = 500
 
-// logRing keeps the most recent log lines, for redrawing the lower half of the screen on terminal resizes.
+// logRing keeps the most recent log lines, the bounded scrollback behind the web console's Logs tab.
 type logRing struct {
 	Mu    sync.Mutex
 	Lines []string
@@ -29,13 +29,6 @@ func (r *logRing) append(line string) {
 	}
 }
 
-// length returns the number of stored log lines.
-func (r *logRing) length() int {
-	r.Mu.Lock()
-	defer r.Mu.Unlock()
-	return r.Len
-}
-
 // clear drops all stored logs (keeping the underlying array's capacity).
 func (r *logRing) Clear() {
 	r.Mu.Lock()
@@ -46,7 +39,7 @@ func (r *logRing) Clear() {
 }
 
 // window returns n log lines starting offset lines up from the bottom (chronological, oldest to newest).
-// offset=0 is equivalent to recent(n); offset>0 skips the newest offset lines before taking n.
+// offset=0 takes the newest n lines; offset>0 skips the newest offset lines before taking n.
 func (r *logRing) Window(offset, n int) []string {
 	r.Mu.Lock()
 	defer r.Mu.Unlock()
