@@ -16,6 +16,12 @@ config.json
 # Claude Code local metadata
 .claude/
 
+# Local scratch: agent session patches/logs/smoke configs, never committed.
+# Temp/ also holds stray Go files that would otherwise pollute `go test ./...`.
+Temp/
+
+# Local screenshots dropped into the repo root
+/捕获.JPG
 
 # Local release directory (binaries + config templates, local-only, never committed)
 release/
