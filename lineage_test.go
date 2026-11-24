@@ -9,6 +9,7 @@ package main
 
 import (
 	"encoding/json"
+	"proxy429/internal/recorder"
 	"strings"
 	"testing"
 	"time"
@@ -45,46 +46,46 @@ func respLineageBody(items ...string) []byte {
 // setupLineageTest isolates the two global lineage candidate pools (active registry + finished ring).
 func setupLineageTest(t *testing.T) {
 	t.Helper()
-	flights.mu.Lock()
-	oldM := flights.m
-	flights.m = make(map[uint64]*flight)
-	flights.mu.Unlock()
-	finishedMu.Lock()
-	oldFinished := finished
-	finished = nil
-	finishedMu.Unlock()
+	recorder.Flights.Mu.Lock()
+	oldM := recorder.Flights.M
+	recorder.Flights.M = make(map[uint64]*recorder.Flight)
+	recorder.Flights.Mu.Unlock()
+	recorder.FinishedMu.Lock()
+	oldFinished := recorder.Finished
+	recorder.Finished = nil
+	recorder.FinishedMu.Unlock()
 	t.Cleanup(func() {
-		flights.mu.Lock()
-		flights.m = oldM
-		flights.mu.Unlock()
-		finishedMu.Lock()
-		finished = oldFinished
-		finishedMu.Unlock()
+		recorder.Flights.Mu.Lock()
+		recorder.Flights.M = oldM
+		recorder.Flights.Mu.Unlock()
+		recorder.FinishedMu.Lock()
+		recorder.Finished = oldFinished
+		recorder.FinishedMu.Unlock()
 	})
 }
 
 // regLineageFlight registers a flight and runs the same lineage hook the request handler runs.
-func regLineageFlight(t *testing.T, id uint64, convID string, body []byte) *flight {
+func regLineageFlight(t *testing.T, id uint64, convID string, body []byte) *recorder.Flight {
 	t.Helper()
-	f := &flight{id: id, convID: convID, start: time.Now()}
-	flights.register(f)
-	computeLineage(f, body)
+	f := &recorder.Flight{ID: id, ConvID: convID, Start: time.Now()}
+	recorder.Flights.Register(f)
+	recorder.ComputeLineage(f, body)
 	return f
 }
 
 func TestLineageLinearChain(t *testing.T) {
 	setupLineageTest(t)
 	f1 := regLineageFlight(t, 1, "s", anthLineageBody("A"))
-	if f1.lastFlight != 0 {
-		t.Errorf("首请求 last=%d 应=0", f1.lastFlight)
+	if f1.LastFlight != 0 {
+		t.Errorf("首请求 last=%d 应=0", f1.LastFlight)
 	}
 	f2 := regLineageFlight(t, 2, "s", anthLineageBody("A", "asst1", "B"))
-	if f2.lastFlight != 1 {
-		t.Errorf("#2 last=%d 应=1", f2.lastFlight)
+	if f2.LastFlight != 1 {
+		t.Errorf("#2 last=%d 应=1", f2.LastFlight)
 	}
 	f3 := regLineageFlight(t, 3, "s", anthLineageBody("A", "asst1", "B", "asst2", "C"))
-	if f3.lastFlight != 2 {
-		t.Errorf("#3 last=%d 应=2", f3.lastFlight)
+	if f3.LastFlight != 2 {
+		t.Errorf("#3 last=%d 应=2", f3.LastFlight)
 	}
 }
 
@@ -94,16 +95,16 @@ func TestLineageSubagentBranchSameSession(t *testing.T) {
 	setupLineageTest(t)
 	regLineageFlight(t, 1, "s", anthLineageBody("A"))       // main #1
 	f2 := regLineageFlight(t, 2, "s", anthLineageBody("P")) // sub-agent root: disjoint first message
-	if f2.lastFlight != 0 {
-		t.Errorf("子代理根 last=%d 应=0", f2.lastFlight)
+	if f2.LastFlight != 0 {
+		t.Errorf("子代理根 last=%d 应=0", f2.LastFlight)
 	}
 	f3 := regLineageFlight(t, 3, "s", anthLineageBody("P", "sub1")) // sub-agent round 2
-	if f3.lastFlight != 2 {
-		t.Errorf("子链 #3 last=%d 应=2", f3.lastFlight)
+	if f3.LastFlight != 2 {
+		t.Errorf("子链 #3 last=%d 应=2", f3.LastFlight)
 	}
 	f4 := regLineageFlight(t, 4, "s", anthLineageBody("A", "asst1", "B")) // main chain resumes across the gap
-	if f4.lastFlight != 1 {
-		t.Errorf("主链 #4 last=%d 应=1", f4.lastFlight)
+	if f4.LastFlight != 1 {
+		t.Errorf("主链 #4 last=%d 应=1", f4.LastFlight)
 	}
 }
 
@@ -111,12 +112,12 @@ func TestLineageRetryIdenticalBody(t *testing.T) {
 	setupLineageTest(t)
 	regLineageFlight(t, 1, "s", anthLineageBody("A", "B"))
 	f2 := regLineageFlight(t, 2, "s", anthLineageBody("A", "B")) // client re-sent the identical body
-	if f2.lastFlight != 1 {
-		t.Errorf("重试 #2 last=%d 应=1", f2.lastFlight)
+	if f2.LastFlight != 1 {
+		t.Errorf("重试 #2 last=%d 应=1", f2.LastFlight)
 	}
 	f3 := regLineageFlight(t, 3, "s", anthLineageBody("A", "B", "C")) // #1 and #2 both fully contained: newest wins
-	if f3.lastFlight != 2 {
-		t.Errorf("#3 last=%d 应=2（并列取最新）", f3.lastFlight)
+	if f3.LastFlight != 2 {
+		t.Errorf("#3 last=%d 应=2（并列取最新）", f3.LastFlight)
 	}
 }
 
@@ -124,8 +125,8 @@ func TestLineageNoSession(t *testing.T) {
 	setupLineageTest(t)
 	regLineageFlight(t, 1, "", anthLineageBody("A"))
 	f2 := regLineageFlight(t, 2, "", anthLineageBody("A", "B"))
-	if f2.lastFlight != 0 {
-		t.Errorf("无会话标识不应定父，last=%d", f2.lastFlight)
+	if f2.LastFlight != 0 {
+		t.Errorf("无会话标识不应定父，last=%d", f2.LastFlight)
 	}
 }
 
@@ -133,8 +134,8 @@ func TestLineageCrossSessionSameContent(t *testing.T) {
 	setupLineageTest(t)
 	regLineageFlight(t, 1, "s1", anthLineageBody("A"))
 	f2 := regLineageFlight(t, 2, "s2", anthLineageBody("A", "B")) // same content, another session
-	if f2.lastFlight != 0 {
-		t.Errorf("跨会话同内容不应定父，last=%d", f2.lastFlight)
+	if f2.LastFlight != 0 {
+		t.Errorf("跨会话同内容不应定父，last=%d", f2.LastFlight)
 	}
 }
 
@@ -142,13 +143,13 @@ func TestLineageParentAlreadyFinished(t *testing.T) {
 	// The usual case: the parent request completed (and left the active registry) before the child arrives.
 	setupLineageTest(t)
 	f1 := regLineageFlight(t, 1, "s", anthLineageBody("A"))
-	flights.unregister(1)
-	finishedMu.Lock()
-	finished = append(finished, finishedFlight{id: 1, convID: "s", msgHashes: f1.msgHashes})
-	finishedMu.Unlock()
+	recorder.Flights.Unregister(1)
+	recorder.FinishedMu.Lock()
+	recorder.Finished = append(recorder.Finished, recorder.FinishedFlight{ID: 1, ConvID: "s", MsgHashes: f1.MsgHashes})
+	recorder.FinishedMu.Unlock()
 	f2 := regLineageFlight(t, 2, "s", anthLineageBody("A", "B"))
-	if f2.lastFlight != 1 {
-		t.Errorf("父流已归档 last=%d 应=1", f2.lastFlight)
+	if f2.LastFlight != 1 {
+		t.Errorf("父流已归档 last=%d 应=1", f2.LastFlight)
 	}
 }
 
@@ -156,20 +157,20 @@ func TestLineageResponsesInputArray(t *testing.T) {
 	setupLineageTest(t)
 	regLineageFlight(t, 1, "conv-1", respLineageBody("a"))
 	f2 := regLineageFlight(t, 2, "conv-1", respLineageBody("a", "b", "c"))
-	if f2.lastFlight != 1 {
-		t.Errorf("Responses input 链 last=%d 应=1", f2.lastFlight)
+	if f2.LastFlight != 1 {
+		t.Errorf("Responses input 链 last=%d 应=1", f2.LastFlight)
 	}
 }
 
 func TestLineageDegenerateBodies(t *testing.T) {
 	setupLineageTest(t)
 	f1 := regLineageFlight(t, 1, "s", []byte("not json"))
-	if len(f1.msgHashes) != 0 || f1.lastFlight != 0 {
-		t.Errorf("非 JSON 不应产生血缘：hashes=%d last=%d", len(f1.msgHashes), f1.lastFlight)
+	if len(f1.MsgHashes) != 0 || f1.LastFlight != 0 {
+		t.Errorf("非 JSON 不应产生血缘：hashes=%d last=%d", len(f1.MsgHashes), f1.LastFlight)
 	}
 	f2 := regLineageFlight(t, 2, "s", []byte(`{"model":"m"}`))
-	if len(f2.msgHashes) != 0 || f2.lastFlight != 0 {
-		t.Errorf("无 messages/input 不应产生血缘：hashes=%d last=%d", len(f2.msgHashes), f2.lastFlight)
+	if len(f2.MsgHashes) != 0 || f2.LastFlight != 0 {
+		t.Errorf("无 messages/input 不应产生血缘：hashes=%d last=%d", len(f2.MsgHashes), f2.LastFlight)
 	}
 }
 
@@ -211,8 +212,8 @@ func TestLineageCacheControlMigration(t *testing.T) {
 		`{"role":"user","content":[{"type":"text","text":"A"}]}`,
 		`{"role":"assistant","content":[{"type":"text","text":"a1"}]}`,
 	))
-	if f2.lastFlight != 1 {
-		t.Errorf("断点迁移不应断链：#2 last=%d 应=1", f2.lastFlight)
+	if f2.LastFlight != 1 {
+		t.Errorf("断点迁移不应断链：#2 last=%d 应=1", f2.LastFlight)
 	}
 	// Marker in first position and carrying a ttl member — same normalization must apply.
 	regLineageFlight(t, 3, "s", anthRawBody(`{"role":"user","content":[{"cache_control":{"type":"ephemeral","ttl":"1h"},"type":"text","text":"B"}]}`))
@@ -220,8 +221,8 @@ func TestLineageCacheControlMigration(t *testing.T) {
 		`{"role":"user","content":[{"type":"text","text":"B"}]}`,
 		`{"role":"assistant","content":[{"type":"text","text":"b1"}]}`,
 	))
-	if f4.lastFlight != 3 {
-		t.Errorf("首键位置/ttl 标记不应断链：#4 last=%d 应=3", f4.lastFlight)
+	if f4.LastFlight != 3 {
+		t.Errorf("首键位置/ttl 标记不应断链：#4 last=%d 应=3", f4.LastFlight)
 	}
 }
 
@@ -239,8 +240,8 @@ func TestLineageTailElementGrowth(t *testing.T) {
 		`{"role":"user","content":[{"type":"text","text":"root"}]}`,
 		`{"role":"user","content":[{"type":"text","text":"X"},{"type":"text","text":"NEWBLOCK"},{"type":"text","text":"TAILBLOCK"}]}`,
 	))
-	if f3.lastFlight != 2 {
-		t.Errorf("尾元素内部生长应链向生长父：#3 last=%d 应=2", f3.lastFlight)
+	if f3.LastFlight != 2 {
+		t.Errorf("尾元素内部生长应链向生长父：#3 last=%d 应=2", f3.LastFlight)
 	}
 }
 
@@ -251,8 +252,8 @@ func TestLineageRewindPrefersContainedAncestor(t *testing.T) {
 	regLineageFlight(t, 1, "s", anthLineageBody("A", "B", "C", "D"))
 	regLineageFlight(t, 2, "s", anthLineageBody("A", "B"))
 	f3 := regLineageFlight(t, 3, "s", anthLineageBody("A", "B", "X"))
-	if f3.lastFlight != 2 {
-		t.Errorf("回溯分叉应链向被完整包含的祖先：#3 last=%d 应=2", f3.lastFlight)
+	if f3.LastFlight != 2 {
+		t.Errorf("回溯分叉应链向被完整包含的祖先：#3 last=%d 应=2", f3.LastFlight)
 	}
 }
 
@@ -262,7 +263,7 @@ func TestLineageShapePrefixNotEnough(t *testing.T) {
 	setupLineageTest(t)
 	regLineageFlight(t, 1, "s", anthLineageBody("A"))
 	f2 := regLineageFlight(t, 2, "s", anthLineageBody("B"))
-	if f2.lastFlight != 0 {
-		t.Errorf("仅有 JSON 外壳字节相同不应定父：#2 last=%d 应=0", f2.lastFlight)
+	if f2.LastFlight != 0 {
+		t.Errorf("仅有 JSON 外壳字节相同不应定父：#2 last=%d 应=0", f2.LastFlight)
 	}
 }

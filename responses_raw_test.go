@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/recorder"
 	"proxy429/internal/translate"
 	"strings"
 	"testing"
@@ -73,19 +74,19 @@ func TestParseResponsesStreamStats(t *testing.T) {
 	var saw bool
 
 	// Non-terminal event (no usage): ignored, saw not set.
-	parseResponsesStreamStats([]byte(`data: {"type":"response.created","response":{"id":"r1","status":"in_progress"}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	parseResponsesStreamStats([]byte(`data: {"type":"response.output_text.delta","delta":"hi"}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	if stats.inputTokens != 0 || stats.outputTokens != 0 || saw {
-		t.Fatalf("非终局事件不应计数/置位: in=%d out=%d saw=%v", stats.inputTokens, stats.outputTokens, saw)
+	recorder.ParseResponsesStreamStats([]byte(`data: {"type":"response.created","response":{"id":"r1","status":"in_progress"}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	recorder.ParseResponsesStreamStats([]byte(`data: {"type":"response.output_text.delta","delta":"hi"}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	if recorder.Stats.InputTokens != 0 || recorder.Stats.OutputTokens != 0 || saw {
+		t.Fatalf("非终局事件不应计数/置位: in=%d out=%d saw=%v", recorder.Stats.InputTokens, recorder.Stats.OutputTokens, saw)
 	}
 
 	// Terminal response.completed: input 110 including cached 100 → fresh=10, cr=100, out=7.
-	parseResponsesStreamStats([]byte(`data: {"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":110,"input_tokens_details":{"cached_tokens":100},"output_tokens":7,"total_tokens":117}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	recorder.ParseResponsesStreamStats([]byte(`data: {"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":110,"input_tokens_details":{"cached_tokens":100},"output_tokens":7,"total_tokens":117}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
 	if !saw {
 		t.Error("终局 usage 到达应置 sawDeltaUsage")
 	}
-	if stats.inputTokens != 10 || stats.cacheRead != 100 || stats.outputTokens != 7 {
-		t.Errorf("拆分错误: in=%d(want 10) cr=%d(want 100) out=%d(want 7)", stats.inputTokens, stats.cacheRead, stats.outputTokens)
+	if recorder.Stats.InputTokens != 10 || recorder.Stats.CacheRead != 100 || recorder.Stats.OutputTokens != 7 {
+		t.Errorf("拆分错误: in=%d(want 10) cr=%d(want 100) out=%d(want 7)", recorder.Stats.InputTokens, recorder.Stats.CacheRead, recorder.Stats.OutputTokens)
 	}
 	if lastIn != 10 || lastCR != 100 || last != 7 {
 		t.Errorf("追踪器: lastIn=%d lastCR=%d last=%d", lastIn, lastCR, last)
@@ -94,12 +95,12 @@ func TestParseResponsesStreamStats(t *testing.T) {
 	// response.incomplete also counts (max_tokens truncation); the abnormal case of cache exceeding input clamps fresh to zero instead of going negative.
 	// The same trackers get a second terminal event, also verifying "later overwrites earlier": this event has fresh=0 (50-80<0 clamped),
 	// cr=80 — global in 10→0, cr 100→80.
-	parseResponsesStreamStats([]byte(`data: {"type":"response.incomplete","response":{"id":"r2","status":"incomplete","usage":{"input_tokens":50,"input_tokens_details":{"cached_tokens":80},"output_tokens":3}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	if stats.inputTokens != 0 {
-		t.Errorf("负 fresh 应归零: in=%d want 0（fresh 0 覆盖 10，全局加 -10）", stats.inputTokens)
+	recorder.ParseResponsesStreamStats([]byte(`data: {"type":"response.incomplete","response":{"id":"r2","status":"incomplete","usage":{"input_tokens":50,"input_tokens_details":{"cached_tokens":80},"output_tokens":3}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	if recorder.Stats.InputTokens != 0 {
+		t.Errorf("负 fresh 应归零: in=%d want 0（fresh 0 覆盖 10，全局加 -10）", recorder.Stats.InputTokens)
 	}
-	if stats.cacheRead != 80 {
-		t.Errorf("cr 后值覆盖: %d want 80（全局加 80-100=-20）", stats.cacheRead)
+	if recorder.Stats.CacheRead != 80 {
+		t.Errorf("cr 后值覆盖: %d want 80（全局加 80-100=-20）", recorder.Stats.CacheRead)
 	}
 }
 
@@ -116,7 +117,7 @@ func TestParseResponsesToolName(t *testing.T) {
 		{`event: response.completed`, ""},
 	}
 	for _, c := range cases {
-		if got := parseResponsesToolName([]byte(c.line)); got != c.want {
+		if got := recorder.ParseResponsesToolName([]byte(c.line)); got != c.want {
 			t.Errorf("parseResponsesToolName(%q)=%q, want %q", c.line, got, c.want)
 		}
 	}
@@ -126,12 +127,12 @@ func TestParseResponsesToolName(t *testing.T) {
 // the presence of input_tokens_details marks the Responses shape, input splits fresh+cached;
 // and it can't be confused with the Anthropic shape (which has no input_tokens_details).
 func TestParseNonStreamUsageResponses(t *testing.T) {
-	in, cr, cc, out, ok := parseNonStreamUsage([]byte(`{"object":"response","usage":{"input_tokens":110,"input_tokens_details":{"cached_tokens":100},"output_tokens":7}}`))
+	in, cr, cc, out, ok := recorder.ParseNonStreamUsage([]byte(`{"object":"response","usage":{"input_tokens":110,"input_tokens_details":{"cached_tokens":100},"output_tokens":7}}`))
 	if !ok || in != 10 || cr != 100 || cc != 0 || out != 7 {
 		t.Errorf("Responses 拆分: in=%d cr=%d cc=%d out=%d ok=%v, want 10/100/0/7/true", in, cr, cc, out, ok)
 	}
 	// The Anthropic shape still goes through the original branch (no input_tokens_details).
-	in, cr, cc, out, ok = parseNonStreamUsage([]byte(`{"usage":{"input_tokens":110,"cache_read_input_tokens":100,"cache_creation_input_tokens":2,"output_tokens":7}}`))
+	in, cr, cc, out, ok = recorder.ParseNonStreamUsage([]byte(`{"usage":{"input_tokens":110,"cache_read_input_tokens":100,"cache_creation_input_tokens":2,"output_tokens":7}}`))
 	if !ok || in != 110 || cr != 100 || cc != 2 || out != 7 {
 		t.Errorf("Anthropic 分支: in=%d cr=%d cc=%d out=%d ok=%v, want 110/100/2/7/true", in, cr, cc, out, ok)
 	}
@@ -141,12 +142,12 @@ func TestParseNonStreamUsageResponses(t *testing.T) {
 // translated/Anthropic streams keep the Anthropic ping event.
 func TestWriteSSEPingRawShape(t *testing.T) {
 	rec := httptest.NewRecorder()
-	writeSSEPing(rec, nil, &flight{translated: translate.TranslatedResponsesRaw})
+	writeSSEPing(rec, nil, &recorder.Flight{Translated: translate.TranslatedResponsesRaw})
 	if rec.Body.String() != ": ping\n\n" {
 		t.Errorf("透传流 ping=%q, want SSE 注释行", rec.Body.String())
 	}
 	rec2 := httptest.NewRecorder()
-	writeSSEPing(rec2, nil, &flight{translated: translate.TranslatedResponses})
+	writeSSEPing(rec2, nil, &recorder.Flight{Translated: translate.TranslatedResponses})
 	if !strings.Contains(rec2.Body.String(), `"type":"ping"`) {
 		t.Errorf("翻译流 ping=%q, want Anthropic ping 事件", rec2.Body.String())
 	}
@@ -155,7 +156,7 @@ func TestWriteSSEPingRawShape(t *testing.T) {
 // TestWriteSSEErrorRawShape verifies the SSE error protocol split at retry exhaustion: a passthrough stream gets a response.failed event.
 func TestWriteSSEErrorRawShape(t *testing.T) {
 	rec := httptest.NewRecorder()
-	writeSSEError(rec, nil, "upstream status 429", &flight{translated: translate.TranslatedResponsesRaw})
+	writeSSEError(rec, nil, "upstream status 429", &recorder.Flight{Translated: translate.TranslatedResponsesRaw})
 	s := rec.Body.String()
 	if !strings.HasPrefix(s, "event: response.failed\n") || !strings.Contains(s, `"type":"response.failed"`) || !strings.Contains(s, "upstream status 429") {
 		t.Errorf("透传流 error=%q, want response.failed 事件含消息", s)
@@ -167,7 +168,7 @@ func TestWriteSSEErrorRawShape(t *testing.T) {
 		t.Errorf("response.failed data 非合法 JSON: %v (%s)", err, data)
 	}
 	rec2 := httptest.NewRecorder()
-	writeSSEError(rec2, nil, "x", &flight{})
+	writeSSEError(rec2, nil, "x", &recorder.Flight{})
 	if !strings.HasPrefix(rec2.Body.String(), "event: error\n") {
 		t.Errorf("Anthropic 流 error=%q, want event: error", rec2.Body.String())
 	}
@@ -270,32 +271,32 @@ func TestResponsesRawPassthrough(t *testing.T) {
 	}
 
 	// Stats semantics: input 110 splits into fresh 10 + cached-hit 100, output 7.
-	stats.mu.Lock()
-	in, cr, out := stats.inputTokens, stats.cacheRead, stats.outputTokens
-	stats.mu.Unlock()
+	recorder.Stats.Mu.Lock()
+	in, cr, out := recorder.Stats.InputTokens, recorder.Stats.CacheRead, recorder.Stats.OutputTokens
+	recorder.Stats.Mu.Unlock()
 	if in != 10 || cr != 100 || out != 7 {
 		t.Errorf("聚合统计 in=%d cr=%d out=%d, want 10/100/7", in, cr, out)
 	}
 
 	// Finished archive: responses-raw flag, token split, tool tags, delivered (recorded as 200, not 499).
-	finishedMu.Lock()
-	if len(finished) == 0 {
-		finishedMu.Unlock()
+	recorder.FinishedMu.Lock()
+	if len(recorder.Finished) == 0 {
+		recorder.FinishedMu.Unlock()
 		t.Fatal("完成流列表为空（handler defer 应已归档本流）")
 	}
-	ff := finished[len(finished)-1]
-	finishedMu.Unlock()
-	if ff.translated != translate.TranslatedResponsesRaw {
-		t.Errorf("translated=%q, want %q（网页 API 列显示 [Response]）", ff.translated, translate.TranslatedResponsesRaw)
+	ff := recorder.Finished[len(recorder.Finished)-1]
+	recorder.FinishedMu.Unlock()
+	if ff.Translated != translate.TranslatedResponsesRaw {
+		t.Errorf("translated=%q, want %q（网页 API 列显示 [Response]）", ff.Translated, translate.TranslatedResponsesRaw)
 	}
-	if ff.inTokens != 10 || ff.cacheRead != 100 || ff.outTokens != 7 {
-		t.Errorf("完成流 token in=%d cr=%d out=%d, want 10/100/7", ff.inTokens, ff.cacheRead, ff.outTokens)
+	if ff.InTokens != 10 || ff.CacheRead != 100 || ff.OutTokens != 7 {
+		t.Errorf("完成流 token in=%d cr=%d out=%d, want 10/100/7", ff.InTokens, ff.CacheRead, ff.OutTokens)
 	}
-	if ff.tools != "[exec_command*1]" {
-		t.Errorf("工具标签=%q, want [exec_command*1]（单次调用带参显 *1）", ff.tools)
+	if ff.Tools != "[exec_command*1]" {
+		t.Errorf("工具标签=%q, want [exec_command*1]（单次调用带参显 *1）", ff.Tools)
 	}
-	if ff.status != http.StatusOK {
-		t.Errorf("状态=%d, want 200（response.completed 已标记 delivered，不应误记 499）", ff.status)
+	if ff.Status != http.StatusOK {
+		t.Errorf("状态=%d, want 200（response.completed 已标记 delivered，不应误记 499）", ff.Status)
 	}
 }
 
@@ -334,9 +335,9 @@ func TestResponsesRawPassthroughNonStream(t *testing.T) {
 	if !strings.Contains(string(body), `"object":"response"`) {
 		t.Errorf("客户端应拿到原样 Responses JSON: %s", body)
 	}
-	stats.mu.Lock()
-	in, cr, out := stats.inputTokens, stats.cacheRead, stats.outputTokens
-	stats.mu.Unlock()
+	recorder.Stats.Mu.Lock()
+	in, cr, out := recorder.Stats.InputTokens, recorder.Stats.CacheRead, recorder.Stats.OutputTokens
+	recorder.Stats.Mu.Unlock()
 	if in != 5 || cr != 50 || out != 2 {
 		t.Errorf("非流式聚合 in=%d cr=%d out=%d, want 5/50/2", in, cr, out)
 	}

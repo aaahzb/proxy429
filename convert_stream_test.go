@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/recorder"
 	"strings"
 	"testing"
 	"time"
@@ -67,7 +68,7 @@ func TestCollectStreamToJSON(t *testing.T) {
 		Body:       io.NopCloser(bytes.NewReader([]byte(sse))),
 	}
 	rec := httptest.NewRecorder()
-	f := &flight{id: 1, origModel: "claude-opus-4-1", targetModel: "deepseek-v4-flash", start: time.Now()}
+	f := &recorder.Flight{ID: 1, OrigModel: "claude-opus-4-1", TargetModel: "deepseek-v4-flash", Start: time.Now()}
 	ok, out := collectStreamToJSON(rec, resp, head, br, f)
 	if !ok {
 		t.Fatalf("ok=false, want true")
@@ -107,11 +108,11 @@ func TestCollectStreamToJSON(t *testing.T) {
 	if m["stop_reason"] != "end_turn" {
 		t.Errorf("stop_reason=%v, want end_turn", m["stop_reason"])
 	}
-	if f.outTokens != 42 || f.inTokens != 100 || f.cacheRead != 50 {
-		t.Errorf("flight 统计错误: out=%d in=%d cr=%d", f.outTokens, f.inTokens, f.cacheRead)
+	if f.OutTokens != 42 || f.InTokens != 100 || f.CacheRead != 50 {
+		t.Errorf("flight 统计错误: out=%d in=%d cr=%d", f.OutTokens, f.InTokens, f.CacheRead)
 	}
-	if stats.outputTokens != 42 {
-		t.Errorf("全局 outputTokens=%d, want 42", stats.outputTokens)
+	if recorder.Stats.OutputTokens != 42 {
+		t.Errorf("全局 outputTokens=%d, want 42", recorder.Stats.OutputTokens)
 	}
 }
 
@@ -131,7 +132,7 @@ func TestCollectStreamToJSONInterrupted(t *testing.T) {
 		Body:       io.NopCloser(bytes.NewReader([]byte(sse))),
 	}
 	rec := httptest.NewRecorder()
-	f := &flight{id: 1, origModel: "x", start: time.Now()}
+	f := &recorder.Flight{ID: 1, OrigModel: "x", Start: time.Now()}
 	ok, _ := collectStreamToJSON(rec, resp, head, br, f)
 	if ok {
 		t.Fatalf("ok=true, want false（未收完不能返回）")

@@ -17,6 +17,7 @@ import (
 
 	"proxy429/internal/config"
 	"proxy429/internal/jsonutil"
+	"proxy429/internal/recorder"
 	"proxy429/internal/translate"
 )
 
@@ -124,8 +125,8 @@ func truncate(s string, n int) string {
 // Responses passthrough streams get an SSE comment line (": ping") instead — every SSE client ignores comment lines,
 // whereas feeding an Anthropic-shaped ping JSON to a native Responses client could trigger parse warnings.
 // w: response writer; flusher: flush after write when non-nil; f: this flight (for protocol shape, may be nil).
-func writeSSEPing(w http.ResponseWriter, flusher http.Flusher, f *flight) {
-	if f != nil && f.responsesRaw() {
+func writeSSEPing(w http.ResponseWriter, flusher http.Flusher, f *recorder.Flight) {
+	if f != nil && f.ResponsesRaw() {
 		w.Write([]byte(": ping\n\n"))
 	} else {
 		w.Write([]byte("event: ping\ndata: {\"type\":\"ping\"}\n\n"))
@@ -139,10 +140,10 @@ func writeSSEPing(w http.ResponseWriter, flusher http.Flusher, f *flight) {
 // Once the 200 header is sent, the status code can no longer pass a 429 through; an SSE error is the only way for the client to recognize the failure (used when retries run out).
 // Responses passthrough streams get a response.failed event instead (native Responses clients recognize that shape).
 // w: response writer; flusher: flush after write when non-nil; msg: error description; f: this flight (a copy is teed for web review).
-func writeSSEError(w http.ResponseWriter, flusher http.Flusher, msg string, f *flight) {
+func writeSSEError(w http.ResponseWriter, flusher http.Flusher, msg string, f *recorder.Flight) {
 	var buf bytes.Buffer
 	b, _ := json.Marshal(msg) // JSON-encode the message so special characters don't break the SSE
-	if f != nil && f.responsesRaw() {
+	if f != nil && f.ResponsesRaw() {
 		buf.WriteString("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_p429\",\"object\":\"response\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":")
 		buf.Write(b)
 		buf.WriteString("}}}\n\n")
@@ -157,15 +158,15 @@ func writeSSEError(w http.ResponseWriter, flusher http.Flusher, msg string, f *f
 		flusher.Flush()
 	}
 	if f != nil {
-		f.gaveUp = true       // The finished-streams status column shows [重试尽] from this flag (distinguishing it from other status=0 shapes)
-		f.appendContent(data) // Tee a copy for web review (the retries-exhausted error is recorded too)
+		f.GaveUp = true       // The finished-streams status column shows [重试尽] from this flag (distinguishing it from other status=0 shapes)
+		f.AppendContent(data) // Tee a copy for web review (the retries-exhausted error is recorded too)
 	}
 }
 
 // startSSEKeepalive sends 200 + SSE headers + the first ping to the client on the first retry, starting the keepalive stream.
 // Pings keep flowing during subsequent retries so Claude Code doesn't time out on the long silence and report an API error.
 // Returns the flusher for later pings/forwarding. f: this flight (id for logging); reason: retry reason (logging).
-func startSSEKeepalive(w http.ResponseWriter, f *flight, reason string) http.Flusher {
+func startSSEKeepalive(w http.ResponseWriter, f *recorder.Flight, reason string) http.Flusher {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -173,7 +174,7 @@ func startSSEKeepalive(w http.ResponseWriter, f *flight, reason string) http.Flu
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	writeSSEPing(w, flusher, f)
-	log.Printf("[keepalive] #%d retrying (%s); SSE ping keepalive on", f.id, reason)
+	log.Printf("[keepalive] #%d retrying (%s); SSE ping keepalive on", f.ID, reason)
 	return flusher
 }
 
@@ -183,7 +184,7 @@ func startSSEKeepalive(w http.ResponseWriter, f *flight, reason string) http.Flu
 // A nil flusher means wait silently without pings: under convertAlltoStream the client expects a non-streaming response,
 // so writing any SSE byte early would pollute the response; all we can do is wait (the client connection stays up, just dataless).
 // Returning false means ctx was cancelled (client disconnected): stop retrying and end.
-func sleepWithPing(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, wait, interval time.Duration, f *flight) bool {
+func sleepWithPing(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, wait, interval time.Duration, f *recorder.Flight) bool {
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	ticker := time.NewTicker(interval)
@@ -191,7 +192,7 @@ func sleepWithPing(ctx context.Context, w http.ResponseWriter, flusher http.Flus
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[keepalive] #%d client disconnected; stopping retries", f.id)
+			log.Printf("[keepalive] #%d client disconnected; stopping retries", f.ID)
 			return false
 		case <-ticker.C:
 			if flusher != nil {
@@ -207,12 +208,12 @@ func sleepWithPing(ctx context.Context, w http.ResponseWriter, flusher http.Flus
 // While forwarding, it parses the SSE usage fields line by line, accumulating into the global stats for the status row;
 // the forwarded bytes are simultaneously added to flight.bytes for the upper-half icon display, and phase=1 is marked.
 // Returns this stream's final output_tokens, for the handler's token/s sample.
-func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.Reader, f *flight, headersSent bool) int64 {
+func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.Reader, f *recorder.Flight, headersSent bool) int64 {
 	defer resp.Body.Close()
 	// convertOff2Low native-port upgrade (off->low): strip thinking blocks from the response so the client keeps seeing the
 	// thinking-off shape it asked for. Only on a 200 (error bodies pass through untouched), never on Responses passthrough.
 	var stripper *translate.ThinkingStripper
-	if f.stripThinking.Load() && !f.responsesRaw() && resp.StatusCode == http.StatusOK {
+	if f.StripThinking.Load() && !f.ResponsesRaw() && resp.StatusCode == http.StatusOK {
 		stripper = translate.NewThinkingStripper(resp.Header.Get("Content-Type"))
 	}
 
@@ -221,7 +222,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 	// noBullshitOnEmptyClaudeSearch is deliberately limited to native Anthropic streaming. The writer holds client-bound bytes,
 	// while the normal loop below continues to parse and record the exact upstream response.
 	var guard *searchGuardWriter
-	if f.searchGuardArmed && f.translated == "" && sseStream && resp.StatusCode == http.StatusOK {
+	if f.SearchGuardArmed && f.Translated == "" && sseStream && resp.StatusCode == http.StatusOK {
 		guard = newSearchGuardWriter(w, f, headersSent)
 		w = guard
 	}
@@ -237,75 +238,75 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 	flusher, canFlush := w.(http.Flusher)
 
 	// Response received, forwarding starts: the icon switches from "awaiting first byte (elapsed)" to "forwarding (bytes)".
-	f.phase.Store(1)
-	f.status = resp.StatusCode
-	f.setStage(stageForward) // The web 「状态」 column switches to showing the status code
+	f.Phase.Store(1)
+	f.Status = resp.StatusCode
+	f.SetStage(recorder.StageForward) // The web 「状态」 column switches to showing the status code
 
 	// Counted into active streams; the exit defer subtracts one.
-	stats.mu.Lock()
-	stats.active++
-	stats.mu.Unlock()
+	recorder.Stats.Mu.Lock()
+	recorder.Stats.Active++
+	recorder.Stats.Mu.Unlock()
 
-	var lastOutput int64                 // This stream's cumulative output_tokens, for computing deltas
-	var lastInput int64                  // This stream's cumulative input_tokens
-	var lastCacheRead int64              // This stream's cumulative cache_read
-	var lastCacheCreation int64          // This stream's cumulative cache_creation
-	var sawDeltaUsage bool               // A message_delta with usage has been seen (the real usage breakdown has arrived)
-	var sawStop bool                     // Terminal event seen (message_stop / response.completed|failed|incomplete); a 200 SSE stream ending without it gets the noStop badge
-	interrupted := false                 // Whether this stream broke midway (usage rolled back, not counted in the aggregation)
-	openTools := map[int]*openToolCall{} // Anthropic: block index → in-progress tool call (for the *0 empty-args decision, survives across chunks)
-	respTools := map[string]string{}     // Responses passthrough: item_id → tool name (aligns with output_item.done for the empty-args decision)
+	var lastOutput int64                          // This stream's cumulative output_tokens, for computing deltas
+	var lastInput int64                           // This stream's cumulative input_tokens
+	var lastCacheRead int64                       // This stream's cumulative cache_read
+	var lastCacheCreation int64                   // This stream's cumulative cache_creation
+	var sawDeltaUsage bool                        // A message_delta with usage has been seen (the real usage breakdown has arrived)
+	var sawStop bool                              // Terminal event seen (message_stop / response.completed|failed|incomplete); a 200 SSE stream ending without it gets the noStop badge
+	interrupted := false                          // Whether this stream broke midway (usage rolled back, not counted in the aggregation)
+	openTools := map[int]*recorder.OpenToolCall{} // Anthropic: block index → in-progress tool call (for the *0 empty-args decision, survives across chunks)
+	respTools := map[string]string{}              // Responses passthrough: item_id → tool name (aligns with output_item.done for the empty-args decision)
 	defer func() {
 		counted := false
 		if lastInput == 0 && lastCacheRead == 0 && lastCacheCreation == 0 && lastOutput == 0 {
 			// Non-streaming JSON response: SSE yields no usage, so extract it from the body (classifier and similar requests)
-			if in, cr, cc, out, ok := parseNonStreamUsage(f.snapshotContent()); ok {
-				f.inTokens = in
-				f.cacheRead = cr
-				f.cacheCreation = cc
-				f.outTokens = out
-				stats.mu.Lock()
-				stats.inputTokens += in
-				stats.cacheRead += cr
-				stats.cacheCreation += cc
-				stats.outputTokens += out
-				stats.mu.Unlock()
+			if in, cr, cc, out, ok := recorder.ParseNonStreamUsage(f.SnapshotContent()); ok {
+				f.InTokens = in
+				f.CacheRead = cr
+				f.CacheCreation = cc
+				f.OutTokens = out
+				recorder.Stats.Mu.Lock()
+				recorder.Stats.InputTokens += in
+				recorder.Stats.CacheRead += cr
+				recorder.Stats.CacheCreation += cc
+				recorder.Stats.OutputTokens += out
+				recorder.Stats.Mu.Unlock()
 				counted = true
 			}
 		} else if sawDeltaUsage {
 			// Stream completed normally (real breakdown obtained): count into the aggregation.
-			f.inTokens = lastInput
-			f.cacheRead = lastCacheRead
-			f.cacheCreation = lastCacheCreation
-			f.outTokens = lastOutput
+			f.InTokens = lastInput
+			f.CacheRead = lastCacheRead
+			f.CacheCreation = lastCacheCreation
+			f.OutTokens = lastOutput
 			counted = true
 		} else {
 			// Stream interrupted: only message_start's estimated usage has been counted globally; roll it back wholesale —
 			// the aggregation counts only complete responses (consistent with Claude Code). f.* zeroed; the per-stream hit rate shows "-".
-			rollbackUsageStats(lastInput, lastCacheRead, lastCacheCreation, lastOutput)
-			f.inTokens, f.cacheRead, f.cacheCreation, f.outTokens = 0, 0, 0, 0
+			recorder.RollbackUsageStats(lastInput, lastCacheRead, lastCacheCreation, lastOutput)
+			f.InTokens, f.CacheRead, f.CacheCreation, f.OutTokens = 0, 0, 0, 0
 			interrupted = true
 		}
 		// Real upstream model: prefer the model name the upstream response actually returned (the upstream may route the request onward to another model);
 		// when the upstream returned no model, fall back to the route target targetModel, or origModel for passthrough.
-		realModel := f.upstreamModel
+		realModel := f.UpstreamModel
 		if realModel == "" {
-			realModel = f.targetModel
+			realModel = f.TargetModel
 		}
 		if realModel == "" {
-			realModel = f.origModel
+			realModel = f.OrigModel
 		}
 		if counted {
-			stats.addModelUsage(realModel, f.inTokens, f.cacheRead, f.cacheCreation, f.outTokens)
+			recorder.Stats.AddModelUsage(realModel, f.InTokens, f.CacheRead, f.CacheCreation, f.OutTokens)
 		}
 		if interrupted {
-			log.Printf("[interrupted] #%d response status %d size %s (stream incomplete; usage excluded from aggregates)", f.id, f.status, humanBytes(f.bytes.Load()))
+			log.Printf("[interrupted] #%d response status %d size %s (stream incomplete; usage excluded from aggregates)", f.ID, f.Status, recorder.HumanBytes(f.Bytes.Load()))
 		} else {
-			log.Printf("[done] #%d response status %d size %s cache-hit %s", f.id, f.status, humanBytes(f.bytes.Load()), cacheHitRate(f.cacheRead, f.inTokens, f.cacheCreation))
+			log.Printf("[done] #%d response status %d size %s cache-hit %s", f.ID, f.Status, recorder.HumanBytes(f.Bytes.Load()), recorder.CacheHitRate(f.CacheRead, f.InTokens, f.CacheCreation))
 		}
-		stats.mu.Lock()
-		stats.active--
-		stats.mu.Unlock()
+		recorder.Stats.Mu.Lock()
+		recorder.Stats.Active--
+		recorder.Stats.Mu.Unlock()
 	}()
 	// writeAndCount forwards a chunk of bytes and parses its data: lines to update stats.
 	// Order: tee the exact upstream bytes to the web upstream side (the full truth, before model write-back and stripping) →
@@ -315,7 +316,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 	// the model (response model names written back below) and/or the stripper is active — except when w is a translatingWriter:
 	// the translation port tees its own downstream side (the translated client-bound bytes) via its tap.
 	_, downstreamTapped := w.(interface{ SetDownTap(translate.FlightTap) })
-	teeDown := !downstreamTapped && (guard != nil || stripper != nil || (f.targetModel != "" && f.targetModel != f.origModel))
+	teeDown := !downstreamTapped && (guard != nil || stripper != nil || (f.TargetModel != "" && f.TargetModel != f.OrigModel))
 	writeAndCount := func(data []byte) {
 		if len(data) == 0 {
 			return
@@ -323,14 +324,14 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 		if guard != nil {
 			guard.observeUpstream(data) // Full-fidelity detector input, independent of the capped web preview.
 		}
-		f.appendContent(data) // Tee a copy for the web upstream side (the exact upstream bytes, before model write-back and stripping)
+		f.AppendContent(data) // Tee a copy for the web upstream side (the exact upstream bytes, before model write-back and stripping)
 		out := data
-		if f.targetModel != "" && f.targetModel != f.origModel {
+		if f.TargetModel != "" && f.TargetModel != f.OrigModel {
 			lines := bytes.Split(data, []byte("\n"))
 			modified := false
 			var actualModel string
 			for i, line := range lines {
-				newLine, am, mod := rewriteResponseModel(line, f.origModel)
+				newLine, am, mod := rewriteResponseModel(line, f.OrigModel)
 				if mod {
 					modified = true
 					if actualModel == "" {
@@ -341,11 +342,11 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 			}
 			if modified {
 				out = bytes.Join(lines, []byte("\n"))
-				if f.upstreamModel == "" && actualModel != "" {
-					f.upstreamModel = actualModel
+				if f.UpstreamModel == "" && actualModel != "" {
+					f.UpstreamModel = actualModel
 				}
-				if !f.modelLogged.Swap(true) {
-					log.Printf("[rewrite] #%d response stream model rewritten back %s -> %s", f.id, actualModel, f.origModel)
+				if !f.ModelLogged.Swap(true) {
+					log.Printf("[rewrite] #%d response stream model rewritten back %s -> %s", f.ID, actualModel, f.OrigModel)
 				}
 			}
 		}
@@ -358,23 +359,23 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 				flusher.Flush()
 			}
 			n := int64(len(out))
-			f.bytes.Add(n) // Per-stream bytes, for the icon display (post-strip: what the client actually received)
+			f.Bytes.Add(n) // Per-stream bytes, for the icon display (post-strip: what the client actually received)
 			if teeDown {
-				f.appendContentDown(out) // The client-bound bytes can differ from the upstream side (model written back and/or thinking stripped): the downstream side gets its own tee
+				f.AppendContentDown(out) // The client-bound bytes can differ from the upstream side (model written back and/or thinking stripped): the downstream side gets its own tee
 			}
 		}
-		responsesRaw := f.responsesRaw() // Computed once outside the loop: passthrough streams parse by Responses semantics
+		responsesRaw := f.ResponsesRaw() // Computed once outside the loop: passthrough streams parse by Responses semantics
 		for _, line := range bytes.Split(data, []byte("\n")) {
 			if responsesRaw {
-				parseResponsesStreamStats(line, &lastOutput, &lastInput, &lastCacheRead, &lastCacheCreation, &sawDeltaUsage)
-				if itemID, name, ok := parseResponsesToolStart(line); ok {
-					f.noteToolCall(name) // Tool-call counting: the finished-streams list shows tags like [exec_command*1]
+				recorder.ParseResponsesStreamStats(line, &lastOutput, &lastInput, &lastCacheRead, &lastCacheCreation, &sawDeltaUsage)
+				if itemID, name, ok := recorder.ParseResponsesToolStart(line); ok {
+					f.NoteToolCall(name) // Tool-call counting: the finished-streams list shows tags like [exec_command*1]
 					respTools[itemID] = name
 				}
-				if itemID, empty, ok := parseResponsesToolDone(line); ok {
+				if itemID, empty, ok := recorder.ParseResponsesToolDone(line); ok {
 					if name := respTools[itemID]; name != "" {
 						if empty {
-							f.noteToolCallEmpty(name) // Arguments object empty: a single call's tag shows *0
+							f.NoteToolCallEmpty(name) // Arguments object empty: a single call's tag shows *0
 						}
 						delete(respTools, itemID)
 					}
@@ -384,28 +385,28 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 				if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) &&
 					(bytes.Contains(line, []byte("response.completed")) || bytes.Contains(line, []byte("response.failed")) || bytes.Contains(line, []byte("response.incomplete"))) {
 					sawStop = true
-					f.delivered.Store(true)
+					f.Delivered.Store(true)
 				}
 				continue
 			}
-			parseSSEStats(line, &lastOutput, &lastInput, &lastCacheRead, &lastCacheCreation, &sawDeltaUsage)
-			if ts, ok := parseToolCallStart(line); ok {
-				f.noteToolCall(ts.name) // Tool-call counting: the finished-streams list shows [Read*1][Edit*3]
-				tr := &openToolCall{name: ts.name}
-				if !isEmptyArgsJSON(string(ts.input)) {
-					tr.hasArgs = true // A server_tool_use's start is already the complete block: a non-empty input settles it immediately
+			recorder.ParseSSEStats(line, &lastOutput, &lastInput, &lastCacheRead, &lastCacheCreation, &sawDeltaUsage)
+			if ts, ok := recorder.ParseToolCallStart(line); ok {
+				f.NoteToolCall(ts.Name) // Tool-call counting: the finished-streams list shows [Read*1][Edit*3]
+				tr := &recorder.OpenToolCall{Name: ts.Name}
+				if !recorder.IsEmptyArgsJSON(string(ts.Input)) {
+					tr.HasArgs = true // A server_tool_use's start is already the complete block: a non-empty input settles it immediately
 				}
-				openTools[ts.index] = tr
+				openTools[ts.Index] = tr
 			}
-			if idx, partial, ok := parseToolArgsDelta(line); ok {
+			if idx, partial, ok := recorder.ParseToolArgsDelta(line); ok {
 				if tr := openTools[idx]; tr != nil {
-					tr.notePartial(partial) // Accumulate argument fragments (≤64B); empty-args decided at stop
+					tr.NotePartial(partial) // Accumulate argument fragments (≤64B); empty-args decided at stop
 				}
 			}
-			if idx, ok := parseToolBlockStop(line); ok {
+			if idx, ok := recorder.ParseToolBlockStop(line); ok {
 				if tr := openTools[idx]; tr != nil {
-					if tr.argsEmpty() {
-						f.noteToolCallEmpty(tr.name)
+					if tr.ArgsEmpty() {
+						f.NoteToolCallEmpty(tr.Name)
 					}
 					delete(openTools, idx)
 				}
@@ -415,7 +416,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 			// and waiting for a clean EOF to mark would be too late (normal translation-port streams were once misrecorded as 499).
 			if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) && bytes.Contains(line, []byte("message_stop")) {
 				sawStop = true
-				f.delivered.Store(true)
+				f.Delivered.Store(true)
 			}
 		}
 	}
@@ -430,7 +431,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 			if err == io.EOF {
 				// A cleanly exhausted upstream stream means the last chunk has also been written downstream; mark fully delivered
 				// (the closing defer uses this to tell "disconnected after completion" from "disconnected midway"; only the latter is re-recorded as 499).
-				f.delivered.Store(true)
+				f.Delivered.Store(true)
 			}
 			break
 		}
@@ -439,7 +440,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 	// red [无stop] badge. Client-side disconnects (Esc) cancel the upstream request context — excluded here; that case
 	// is already re-recorded as 499 by the wrap-up defer.
 	if sseStream && resp.StatusCode == http.StatusOK && !sawStop && (resp.Request == nil || resp.Request.Context().Err() == nil) {
-		f.noStop = true
+		f.NoStop = true
 	}
 	if stripper != nil {
 		// Flush what the stripper still holds: a partial trailing line (SSE), or the whole transformed document (JSON mode).
@@ -448,18 +449,18 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 			if canFlush {
 				flusher.Flush()
 			}
-			f.bytes.Add(int64(len(tail)))
-			f.appendContentDown(tail)
+			f.Bytes.Add(int64(len(tail)))
+			f.AppendContentDown(tail)
 		}
 		if stripper.Stripped > 0 {
-			log.Printf("[off->low] #%d stripped %d thinking block(s) from the response (client sees thinking-off)", f.id, stripper.Stripped)
+			log.Printf("[off->low] #%d stripped %d thinking block(s) from the response (client sees thinking-off)", f.ID, stripper.Stripped)
 		}
 	}
 	// Tool calls still open at stream end (missing content_block_stop, e.g. a truncated stream) get their empty-args verdict from what was received,
 	// a best-effort *0 backfill; for normally ended streams openTools is already empty here.
 	for _, tr := range openTools {
-		if tr.argsEmpty() {
-			f.noteToolCallEmpty(tr.name)
+		if tr.ArgsEmpty() {
+			f.NoteToolCallEmpty(tr.Name)
 		}
 	}
 	if guard != nil {
@@ -482,18 +483,18 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 // w: client response writer; resp/head/br: the upstream response (head is what peekHead already read, handled first);
 // f: this flight. Returns (whether message_stop was fully received, output token count).
 // On an incomplete stream nothing is written to the client, so the caller can safely retry the whole thing (resend the streaming request, drain again).
-func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.Reader, f *flight) (bool, int64) {
+func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.Reader, f *recorder.Flight) (bool, int64) {
 	defer resp.Body.Close()
-	f.phase.Store(1)
-	f.status = resp.StatusCode
-	f.setStage(stageForward)
-	stats.mu.Lock()
-	stats.active++
-	stats.mu.Unlock()
+	f.Phase.Store(1)
+	f.Status = resp.StatusCode
+	f.SetStage(recorder.StageForward)
+	recorder.Stats.Mu.Lock()
+	recorder.Stats.Active++
+	recorder.Stats.Mu.Unlock()
 	defer func() {
-		stats.mu.Lock()
-		stats.active--
-		stats.mu.Unlock()
+		recorder.Stats.Mu.Lock()
+		recorder.Stats.Active--
+		recorder.Stats.Mu.Unlock()
 	}()
 
 	var msgObj map[string]interface{}          // message_start's message skeleton
@@ -519,9 +520,9 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 			if len(line) == 0 {
 				continue
 			}
-			f.bytes.Add(int64(len(line)))
-			f.appendContent(line)
-			parseSSEStats(line, &lastOutput, &lastInput, &lastCacheRead, &lastCacheCreation, nil)
+			f.Bytes.Add(int64(len(line)))
+			f.AppendContent(line)
+			recorder.ParseSSEStats(line, &lastOutput, &lastInput, &lastCacheRead, &lastCacheCreation, nil)
 
 			s := bytes.TrimRight(line, "\r\n")
 			if !bytes.HasPrefix(s, []byte("data:")) {
@@ -545,15 +546,15 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 							usageObj[k] = v
 						}
 					}
-					if m, ok := msg["model"].(string); ok && m != "" && f.upstreamModel == "" {
-						f.upstreamModel = m
+					if m, ok := msg["model"].(string); ok && m != "" && f.UpstreamModel == "" {
+						f.UpstreamModel = m
 					}
 				}
 			case "content_block_start":
 				if cb, ok := ev["content_block"].(map[string]interface{}); ok {
 					blocks[int(jsonutil.ToInt64(ev["index"]))] = cb
 					if t, _ := cb["type"].(string); t == "tool_use" || t == "server_tool_use" {
-						f.noteToolCall(strVal(cb, "name")) // Tool-call counting (the JSON-assembly path doesn't go through writeAndCount)
+						f.NoteToolCall(strVal(cb, "name")) // Tool-call counting (the JSON-assembly path doesn't go through writeAndCount)
 					}
 				}
 			case "content_block_delta":
@@ -607,8 +608,8 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 	}
 	if !complete {
 		// Incompletely received streams don't count in the aggregation (they only have message_start's estimated usage); rolled back, ready for a wholesale retry
-		rollbackUsageStats(lastInput, lastCacheRead, lastCacheCreation, lastOutput)
-		log.Printf("[streamify] #%d upstream stream incomplete (no message_stop); nothing written to client, whole request retried", f.id)
+		recorder.RollbackUsageStats(lastInput, lastCacheRead, lastCacheCreation, lastOutput)
+		log.Printf("[streamify] #%d upstream stream incomplete (no message_stop); nothing written to client, whole request retried", f.ID)
 		return false, lastOutput
 	}
 
@@ -628,7 +629,7 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 	for _, i := range indexes {
 		b := blocks[i]
 		// convertOff2Low upgrade: thinking blocks never reach the assembled response (the client asked for thinking-off)
-		if f.stripThinking.Load() {
+		if f.StripThinking.Load() {
 			if t, _ := b["type"].(string); t == "thinking" || t == "redacted_thinking" {
 				continue
 			}
@@ -646,12 +647,12 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 			case nil:
 				empty = true
 			case string:
-				empty = isEmptyArgsJSON(inp)
+				empty = recorder.IsEmptyArgsJSON(inp)
 			case map[string]interface{}:
 				empty = len(inp) == 0
 			}
 			if empty {
-				f.noteToolCallEmpty(strVal(b, "name"))
+				f.NoteToolCallEmpty(strVal(b, "name"))
 			}
 		}
 		content = append(content, b)
@@ -661,10 +662,10 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 		msgObj["usage"] = usageObj
 	}
 	// model is written back to the client's original model (route rewriting is transparent to the client).
-	if f.targetModel != "" && f.targetModel != f.origModel {
-		msgObj["model"] = f.origModel
-		if f.upstreamModel != "" && !f.modelLogged.Swap(true) {
-			log.Printf("[rewrite] #%d response stream model rewritten back %s -> %s", f.id, f.upstreamModel, f.origModel)
+	if f.TargetModel != "" && f.TargetModel != f.OrigModel {
+		msgObj["model"] = f.OrigModel
+		if f.UpstreamModel != "" && !f.ModelLogged.Swap(true) {
+			log.Printf("[rewrite] #%d response stream model rewritten back %s -> %s", f.ID, f.UpstreamModel, f.OrigModel)
 		}
 	}
 	out, err := json.Marshal(msgObj)
@@ -673,12 +674,12 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 	}
 
 	// Write the complete response in one shot (the client expects non-streaming JSON; not a single byte may be written before it's complete).
-	f.inTokens = lastInput
-	f.cacheRead = lastCacheRead
-	f.cacheCreation = lastCacheCreation
-	f.outTokens = lastOutput
-	stats.addModelUsage(f.realModel(), f.inTokens, f.cacheRead, f.cacheCreation, f.outTokens)
-	log.Printf("[done] #%d response status %d size %s cache-hit %s", f.id, f.status, humanBytes(f.bytes.Load()), cacheHitRate(f.cacheRead, f.inTokens, f.cacheCreation))
+	f.InTokens = lastInput
+	f.CacheRead = lastCacheRead
+	f.CacheCreation = lastCacheCreation
+	f.OutTokens = lastOutput
+	recorder.Stats.AddModelUsage(f.RealModel(), f.InTokens, f.CacheRead, f.CacheCreation, f.OutTokens)
+	log.Printf("[done] #%d response status %d size %s cache-hit %s", f.ID, f.Status, recorder.HumanBytes(f.Bytes.Load()), recorder.CacheHitRate(f.CacheRead, f.InTokens, f.CacheCreation))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -686,11 +687,11 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
-	f.bytes.Add(int64(len(out)))
-	f.appendContentDown(out) // Tee the rebuilt non-streaming JSON to the downstream side (the actual proxy→client shape; the upstream-side SSE lines are teed line by line into content by handleChunk)
+	f.Bytes.Add(int64(len(out)))
+	f.AppendContentDown(out) // Tee the rebuilt non-streaming JSON to the downstream side (the actual proxy→client shape; the upstream-side SSE lines are teed line by line into content by handleChunk)
 	// The assembled JSON has been written in one shot = fully delivered (499 re-marking only looks at incompletely sent streams)
-	f.delivered.Store(true)
-	log.Printf("[streamify] #%d stream complete; non-streaming JSON returned to client in one piece (%d output tokens)", f.id, lastOutput)
+	f.Delivered.Store(true)
+	log.Printf("[streamify] #%d stream complete; non-streaming JSON returned to client in one piece (%d output tokens)", f.ID, lastOutput)
 	return true, lastOutput
 }
 

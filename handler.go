@@ -14,6 +14,7 @@ import (
 	"proxy429/internal/config"
 	"proxy429/internal/jsonutil"
 	"proxy429/internal/platform"
+	"proxy429/internal/recorder"
 	"proxy429/internal/translate"
 )
 
@@ -46,12 +47,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// The upstream request builds on upCtx instead (created below once the flight exists).
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	f := &flight{
-		id:    flights.nextID.Add(1),
-		start: time.Now(),
+	f := &recorder.Flight{
+		ID:    recorder.Flights.NextID.Add(1),
+		Start: time.Now(),
 	}
-	f.stageStart.Store(f.start.UnixNano()) // Light-color timing starts at stream creation (the white light times from request receipt)
-	flights.register(f)
+	f.StageStart.Store(f.Start.UnixNano()) // Light-color timing starts at stream creation (the white light times from request receipt)
+	recorder.Flights.Register(f)
 	// The upstream request runs on its own context, decoupled from the client context: Codex closes the connection
 	// the instant the terminal event (message_stop / response.completed) arrives, and severing the upstream then makes
 	// the provider's nginx log a 499 for a response it had in fact fully sent. The watcher propagates a disconnect
@@ -64,7 +65,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			if !f.delivered.Load() {
+			if !f.Delivered.Load() {
 				upCancel()
 			} else {
 				time.AfterFunc(10*time.Second, upCancel) // Delivered but the upstream hangs: cap the drain so nothing leaks
@@ -75,16 +76,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// Internal requests from the Responses translation port carry a context marker tagging the flight's origin;
 	// the web API column shows [translate]/[Response] (alongside the route-reason tag).
 	if v, ok := r.Context().Value(translate.CtxKeyTranslated).(string); ok {
-		f.translated = v
+		f.Translated = v
 	}
 	// Internal requests from the Responses port carry the session identifier (prompt_cache_key) via context, anchoring the "缓存年龄" column per session.
 	if v, ok := r.Context().Value(translate.CtxKeyConvID).(string); ok {
-		f.convID = v
+		f.ConvID = v
 	}
 	// The responses-raw passthrough port carries the thinking mode via context (reasoning.effort verbatim — passthrough modifies nothing,
 	// so the upstream receives exactly it; the translation port's/direct port's thinking value is extracted from the Anthropic body after rewriting below).
 	if v, ok := r.Context().Value(translate.CtxKeyThink).(string); ok {
-		f.think = v
+		f.Think = v
 	}
 	// convertOff2Low upgrade modes (the Responses translation port quietly upgrading off-thinking to low / sending the downstream's
 	// requested effort when history is unreplayable; see the n2l constants): the API column shows a two-tone [off->low] badge for implicit upgrades; in the forwarding loop,
@@ -102,29 +103,29 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// the replay pointer stays on the flight, and the 400-fallback strip learns the conversation watermark from restore timestamps
 	// (see the tool_call_id branch in the forwarding loop).
 	if v, ok := r.Context().Value(translate.CtxKeySearchReplay).(*translate.SearchReplayCtx); ok && v != nil {
-		f.searchReplay = v
+		f.SearchReplay = v
 		if v.ProactiveCutoff > 0 {
-			f.searchStripped.Store(int32(v.ProactiveCutoff))
-			log.Printf("[strip] #%d conversation watermark stripped %d replayed search blocks", f.id, v.ProactiveCutoff)
+			f.SearchStripped.Store(int32(v.ProactiveCutoff))
+			log.Printf("[strip] #%d conversation watermark stripped %d replayed search blocks", f.ID, v.ProactiveCutoff)
 		}
 	}
 	// Tag count_tokens probes: a finished stream's raw content is only {"input_tokens":N};
 	// without the tag it looks like an "empty response" on the web, hard to tell a probe from an anomaly.
 	if r.URL.Path == countTokensPath {
-		f.countTokens = true
+		f.CountTokens = true
 	}
 	// Cleanup fallback: all return paths unregister via one defer, so nothing is left behind in the in-flight list by omission.
 	// After unregistering, its pass-through content (if any) is archived for the web to review among finished streams.
 	defer func() {
-		markClientGone(f, ctx)
-		flights.unregister(f.id)
-		addFinished(f)
+		recorder.MarkClientGone(f, ctx)
+		recorder.Flights.Unregister(f.ID)
+		recorder.AddFinished(f)
 	}()
 
 	// 1. Buffer the request body for replay on retries.
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("[request] #%d %s %s failed to read body: %v", f.id, r.Method, r.URL.Path, err)
+		log.Printf("[request] #%d %s %s failed to read body: %v", f.ID, r.Method, r.URL.Path, err)
 		http.Error(w, "read body failed", http.StatusBadGateway)
 		return
 	}
@@ -132,22 +133,22 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// Keep a copy of the request body for the web (which request caused this stream): this is the initial value of the proxy→upstream side;
 	// each attempt of the retry loop refreshes it with the body actually sent (after a fallback rewrite, the last one wins); streams that die young
 	// before dispatch (e.g. bad JSON) still have this entry body to inspect.
-	f.setReqBody(body)
+	f.SetReqBody(body)
 	// The downstream-side (downstream→proxy) request body of dual-link recording: the translation port brings the Responses original via context
 	// (necessarily different from the translated body, so always stored); native streams defer to a comparison with the first upstream-bound body and are stored only on difference.
 	var downBody []byte
 	if v, ok := r.Context().Value(translate.CtxKeyReqDown).([]byte); ok && len(v) > 0 {
-		f.setReqDown(v)
+		f.SetReqDown(v)
 	} else {
 		downBody = body
 	}
 	// Anthropic port: extract the session identifier from the request body's metadata.user_id (the Responses port already carries it via context; no double parsing).
-	if f.convID == "" {
-		f.convID = extractConvID(body)
+	if f.ConvID == "" {
+		f.ConvID = extractConvID(body)
 	}
 	// Conversation lineage: hash this request's message array and link the flight to its parent
 	// (same session, longest fully-contained prefix), powering the web 「#N<-M」 tag.
-	computeLineage(f, body)
+	recorder.ComputeLineage(f, body)
 
 	if c.LogRequestDetail {
 		logRequestDetail(r, body)
@@ -158,22 +159,22 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if origModel != "" {
 		modelPart = " model=" + origModel
 	}
-	if f.translated == translate.TranslatedResponsesRaw {
+	if f.Translated == translate.TranslatedResponsesRaw {
 		modelPart += " [direct:responses]"
-	} else if f.translated != "" {
-		modelPart += " [translate:" + f.translated + "]"
+	} else if f.Translated != "" {
+		modelPart += " [translate:" + f.Translated + "]"
 	}
-	log.Printf("[request] #%d %s %s%s (body=%d bytes) from %s", f.id, r.Method, r.URL.Path, modelPart, len(body), r.RemoteAddr)
+	log.Printf("[request] #%d %s %s%s (body=%d bytes) from %s", f.ID, r.Method, r.URL.Path, modelPart, len(body), r.RemoteAddr)
 
 	// 1.5 Apply the thinking policy on classifier hits, so classification returns fast.
 	// The classifier source also feeds the routing decision: classifier routing takes priority over model routing.
 	clsKind := detectClassifier(body)
 	if clsKind != config.ClassifierNone {
-		stats.classifierHits.Add(1) // Count on match: tallied whether or not rerouted/rewritten (observing safety-check request volume)
+		recorder.Stats.ClassifierHits.Add(1) // Count on match: tallied whether or not rerouted/rewritten (observing safety-check request volume)
 		if clsKind == config.ClassifierCodex {
-			stats.classifierHitsCodex.Add(1)
+			recorder.Stats.ClassifierHitsCodex.Add(1)
 		} else {
-			stats.classifierHitsCC.Add(1)
+			recorder.Stats.ClassifierHitsCC.Add(1)
 		}
 	}
 	body, clsRewrote := maybeRewriteClassifier(body)
@@ -182,20 +183,20 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// mapped thinking is what shows (e.g. Codex effort high → on 16384), not what the client originally sent.
 	// A responses-raw passthrough body is Responses format (no thinking field); its reasoning.effort
 	// was already carried in via ctx above and is not overwritten here.
-	if f.think == "" {
-		f.think = extractThinkMode(body)
+	if f.Think == "" {
+		f.Think = extractThinkMode(body)
 	}
 	// Implicit-upgrade streams (downstream explicitly off → low) get their thinking value overwritten to [off->low] (extractThinkMode
 	// sees the upgraded low, which can't express the quiet "downstream off, upstream on" upgrade). History-fallback thinking-on
 	// (sent at the downstream's requested effort) is not overwritten: showing the requested effort is truthful (the downstream wanted thinking).
 	if n2lMode == translate.N2LStealth {
-		f.think = "off->low"
+		f.Think = "off->low"
 	}
 
 	// 1.6 Route matching.
 	// Priority: classifier route > fast route > model route (by routes wildcard).
 	// On no match: upstream=c.Upstream, authToken="" (pass through the client's token, the original logic).
-	f.setStage(stageRoute)
+	f.SetStage(recorder.StageRoute)
 	upstream := c.Upstream
 	authToken := ""
 	var targetModel string
@@ -216,9 +217,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			body = replaceModelValue(body, cr.Model)
 			targetModel = cr.Model
 		}
-		log.Printf("[route] #%d classifier%s %s -> %s (model %s -> %s)", f.id, classifierTag(clsKind), origModel, cr.URL, origModel, cr.Model)
-		f.routeReason.Store(routeClassifier)
-		f.convAnchor = "classifier"
+		log.Printf("[route] #%d classifier%s %s -> %s (model %s -> %s)", f.ID, classifierTag(clsKind), origModel, cr.URL, origModel, cr.Model)
+		f.RouteReason.Store(recorder.RouteClassifier)
+		f.ConvAnchor = "classifier"
 	} else if c.FastRoute != nil && isFastRequest(body, r) {
 		// Fast route: non-classifier requests detected with "speed":"fast" are shunted to the designated upstream.
 		fr := c.FastRoute
@@ -231,9 +232,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			targetModel = fr.Model
 		}
 		body = removeSpeedField(body)
-		log.Printf("[route] #%d fast %s -> %s (model %s -> %s)", f.id, origModel, fr.URL, origModel, fr.Model)
-		f.routeReason.Store(routeFast)
-		f.convAnchor = "fast"
+		log.Printf("[route] #%d fast %s -> %s (model %s -> %s)", f.ID, origModel, fr.URL, origModel, fr.Model)
+		f.RouteReason.Store(recorder.RouteFast)
+		f.ConvAnchor = "fast"
 	} else if len(c.Routes) > 0 && origModel != "" {
 		for i := range c.Routes {
 			// "Fallback"/"fast_route" are reserved names (the * catch-all route, the fast channel's name in the Codex menu):
@@ -245,13 +246,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				rr := &c.Routes[i]
 				// The cache anchor key is recorded once on the routing hit (the passthrough branch passes through here too, naturally covered):
 				// only same session + same route form one cache lineage, so utility hops (title generation etc.) can't steal the main conversation's anchor.
-				f.convAnchor = "route:" + rr.Pattern
+				f.ConvAnchor = "route:" + rr.Pattern
 				// Responses native passthrough: this request came from the Responses port and the pre-check found the matched route has url_response_api.
 				// The upstream switches to that field (the Anthropic-only image/search fallbacks and enhance-search are meaningless for it — skipped).
-				if f.responsesRaw() {
+				if f.ResponsesRaw() {
 					if rr.URLResponseAPI == "" {
 						// Present at pre-check, gone now — only a hot config reload could have removed the field; say 502 explicitly instead of silently misrouting.
-						log.Printf("[error] #%d Responses passthrough request hit route %q but its url_response_api is gone (config hot-reloaded?); cannot forward", f.id, rr.Pattern)
+						log.Printf("[error] #%d Responses passthrough request hit route %q but its url_response_api is gone (config hot-reloaded?); cannot forward", f.ID, rr.Pattern)
 						http.Error(w, "route lost url_response_api mid-request", http.StatusBadGateway)
 						return
 					}
@@ -261,8 +262,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 						body = replaceModelValue(body, rr.Model)
 						targetModel = rr.Model
 					}
-					log.Printf("[route] #%d %s -> %s (Responses native passthrough, model %s -> %s)", f.id, origModel, rr.URLResponseAPI, origModel, rr.Model)
-					f.routeReason.Store(routePattern)
+					log.Printf("[route] #%d %s -> %s (Responses native passthrough, model %s -> %s)", f.ID, origModel, rr.URLResponseAPI, origModel, rr.Model)
+					f.RouteReason.Store(recorder.RoutePattern)
 					break
 				}
 				// Capability fallback: when the target upstream lacks image/search capability the request needs, switch to the corresponding fallback upstream.
@@ -277,8 +278,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 							body = replaceModelValue(body, model)
 							targetModel = model
 						}
-						f.routeReason.Store(reason)
-						log.Printf("[route] #%d %s %s -> %s (model %s -> %s)", f.id, label, origModel, url, origModel, model)
+						f.RouteReason.Store(reason)
+						log.Printf("[route] #%d %s %s -> %s (model %s -> %s)", f.ID, label, origModel, url, origModel, model)
 					}
 					sf := c.SearchFallback
 					mf := c.MultimodalFallback
@@ -286,7 +287,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					//    The standalone search sub-agent behavior (summary injection / thinking rewrite, single-request mode)
 					//    is resolved here and applied to the request body after the routing block.
 					if needSearch && sf != nil {
-						applyFB(sf.URL, sf.API, sf.Model, "search-fallback", routeSearch)
+						applyFB(sf.URL, sf.API, sf.Model, "search-fallback", recorder.RouteSearch)
 						// Per field: route claudeSearch* > search_fallback > lazyApply > built-in.
 						effFB := config.EffectiveFallbackSearchSettings(c, rr, sf)
 						convFlag = effFB.ConvertOff2Low // The fallback's own effective flag overwrites the matched route's
@@ -296,7 +297,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					}
 					// Pure images (no search): use multimodal_fallback when configured; search requests never land on mf (degrade to passthrough when there's no sf).
 					if needImage && mf != nil && !needSearch {
-						applyFB(mf.URL, mf.API, mf.Model, "image-fallback", routeMultimodal)
+						applyFB(mf.URL, mf.API, mf.Model, "image-fallback", recorder.RouteMultimodal)
 						convFlag = config.EffectiveConvertOff2Low(c, mf.ConvertOff2Low, mf.Presence.Written("convertOff2Low", mf.ConvertOff2Low != ""), mf.NoLazyApply)
 						break
 					}
@@ -308,8 +309,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					body = replaceModelValue(body, rr.Model)
 					targetModel = rr.Model
 				}
-				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.id, origModel, rr.URL, origModel, rr.Model)
-				f.routeReason.Store(routePattern)
+				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.ID, origModel, rr.URL, origModel, rr.Model)
+				f.RouteReason.Store(recorder.RoutePattern)
 				convFlag = config.EffectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.Presence.Written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
 				searchGuardEnabled = config.EffectiveSearchGuard(c, rr, nil)
 				// Enhance search / route-level claudeSearch*: when the route effectively supports search (no_search:false),
@@ -321,7 +322,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					synth := config.EffectiveDirectSearchSettings(c, rr)
 					searchInjectLevel, searchThinkLevel = config.ResolveSearchBehavior(synth)
 					if searchInjectLevel != "" || searchThinkLevel != "" {
-						log.Printf("[route] #%d enhanced search %s -> %s (model %s)", f.id, origModel, rr.URL, rr.Model)
+						log.Printf("[route] #%d enhanced search %s -> %s (model %s)", f.ID, origModel, rr.URL, rr.Model)
 					}
 				}
 				break // Ordered: stop at the first hit
@@ -329,8 +330,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	f.origModel = origModel
-	f.targetModel = targetModel
+	f.OrigModel = origModel
+	f.TargetModel = targetModel
 
 	// Standalone search sub-agent request (single-request search+summary): inject the summary instruction into the
 	// search request itself and/or rewrite its thinking, then the normal forward path takes over — the upstream
@@ -339,21 +340,21 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// blocks stripped, convertOff2Low-style, so that client keeps seeing a thinking-off response).
 	// Badge every marker hit ([Search] in the model column), even when no injection/rewrite applies.
 	if hasSearchSubagentMarker(body) {
-		f.searchMarker = true
-		f.searchGuardArmed = searchGuardEnabled
+		f.SearchMarker = true
+		f.SearchGuardArmed = searchGuardEnabled
 		if searchThinkLevel != "" {
-			thinkFrom := f.think
+			thinkFrom := f.Think
 			if nb, ok := rewriteSearchThinking(body, searchThinkLevel); ok {
 				body = nb
-				f.searchThinkFrom = thinkFrom // Empty from renders as auto in the API column's [from->to] badge
-				f.searchThinkTo = searchThinkLevel
+				f.SearchThinkFrom = thinkFrom // Empty from renders as auto in the API column's [from->to] badge
+				f.SearchThinkTo = searchThinkLevel
 				if searchThinkLevel != "off" && (thinkFrom == "" || thinkFrom == "off") {
 					// The client never asked for thinking (absent or explicitly off) but the rewrite turned it on:
 					// strip the returning thinking blocks (the convertOff2Low machinery) so the client stays unaware.
-					f.stripThinking.Store(true)
+					f.StripThinking.Store(true)
 				}
 			} else {
-				log.Printf("[searchsum] #%d thinking rewrite to %q abandoned (body unparsable or unknown level); request kept as sent", f.id, searchThinkLevel)
+				log.Printf("[searchsum] #%d thinking rewrite to %q abandoned (body unparsable or unknown level); request kept as sent", f.ID, searchThinkLevel)
 				searchThinkLevel = ""
 
 			}
@@ -362,27 +363,27 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if searchInjectLevel != "" {
 			instructions = append(instructions, summaryLevelConfig(searchInjectLevel, searchMarkerQuery(body)))
 		}
-		if f.searchGuardArmed {
+		if f.SearchGuardArmed {
 			instructions = append(instructions, searchGuardInstruction)
 		}
 		if len(instructions) > 0 {
 			instr := strings.Join(instructions, "\n\n")
 			if nb, ok := injectAfterMarker(body, instr); ok {
 				body = nb
-				f.searchPrompt = instr // The status page shows the injected instruction on hover over the model cell
-				f.searchLevel = searchInjectLevel
+				f.SearchPrompt = instr // The status page shows the injected instruction on hover over the model cell
+				f.SearchLevel = searchInjectLevel
 			}
 		}
 		if searchInjectLevel != "" || searchThinkLevel != "" {
-			f.think = extractThinkMode(body) // The status page's 「API」 column reflects the rewritten thinking
-			log.Printf("[searchsum] #%d standalone search sub-agent request: summary-level=%q thinking=%q (single-request)", f.id, searchInjectLevel, searchThinkLevel)
+			f.Think = extractThinkMode(body) // The status page's 「API」 column reflects the rewritten thinking
+			log.Printf("[searchsum] #%d standalone search sub-agent request: summary-level=%q thinking=%q (single-request)", f.ID, searchInjectLevel, searchThinkLevel)
 		}
 	}
 
 	// upstream may be left empty (with a pattern:"*" catch-all, the default upstream goes unused); still empty here
 	// means no route matched and no default upstream is configured — retrying is pointless, so answer 502 with the reason spelled out.
 	if upstream == "" {
-		log.Printf("[error] #%d no route matched and default upstream is empty; cannot forward", f.id)
+		log.Printf("[error] #%d no route matched and default upstream is empty; cannot forward", f.ID)
 		http.Error(w, "no route matched and upstream is empty", http.StatusBadGateway)
 		return
 	}
@@ -393,7 +394,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if m == "" {
 			m = origModel
 		}
-		f.upstreamKey = upstream + "|" + m
+		f.UpstreamKey = upstream + "|" + m
 		// The search-envelope ownership triple is injected with the route's final values (only the Responses translation port's
 		// translatingWriter has this method; the Anthropic port's type assertion fails and skips naturally). The key uses the token actually in effect:
 		// when the route key is empty, the client's Authorization is what gets passed through — same semantics as the replay side's effectiveKey.
@@ -414,7 +415,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// Only the classifier path passes floorBump: a max_tokens too small for the 1024 budget floor is raised by 1024
 	// upstream-side instead of abandoning the upgrade (guardian requests arrive with max_tokens as small as 64).
 	clsLow := clsKind != config.ClassifierNone && config.ClassifierThinkingModeFor(c, clsKind) == "low"
-	if clsLow || (convFlag == "all" && clsKind == config.ClassifierNone && f.translated == "" && r.URL.Path == "/v1/messages") {
+	if clsLow || (convFlag == "all" && clsKind == config.ClassifierNone && f.Translated == "" && r.URL.Path == "/v1/messages") {
 		effModel := targetModel
 		if effModel == "" {
 			effModel = origModel
@@ -422,27 +423,27 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if nb, upgraded, abandoned, bumped := translate.MaybeUpgradeOffToLow(body, effModel, clsLow); upgraded {
 			if clsLow && !clsRewrote {
 				// The off phase passed this already-off request through untouched: the upgrade here is the one real rewrite, so it counts here.
-				stats.classifierRewrites.Add(1)
+				recorder.Stats.ClassifierRewrites.Add(1)
 				if clsKind == config.ClassifierCodex {
-					stats.classifierRewritesCodex.Add(1)
+					recorder.Stats.ClassifierRewritesCodex.Add(1)
 				} else {
-					stats.classifierRewritesCC.Add(1)
+					recorder.Stats.ClassifierRewritesCC.Add(1)
 				}
 			}
 			if clsLow && bumped {
-				log.Printf("[off->low] #%d classifier%s thinking-off quietly upgraded to low thinking (max_tokens raised by 1024 to fit the 1024-token budget floor; body %d->%d bytes); thinking blocks stripped on return", f.id, classifierTag(clsKind), len(body), len(nb))
+				log.Printf("[off->low] #%d classifier%s thinking-off quietly upgraded to low thinking (max_tokens raised by 1024 to fit the 1024-token budget floor; body %d->%d bytes); thinking blocks stripped on return", f.ID, classifierTag(clsKind), len(body), len(nb))
 			} else if clsLow {
-				log.Printf("[off->low] #%d classifier%s thinking-off quietly upgraded to low thinking (body %d->%d bytes); thinking blocks stripped on return", f.id, classifierTag(clsKind), len(body), len(nb))
+				log.Printf("[off->low] #%d classifier%s thinking-off quietly upgraded to low thinking (body %d->%d bytes); thinking blocks stripped on return", f.ID, classifierTag(clsKind), len(body), len(nb))
 			} else {
-				log.Printf("[off->low] #%d explicit thinking-off quietly upgraded to low thinking (body %d->%d bytes); thinking blocks stripped on return", f.id, len(body), len(nb))
+				log.Printf("[off->low] #%d explicit thinking-off quietly upgraded to low thinking (body %d->%d bytes); thinking blocks stripped on return", f.ID, len(body), len(nb))
 			}
 			body = nb
 			n2lMode = translate.N2LStealth // Reuses the one-shot 400 fallback below (retreat to thinking-off if the upstream rejects thinking)
-			f.think = "off->low"
-			f.stripThinking.Store(true)
+			f.Think = "off->low"
+			f.StripThinking.Store(true)
 		} else if abandoned {
 			// Reachable only with floorBump off (convertOff2Low): the classifier path raises max_tokens instead.
-			log.Printf("[off->low] #%d upgrade abandoned: max_tokens too small for the 1024-token budget floor; request stays thinking-off", f.id)
+			log.Printf("[off->low] #%d upgrade abandoned: max_tokens too small for the 1024-token budget floor; request stays thinking-off", f.ID)
 		}
 	}
 
@@ -454,7 +455,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if stream, ok := getBoolField(body, "stream"); !ok || !stream {
 			body = forceStreamTrue(body)
 			convertToStream = true
-			log.Printf("[streamify] #%d non-streaming request sent upstream as streaming (stream:%v -> true)", f.id, stream)
+			log.Printf("[streamify] #%d non-streaming request sent upstream as streaming (stream:%v -> true)", f.ID, stream)
 		}
 	}
 
@@ -468,20 +469,20 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	searchStripped := false // Whether a stripped-block retry already happened after the upstream rejected a replayed search id (fail-soft gets only one chance)
 	for attempt := 0; attempt <= c.MaxRetries; attempt++ {
 		// Entering the [尝试N] stage: the web 「状态」 column shows the attempt number (awaiting the upstream's first byte).
-		f.attempt.Store(int32(attempt + 1))
-		f.setStage(stageAttempt)
+		f.Attempt.Store(int32(attempt + 1))
+		f.SetStage(recorder.StageAttempt)
 		// 2. Build the request bound upstream.
 		// A passthrough stream's upstream is the base given in url_response_api (…/coding, …/v1, or a full …/v1/responses all work);
 		// the client path must not be copied verbatim (it's /v1/responses — appending it to the base would double or misjoin) — only the difference is appended per the base's shape.
 		upPath := r.URL.Path
-		if f.responsesRaw() {
+		if f.ResponsesRaw() {
 			upPath = responsesAPIPath(upstream)
 		}
 		// Dual-link recording: the proxy→upstream side takes the body actually sent on this attempt (overwriting the entry initial value;
 		// a fallback rewrite naturally refreshes it); a native stream's downstream side is stored only when rewriting makes it differ from the upstream-bound body — identical text is never stored twice.
-		f.setReqBody(body)
+		f.SetReqBody(body)
 		if downBody != nil && !bytes.Equal(downBody, body) {
-			f.setReqDown(downBody)
+			f.SetReqDown(downBody)
 			downBody = nil // The client's original doesn't change; storing it once suffices
 		}
 		upReq, err := http.NewRequestWithContext(upCtx, r.Method, upstream+upPath, bytes.NewReader(body))
@@ -506,20 +507,20 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Sent upstream, entering the "awaiting first byte" stage: the status light turns yellow (waiting++).
-		stats.mu.Lock()
-		stats.waiting++
-		stats.mu.Unlock()
+		recorder.Stats.Mu.Lock()
+		recorder.Stats.Waiting++
+		recorder.Stats.Mu.Unlock()
 		tSend := time.Now()                    // Request send time, for first-byte latency
-		f.attemptStart.Store(tSend.UnixNano()) // [尝试N:Xs] times from this send moment (re-stamped here after backoff zeroed it)
-		resp, err := client.Do(upReq)
+		f.AttemptStart.Store(tSend.UnixNano()) // [尝试N:Xs] times from this send moment (re-stamped here after backoff zeroed it)
+		resp, err := recorder.Client.Do(upReq)
 		// Leave the waiting stage as soon as a response (or timeout/error) arrives.
-		stats.mu.Lock()
-		stats.waiting--
-		stats.mu.Unlock()
+		recorder.Stats.Mu.Lock()
+		recorder.Stats.Waiting--
+		recorder.Stats.Mu.Unlock()
 
 		// Case 0: network-layer error.
 		if err != nil {
-			log.Printf("[attempt %d] #%d request error: %v", attempt+1, f.id, err)
+			log.Printf("[attempt %d] #%d request error: %v", attempt+1, f.ID, err)
 			// A tray-icon double-click abort (ctx cancel) doesn't retry; end directly.
 			if ctx.Err() != nil {
 				if headersSent {
@@ -532,10 +533,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				wait := computeBackoff(nil, attempt)
 				if !time.Now().Add(wait).After(deadline) {
 					log.Printf("[retry] waiting %v before retry (budget left %v)", wait, time.Until(deadline).Round(time.Millisecond))
-					stats.statusRetries.Add(1) // Live status row count: retries (network error/timeout)
-					stats.addModelRetry(f.realModel())
-					f.attempt.Store(int32(attempt + 2)) // Advance the attempt number to the next try during backoff
-					f.attemptStart.Store(0)             // In backoff: no attempt in flight; the yellow light shows [退避中]
+					recorder.Stats.StatusRetries.Add(1) // Live status row count: retries (network error/timeout)
+					recorder.Stats.AddModelRetry(f.RealModel())
+					f.Attempt.Store(int32(attempt + 2)) // Advance the attempt number to the next try during backoff
+					f.AttemptStart.Store(0)             // In backoff: no attempt in flight; the yellow light shows [退避中]
 					if !headersSent && !convertToStream {
 						// A convertToStream client expects a non-streaming response; SSE keepalives would pollute it, so wait silently.
 						flusher = startSSEKeepalive(w, f, "network error")
@@ -566,10 +567,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				wait := computeBackoff(resp, attempt)
 				if !time.Now().Add(wait).After(deadline) {
 					log.Printf("[retry] status %d; waiting %v before retry (budget left %v)", resp.StatusCode, wait, time.Until(deadline).Round(time.Millisecond))
-					stats.statusRetries.Add(1) // Live status row count: retries (status code)
-					stats.addModelRetry(f.realModel())
-					f.attempt.Store(int32(attempt + 2)) // Advance the attempt number to the next try during backoff
-					f.attemptStart.Store(0)             // In backoff: no attempt in flight; the yellow light shows [退避中]
+					recorder.Stats.StatusRetries.Add(1) // Live status row count: retries (status code)
+					recorder.Stats.AddModelRetry(f.RealModel())
+					f.Attempt.Store(int32(attempt + 2)) // Advance the attempt number to the next try during backoff
+					f.AttemptStart.Store(0)             // In backoff: no attempt in flight; the yellow light shows [退避中]
 					resp.Body.Close()
 					if !headersSent && !convertToStream {
 						// A convertToStream client expects a non-streaming response; SSE keepalives would pollute it, so wait silently.
@@ -604,23 +605,23 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			// and this 400 must not be passed to the client.
 			if !searchStripped && bytes.Contains(head, []byte("tool_call_id")) {
 				if nb, n, ok := translate.StripSearchBlocksInBody(body); ok {
-					f.searchStripped.Add(int32(n))
+					f.SearchStripped.Add(int32(n))
 					// Learn the conversation watermark: take the oldest seal-in timestamp among the envelopes restored this round — the registry
 					// evicts by age, so if the oldest was rejected, everything older is dead too; strip by default from now on, no more 400s.
 					water := ""
-					if f.searchReplay != nil && len(f.searchReplay.Restored) > 0 {
-						oldest := f.searchReplay.Restored[0]
-						for _, ts := range f.searchReplay.Restored[1:] {
+					if f.SearchReplay != nil && len(f.SearchReplay.Restored) > 0 {
+						oldest := f.SearchReplay.Restored[0]
+						for _, ts := range f.SearchReplay.Restored[1:] {
 							if ts.Before(oldest) {
 								oldest = ts
 							}
 						}
-						translate.LearnSearchCutoff(f.searchReplay.ConvID, oldest)
+						translate.LearnSearchCutoff(f.SearchReplay.ConvID, oldest)
 						water = fmt.Sprintf(", conversation watermark learned as %s", oldest.Format("01-02 15:04:05"))
 					}
-					log.Printf("[fallback] #%d upstream rejected the replayed search id (HTTP %d); stripped %d search blocks and retried%s", f.id, resp.StatusCode, n, water)
-					stats.statusRetries.Add(1)
-					stats.addModelRetry(f.realModel())
+					log.Printf("[fallback] #%d upstream rejected the replayed search id (HTTP %d); stripped %d search blocks and retried%s", f.ID, resp.StatusCode, n, water)
+					recorder.Stats.StatusRetries.Add(1)
+					recorder.Stats.AddModelRetry(f.RealModel())
 					body = nb
 					searchStripped = true
 					attempt--
@@ -637,12 +638,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			if n2lMode != translate.N2LNone && bytes.Contains(head, []byte("thinking")) {
 				if nb, ok := disableThinkingInBody(body); ok {
 					if n2lMode == translate.N2LTryOn {
-						log.Printf("[fallback] #%d upstream rejected thinking over a no-thinking-block history (HTTP %d); reverted to thinking-off and retried", f.id, resp.StatusCode)
+						log.Printf("[fallback] #%d upstream rejected thinking over a no-thinking-block history (HTTP %d); reverted to thinking-off and retried", f.ID, resp.StatusCode)
 					} else {
-						log.Printf("[fallback] #%d upstream rejected the low-thinking upgrade (HTTP %d); reverted to thinking-off and retried", f.id, resp.StatusCode)
+						log.Printf("[fallback] #%d upstream rejected the low-thinking upgrade (HTTP %d); reverted to thinking-off and retried", f.ID, resp.StatusCode)
 					}
-					stats.statusRetries.Add(1)
-					stats.addModelRetry(f.realModel())
+					recorder.Stats.StatusRetries.Add(1)
+					recorder.Stats.AddModelRetry(f.RealModel())
 					body = nb
 					// A native-port upgrade may also have set reasoning_effort:"low"; the belt-and-braces off form is "none"
 					// (jsonutil.SetTopLevelJSONValue appends the key when absent — harmless, same shape as the classifier rewrite).
@@ -650,8 +651,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 						body = nb2
 					}
 					n2lMode = translate.N2LNone
-					f.think = extractThinkMode(body)
-					f.stripThinking.Store(false) // The retried response is genuinely thinking-off; there is nothing left to strip
+					f.Think = extractThinkMode(body)
+					f.StripThinking.Store(false) // The retried response is genuinely thinking-off; there is nothing left to strip
 					attempt--
 					resp.Body.Close()
 					continue
@@ -662,10 +663,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				wait := computeBackoff(resp, attempt)
 				if !time.Now().Add(wait).After(deadline) {
 					log.Printf("[retry] waiting %v before retry (budget left %v)", wait, time.Until(deadline).Round(time.Millisecond))
-					stats.statusRetries.Add(1) // Live status row count: retries (in-body error on 200)
-					stats.addModelRetry(f.realModel())
-					f.attempt.Store(int32(attempt + 2)) // Advance the attempt number to the next try during backoff
-					f.attemptStart.Store(0)             // In backoff: no attempt in flight; the yellow light shows [退避中]
+					recorder.Stats.StatusRetries.Add(1) // Live status row count: retries (in-body error on 200)
+					recorder.Stats.AddModelRetry(f.RealModel())
+					f.Attempt.Store(int32(attempt + 2)) // Advance the attempt number to the next try during backoff
+					f.AttemptStart.Store(0)             // In backoff: no attempt in flight; the yellow light shows [退避中]
 					resp.Body.Close()
 					if !headersSent && !convertToStream {
 						// A convertToStream client expects a non-streaming response; SSE keepalives would pollute it, so wait silently.
@@ -706,29 +707,29 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			if ok {
 				// Stats match ordinary streaming passthrough: first-byte latency / streaming duration / tok/s.
 				tEnd := time.Now()
-				stats.pushFirstByte(int64(tFirstByte.Sub(tSend).Milliseconds()))
-				stats.pushThroughput(int64(tEnd.Sub(tFirstByte).Milliseconds()), out)
+				recorder.Stats.PushFirstByte(int64(tFirstByte.Sub(tSend).Milliseconds()))
+				recorder.Stats.PushThroughput(int64(tEnd.Sub(tFirstByte).Milliseconds()), out)
 				firstByteMs := tFirstByte.Sub(tSend).Milliseconds()
 				streamMs := tEnd.Sub(tFirstByte).Milliseconds()
 				var tps float64
 				if streamMs > 0 {
 					tps = float64(out) / (float64(streamMs) / 1000.0)
 				}
-				f.firstByteMs = firstByteMs
-				f.tps = tps
+				f.FirstByteMs = firstByteMs
+				f.TPS = tps
 				log.Printf("[flight] #%d TTFT %.2fs stream %.2fs %d tok %.1f tok/s",
-					f.id, float64(firstByteMs)/1000, float64(streamMs)/1000, out, tps)
+					f.ID, float64(firstByteMs)/1000, float64(streamMs)/1000, out, tps)
 				return
 			}
 			// Stream broke midway: the client has received nothing yet; after backoff, retry the whole thing (resend the streaming request, drain again).
-			log.Printf("[streamify] #%d upstream stream incomplete; retrying", f.id)
-			stats.statusRetries.Add(1)
-			stats.addModelRetry(f.realModel())
+			log.Printf("[streamify] #%d upstream stream incomplete; retrying", f.ID)
+			recorder.Stats.StatusRetries.Add(1)
+			recorder.Stats.AddModelRetry(f.RealModel())
 			if attempt < c.MaxRetries && time.Now().Before(deadline) {
 				wait := computeBackoff(resp, attempt)
 				if !time.Now().Add(wait).After(deadline) {
-					f.attempt.Store(int32(attempt + 2))
-					f.attemptStart.Store(0) // In backoff: no attempt in flight; the yellow light shows [退避中]
+					f.Attempt.Store(int32(attempt + 2))
+					f.AttemptStart.Store(0) // In backoff: no attempt in flight; the yellow light shows [退避中]
 					if !sleepWithPing(ctx, w, flusher, wait, pingInterval, f) {
 						return // Client disconnected; stop retrying
 					}
@@ -740,10 +741,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "upstream stream interrupted after retries", http.StatusBadGateway)
 			return
 		}
-		stats.pushFirstByte(int64(tFirstByte.Sub(tSend).Milliseconds()))
+		recorder.Stats.PushFirstByte(int64(tFirstByte.Sub(tSend).Milliseconds()))
 		out := forward(w, resp, head, br, f, headersSent)
 		tEnd := time.Now()
-		stats.pushThroughput(int64(tEnd.Sub(tFirstByte).Milliseconds()), out)
+		recorder.Stats.PushThroughput(int64(tEnd.Sub(tFirstByte).Milliseconds()), out)
 		// Per-stream stats: this stream's first-byte latency + streaming tok/s (distinct from the status row's sliding-window averages).
 		firstByteMs := tFirstByte.Sub(tSend).Milliseconds()
 		streamMs := tEnd.Sub(tFirstByte).Milliseconds()
@@ -751,10 +752,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if streamMs > 0 {
 			tps = float64(out) / (float64(streamMs) / 1000.0)
 		}
-		f.firstByteMs = firstByteMs
-		f.tps = tps
+		f.FirstByteMs = firstByteMs
+		f.TPS = tps
 		log.Printf("[flight] #%d TTFT %.2fs stream %.2fs %d tok %.1f tok/s",
-			f.id, float64(firstByteMs)/1000, float64(streamMs)/1000, out, tps)
+			f.ID, float64(firstByteMs)/1000, float64(streamMs)/1000, out, tps)
 		return
 	}
 }

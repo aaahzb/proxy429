@@ -3,6 +3,7 @@ package main
 import (
 	"proxy429/internal/config"
 	"proxy429/internal/platform"
+	"proxy429/internal/recorder"
 
 	"bytes"
 	"encoding/binary"
@@ -186,10 +187,10 @@ func openURL(target string) {
 // trayInfo reads the current state under one lock: state (0 grey/1 yellow/2 green), active (streaming), waiting (sent, awaiting reply).
 // The tooltip needs the concrete counts, so they're returned together.
 func trayInfo() (state, active, waiting int) {
-	stats.mu.Lock()
-	defer stats.mu.Unlock()
-	active = stats.active
-	waiting = stats.waiting
+	recorder.Stats.Mu.Lock()
+	defer recorder.Stats.Mu.Unlock()
+	active = recorder.Stats.Active
+	waiting = recorder.Stats.Waiting
 	switch {
 	case active > 0:
 		state = 2

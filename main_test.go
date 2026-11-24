@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"proxy429/internal/config"
 	"proxy429/internal/jsonutil"
+	"proxy429/internal/recorder"
 	"proxy429/internal/translate"
 	"reflect"
 	"strings"
@@ -32,7 +33,7 @@ func TestTrafficRTCountsUpstreamBytes(t *testing.T) {
 		w.Write([]byte("0123456789"))
 	}))
 	defer up.Close()
-	c := &http.Client{Transport: trafficRT{base: http.DefaultTransport}}
+	c := &http.Client{Transport: recorder.TrafficRT{Base: http.DefaultTransport}}
 	body := []byte(`{"hello":"upstream"}`)
 	resp, err := c.Post(up.URL, "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -40,69 +41,69 @@ func TestTrafficRTCountsUpstreamBytes(t *testing.T) {
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	if got := stats.bytesUp.Load(); got != int64(len(body)) {
+	if got := recorder.Stats.BytesUp.Load(); got != int64(len(body)) {
 		t.Errorf("bytesUp=%d, want %d (request body bytes)", got, len(body))
 	}
-	if got := stats.bytesDown.Load(); got != 10 {
+	if got := recorder.Stats.BytesDown.Load(); got != 10 {
 		t.Errorf("bytesDown=%d, want 10 (response body bytes)", got)
 	}
 }
 
 // resetStats clears the global stats so tests don't affect each other.
 func resetStats() {
-	stats.mu.Lock()
-	stats.active = 0
-	stats.waiting = 0
-	stats.cacheRead = 0
-	stats.cacheCreation = 0
-	stats.inputTokens = 0
-	stats.outputTokens = 0
-	stats.bytesUp.Store(0)
-	stats.bytesDown.Store(0)
-	stats.statusRetries.Store(0)
-	stats.classifierRewrites.Store(0)
-	stats.classifierHits.Store(0)
-	stats.classifierHitsCC.Store(0)
-	stats.classifierHitsCodex.Store(0)
-	stats.classifierRewritesCC.Store(0)
-	stats.classifierRewritesCodex.Store(0)
-	stats.resetSampleCap(0) // Clear the "recent N" latency/throughput samples
-	stats.mu.Unlock()
+	recorder.Stats.Mu.Lock()
+	recorder.Stats.Active = 0
+	recorder.Stats.Waiting = 0
+	recorder.Stats.CacheRead = 0
+	recorder.Stats.CacheCreation = 0
+	recorder.Stats.InputTokens = 0
+	recorder.Stats.OutputTokens = 0
+	recorder.Stats.BytesUp.Store(0)
+	recorder.Stats.BytesDown.Store(0)
+	recorder.Stats.StatusRetries.Store(0)
+	recorder.Stats.ClassifierRewrites.Store(0)
+	recorder.Stats.ClassifierHits.Store(0)
+	recorder.Stats.ClassifierHitsCC.Store(0)
+	recorder.Stats.ClassifierHitsCodex.Store(0)
+	recorder.Stats.ClassifierRewritesCC.Store(0)
+	recorder.Stats.ClassifierRewritesCodex.Store(0)
+	recorder.Stats.ResetSampleCap(0) // Clear the "recent N" latency/throughput samples
+	recorder.Stats.Mu.Unlock()
 
 	// The flight registry and log buffer are reset too (handlers always register flights; the map must not be nil).
-	flights.mu.Lock()
-	flights.m = make(map[uint64]*flight)
-	flights.nextID.Store(0)
-	flights.mu.Unlock()
+	recorder.Flights.Mu.Lock()
+	recorder.Flights.M = make(map[uint64]*recorder.Flight)
+	recorder.Flights.NextID.Store(0)
+	recorder.Flights.Mu.Unlock()
 
-	logBuf.mu.Lock()
-	logBuf.lines = make([]string, 0, maxLogBuf)
-	logBuf.head = 0
-	logBuf.len = 0
-	logBuf.mu.Unlock()
+	recorder.LogBuf.Mu.Lock()
+	recorder.LogBuf.Lines = make([]string, 0, recorder.MaxLogBuf)
+	recorder.LogBuf.Head = 0
+	recorder.LogBuf.Len = 0
+	recorder.LogBuf.Mu.Unlock()
 
-	finishedMu.Lock()
-	finished = nil
-	cacheObsMap = map[string]*cacheObsEntry{}
-	finishedMu.Unlock()
+	recorder.FinishedMu.Lock()
+	recorder.Finished = nil
+	recorder.CacheObsMap = map[string]*recorder.CacheObsEntry{}
+	recorder.FinishedMu.Unlock()
 }
 
 func TestParseSSEStatsMessageStart(t *testing.T) {
 	resetStats()
 	var last, lastIn, lastCR, lastCC int64
 	var saw bool
-	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":5,"cache_creation_input_tokens":3,"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	if stats.cacheRead != 5 {
-		t.Errorf("cacheRead=%d want 5", stats.cacheRead)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":5,"cache_creation_input_tokens":3,"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	if recorder.Stats.CacheRead != 5 {
+		t.Errorf("cacheRead=%d want 5", recorder.Stats.CacheRead)
 	}
-	if stats.cacheCreation != 3 {
-		t.Errorf("cacheCreation=%d want 3", stats.cacheCreation)
+	if recorder.Stats.CacheCreation != 3 {
+		t.Errorf("cacheCreation=%d want 3", recorder.Stats.CacheCreation)
 	}
-	if stats.inputTokens != 10 {
-		t.Errorf("input=%d want 10", stats.inputTokens)
+	if recorder.Stats.InputTokens != 10 {
+		t.Errorf("input=%d want 10", recorder.Stats.InputTokens)
 	}
-	if stats.outputTokens != 1 {
-		t.Errorf("output=%d want 1", stats.outputTokens)
+	if recorder.Stats.OutputTokens != 1 {
+		t.Errorf("output=%d want 1", recorder.Stats.OutputTokens)
 	}
 	if last != 1 || lastCC != 3 {
 		t.Errorf("last=%d lastCC=%d want 1/3", last, lastCC)
@@ -117,12 +118,12 @@ func TestParseSSEStatsOutputDelta(t *testing.T) {
 	var last, lastIn, lastCR, lastCC int64
 	var saw bool
 	// Single stream: output_tokens is cumulative 1→10→20→50; the global should record only the final 50 (sum of deltas).
-	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":10}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":20}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":50}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	if stats.outputTokens != 50 {
-		t.Errorf("output=%d want 50", stats.outputTokens)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":10}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":20}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":50}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	if recorder.Stats.OutputTokens != 50 {
+		t.Errorf("output=%d want 50", recorder.Stats.OutputTokens)
 	}
 }
 
@@ -131,10 +132,10 @@ func TestParseSSEStatsMultiStream(t *testing.T) {
 	var lastA, lastB, inA, inB, crA, crB, ccA, ccB int64
 	var sawA, sawB bool
 	// Two concurrent streams each keep their own lastOutput; the global accumulates both currents: 100+30=130.
-	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":100}}`), &lastA, &inA, &crA, &ccA, &sawA)
-	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":30}}`), &lastB, &inB, &crB, &ccB, &sawB)
-	if stats.outputTokens != 130 {
-		t.Errorf("output=%d want 130", stats.outputTokens)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":100}}`), &lastA, &inA, &crA, &ccA, &sawA)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":30}}`), &lastB, &inB, &crB, &ccB, &sawB)
+	if recorder.Stats.OutputTokens != 130 {
+		t.Errorf("output=%d want 130", recorder.Stats.OutputTokens)
 	}
 }
 
@@ -142,12 +143,12 @@ func TestParseSSEStatsIgnoresNonData(t *testing.T) {
 	resetStats()
 	var last, lastIn, lastCR, lastCC int64
 	var saw bool
-	parseSSEStats([]byte(`event: content_block_delta`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	parseSSEStats([]byte(`data: [DONE]`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	parseSSEStats([]byte(``), &last, &lastIn, &lastCR, &lastCC, &saw)
-	parseSSEStats([]byte(`data: {"type":"content_block_delta","delta":{"text":"x"}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	if stats.outputTokens != 0 || stats.cacheRead != 0 {
-		t.Errorf("非 usage 事件不应计数: output=%d cacheRead=%d", stats.outputTokens, stats.cacheRead)
+	recorder.ParseSSEStats([]byte(`event: content_block_delta`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	recorder.ParseSSEStats([]byte(`data: [DONE]`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	recorder.ParseSSEStats([]byte(``), &last, &lastIn, &lastCR, &lastCC, &saw)
+	recorder.ParseSSEStats([]byte(`data: {"type":"content_block_delta","delta":{"text":"x"}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	if recorder.Stats.OutputTokens != 0 || recorder.Stats.CacheRead != 0 {
+		t.Errorf("非 usage 事件不应计数: output=%d cacheRead=%d", recorder.Stats.OutputTokens, recorder.Stats.CacheRead)
 	}
 }
 
@@ -157,16 +158,16 @@ func TestParseSSEStatsUsageNoDoubleCount(t *testing.T) {
 	resetStats()
 	var last, lastIn, lastCR, lastCC int64
 	var saw bool
-	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":45814,"cache_read_input_tokens":9000,"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"input_tokens":1270,"cache_read_input_tokens":200,"output_tokens":50}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	if stats.inputTokens != 1270 {
-		t.Errorf("input=%d want 1270 (取最后值，非 max)", stats.inputTokens)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":45814,"cache_read_input_tokens":9000,"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_delta","usage":{"input_tokens":1270,"cache_read_input_tokens":200,"output_tokens":50}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	if recorder.Stats.InputTokens != 1270 {
+		t.Errorf("input=%d want 1270 (取最后值，非 max)", recorder.Stats.InputTokens)
 	}
-	if stats.cacheRead != 200 {
-		t.Errorf("cacheRead=%d want 200 (取最后值)", stats.cacheRead)
+	if recorder.Stats.CacheRead != 200 {
+		t.Errorf("cacheRead=%d want 200 (取最后值)", recorder.Stats.CacheRead)
 	}
-	if stats.outputTokens != 50 {
-		t.Errorf("output=%d want 50", stats.outputTokens)
+	if recorder.Stats.OutputTokens != 50 {
+		t.Errorf("output=%d want 50", recorder.Stats.OutputTokens)
 	}
 	// last should also be the final value
 	if lastIn != 1270 || lastCR != 200 || last != 50 {
@@ -179,17 +180,17 @@ func TestParseSSEStatsUsageMissingField(t *testing.T) {
 	resetStats()
 	var last, lastIn, lastCR, lastCC int64
 	var saw bool
-	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":50,"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":50,"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
 	// message_delta carries only output_tokens; input/cache_read are missing and should stay 100/50
-	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":80}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	if stats.inputTokens != 100 {
-		t.Errorf("input=%d want 100 (缺失字段不应覆盖)", stats.inputTokens)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_delta","usage":{"output_tokens":80}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	if recorder.Stats.InputTokens != 100 {
+		t.Errorf("input=%d want 100 (缺失字段不应覆盖)", recorder.Stats.InputTokens)
 	}
-	if stats.cacheRead != 50 {
-		t.Errorf("cacheRead=%d want 50 (缺失字段不应覆盖)", stats.cacheRead)
+	if recorder.Stats.CacheRead != 50 {
+		t.Errorf("cacheRead=%d want 50 (缺失字段不应覆盖)", recorder.Stats.CacheRead)
 	}
-	if stats.outputTokens != 80 {
-		t.Errorf("output=%d want 80", stats.outputTokens)
+	if recorder.Stats.OutputTokens != 80 {
+		t.Errorf("output=%d want 80", recorder.Stats.OutputTokens)
 	}
 	if !saw {
 		t.Error("带 usage 的 message_delta 应置 sawDeltaUsage")
@@ -202,11 +203,11 @@ func TestParseSSEStatsDeltaUsageMarker(t *testing.T) {
 	resetStats()
 	var last, lastIn, lastCR, lastCC int64
 	var saw bool
-	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":2899,"cache_read_input_tokens":0,"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":2899,"cache_read_input_tokens":0,"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
 	if saw {
 		t.Error("message_start 不应置 sawDeltaUsage")
 	}
-	parseSSEStats([]byte(`data: {"type":"message_delta","usage":{"input_tokens":0,"cache_read_input_tokens":2899,"output_tokens":16}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_delta","usage":{"input_tokens":0,"cache_read_input_tokens":2899,"output_tokens":16}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
 	if !saw {
 		t.Error("带 usage 的 message_delta 应置 sawDeltaUsage")
 	}
@@ -218,50 +219,50 @@ func TestRollbackUsageStats(t *testing.T) {
 	resetStats()
 	var last, lastIn, lastCR, lastCC int64
 	var saw bool
-	parseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":2899,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
-	if stats.inputTokens != 2899 || stats.outputTokens != 1 {
-		t.Fatalf("中断前: in=%d out=%d want 2899/1", stats.inputTokens, stats.outputTokens)
+	recorder.ParseSSEStats([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":2899,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}`), &last, &lastIn, &lastCR, &lastCC, &saw)
+	if recorder.Stats.InputTokens != 2899 || recorder.Stats.OutputTokens != 1 {
+		t.Fatalf("中断前: in=%d out=%d want 2899/1", recorder.Stats.InputTokens, recorder.Stats.OutputTokens)
 	}
-	rollbackUsageStats(lastIn, lastCR, lastCC, last)
-	if stats.inputTokens != 0 || stats.cacheRead != 0 || stats.cacheCreation != 0 || stats.outputTokens != 0 {
-		t.Errorf("回滚后应全零: in=%d cr=%d cc=%d out=%d", stats.inputTokens, stats.cacheRead, stats.cacheCreation, stats.outputTokens)
+	recorder.RollbackUsageStats(lastIn, lastCR, lastCC, last)
+	if recorder.Stats.InputTokens != 0 || recorder.Stats.CacheRead != 0 || recorder.Stats.CacheCreation != 0 || recorder.Stats.OutputTokens != 0 {
+		t.Errorf("回滚后应全零: in=%d cr=%d cc=%d out=%d", recorder.Stats.InputTokens, recorder.Stats.CacheRead, recorder.Stats.CacheCreation, recorder.Stats.OutputTokens)
 	}
 }
 
 func TestParseNonStreamUsage(t *testing.T) {
 	// Anthropic non-streaming (classifier response)
-	in, cr, cc, out, ok := parseNonStreamUsage([]byte(`{"type":"message","content":[{"type":"text","text":"x"}],"usage":{"input_tokens":143,"cache_read_input_tokens":61568,"cache_creation_input_tokens":7,"output_tokens":5}}`))
+	in, cr, cc, out, ok := recorder.ParseNonStreamUsage([]byte(`{"type":"message","content":[{"type":"text","text":"x"}],"usage":{"input_tokens":143,"cache_read_input_tokens":61568,"cache_creation_input_tokens":7,"output_tokens":5}}`))
 	if !ok || in != 143 || cr != 61568 || cc != 7 || out != 5 {
 		t.Errorf("anthropic: ok=%v in=%d cr=%d cc=%d out=%d want 143/61568/7/5", ok, in, cr, cc, out)
 	}
 	// OpenAI style (prompt_tokens/completion_tokens, no cache_*)
-	in, cr, cc, out, ok = parseNonStreamUsage([]byte(`{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}`))
+	in, cr, cc, out, ok = recorder.ParseNonStreamUsage([]byte(`{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}`))
 	if !ok || in != 100 || cr != 0 || cc != 0 || out != 50 {
 		t.Errorf("openai: ok=%v in=%d cr=%d cc=%d out=%d want 100/0/0/50", ok, in, cr, cc, out)
 	}
 	// No usage field
-	_, _, _, _, ok = parseNonStreamUsage([]byte(`{"foo":"bar"}`))
+	_, _, _, _, ok = recorder.ParseNonStreamUsage([]byte(`{"foo":"bar"}`))
 	if ok {
 		t.Errorf("no usage: should return ok=false")
 	}
 	// Non-JSON
-	_, _, _, _, ok = parseNonStreamUsage([]byte(`not json`))
+	_, _, _, _, ok = recorder.ParseNonStreamUsage([]byte(`not json`))
 	if ok {
 		t.Errorf("non-json: should return ok=false")
 	}
 }
 
 func TestAddModelUsage(t *testing.T) {
-	stats.mu.Lock()
-	stats.modelStats = nil
-	stats.mu.Unlock()
-	stats.addModelUsage("deepseek-v4", 100, 200, 20, 50)
-	stats.addModelUsage("kimi", 10, 500, 0, 5)
-	stats.addModelUsage("deepseek-v4", 50, 100, 10, 30)
+	recorder.Stats.Mu.Lock()
+	recorder.Stats.ModelStats = nil
+	recorder.Stats.Mu.Unlock()
+	recorder.Stats.AddModelUsage("deepseek-v4", 100, 200, 20, 50)
+	recorder.Stats.AddModelUsage("kimi", 10, 500, 0, 5)
+	recorder.Stats.AddModelUsage("deepseek-v4", 50, 100, 10, 30)
 	// Empty model name / all-zero should be ignored
-	stats.addModelUsage("", 1, 2, 3, 4)
-	stats.addModelUsage("zero", 0, 0, 0, 0)
-	got := stats.snapshotModelStats()
+	recorder.Stats.AddModelUsage("", 1, 2, 3, 4)
+	recorder.Stats.AddModelUsage("zero", 0, 0, 0, 0)
+	got := recorder.Stats.SnapshotModelStats()
 	if len(got) != 2 {
 		t.Fatalf("want 2 models, got %d: %+v", len(got), got)
 	}
@@ -274,9 +275,9 @@ func TestAddModelUsage(t *testing.T) {
 		t.Errorf("deepseek-v4累加错: in=%d cr=%d cc=%d out=%d want 150/300/30/80", ds.Input, ds.CacheRead, ds.CacheCreation, ds.Output)
 	}
 	// Cleanup
-	stats.mu.Lock()
-	stats.modelStats = nil
-	stats.mu.Unlock()
+	recorder.Stats.Mu.Lock()
+	recorder.Stats.ModelStats = nil
+	recorder.Stats.Mu.Unlock()
 }
 
 // cacheHitRate matches Claude Code's cache-hit algorithm:
@@ -293,7 +294,7 @@ func TestCacheHitRate(t *testing.T) {
 		{9000, 45814, 0, "16.4%"}, // Kimi field-measured magnitude: 9000/54814
 	}
 	for _, c := range cases {
-		if got := cacheHitRate(c.cr, c.in, c.cc); got != c.want {
+		if got := recorder.CacheHitRate(c.cr, c.in, c.cc); got != c.want {
 			t.Errorf("cacheHitRate(%d,%d,%d)=%q want %q", c.cr, c.in, c.cc, got, c.want)
 		}
 	}
@@ -307,7 +308,7 @@ func TestHumanNum(t *testing.T) {
 		{0, "0"}, {999, "999"}, {1234, "1.2k"}, {1500, "1.5k"}, {1000000, "1.00M"}, {2500000, "2.50M"},
 	}
 	for _, c := range cases {
-		if got := humanNum(c.in); got != c.want {
+		if got := recorder.HumanNum(c.in); got != c.want {
 			t.Errorf("humanNum(%d)=%q want %q", c.in, got, c.want)
 		}
 	}
@@ -321,7 +322,7 @@ func TestHumanBytes(t *testing.T) {
 		{0, "0B"}, {512, "512B"}, {1024, "1.0KB"}, {2048, "2.0KB"}, {1024 * 1024, "1.00MB"}, {int64(1.5 * 1024 * 1024), "1.50MB"},
 	}
 	for _, c := range cases {
-		if got := humanBytes(c.in); got != c.want {
+		if got := recorder.HumanBytes(c.in); got != c.want {
 			t.Errorf("humanBytes(%d)=%q want %q", c.in, got, c.want)
 		}
 	}
@@ -330,15 +331,15 @@ func TestHumanBytes(t *testing.T) {
 // TestRecentLatency verifies weighted throughput and average first-byte latency calculations.
 func TestRecentLatency(t *testing.T) {
 	resetStats()
-	stats.resetSampleCap(3)
+	recorder.Stats.ResetSampleCap(3)
 	// 3 samples: first-byte 100/200/300ms, streaming 1000/2000/3000ms, output 10/20/30 tokens
-	stats.pushFirstByte(100)
-	stats.pushThroughput(1000, 10)
-	stats.pushFirstByte(200)
-	stats.pushThroughput(2000, 20)
-	stats.pushFirstByte(300)
-	stats.pushThroughput(3000, 30)
-	avgFB, tps := stats.recentLatency()
+	recorder.Stats.PushFirstByte(100)
+	recorder.Stats.PushThroughput(1000, 10)
+	recorder.Stats.PushFirstByte(200)
+	recorder.Stats.PushThroughput(2000, 20)
+	recorder.Stats.PushFirstByte(300)
+	recorder.Stats.PushThroughput(3000, 30)
+	avgFB, tps := recorder.Stats.RecentLatency()
 	// Average first-byte = (100+200+300)/3 = 200ms
 	if avgFB != 200 {
 		t.Errorf("avgFB=%v want 200", avgFB)
@@ -352,14 +353,14 @@ func TestRecentLatency(t *testing.T) {
 // TestRecentLatencyRingOverwrite verifies the ring buffer overwrites the oldest sample past capacity.
 func TestRecentLatencyRingOverwrite(t *testing.T) {
 	resetStats()
-	stats.resetSampleCap(2)
-	stats.pushFirstByte(100)
-	stats.pushThroughput(1000, 10)
-	stats.pushFirstByte(200)
-	stats.pushThroughput(1000, 20)
-	stats.pushFirstByte(300)
-	stats.pushThroughput(1000, 30) // Capacity 2; overwrites the 1st sample (100,10)
-	avgFB, tps := stats.recentLatency()
+	recorder.Stats.ResetSampleCap(2)
+	recorder.Stats.PushFirstByte(100)
+	recorder.Stats.PushThroughput(1000, 10)
+	recorder.Stats.PushFirstByte(200)
+	recorder.Stats.PushThroughput(1000, 20)
+	recorder.Stats.PushFirstByte(300)
+	recorder.Stats.PushThroughput(1000, 30) // Capacity 2; overwrites the 1st sample (100,10)
+	avgFB, tps := recorder.Stats.RecentLatency()
 	// Window holds 200/300: average first-byte = 250ms
 	if avgFB != 250 {
 		t.Errorf("avgFB=%v want 250（环形覆盖后）", avgFB)
@@ -373,8 +374,8 @@ func TestRecentLatencyRingOverwrite(t *testing.T) {
 // TestRecentLatencyEmpty verifies 0 is returned with no samples.
 func TestRecentLatencyEmpty(t *testing.T) {
 	resetStats()
-	stats.resetSampleCap(5)
-	avgFB, tps := stats.recentLatency()
+	recorder.Stats.ResetSampleCap(5)
+	avgFB, tps := recorder.Stats.RecentLatency()
 	if avgFB != 0 || tps != 0 {
 		t.Errorf("空窗口 avgFB=%v tps=%v want 0,0", avgFB, tps)
 	}
@@ -407,7 +408,7 @@ func TestHandlerLatencySampling(t *testing.T) {
 		TotalBudgetSec:     10,
 		RecentSampleWindow: 5,
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -420,7 +421,7 @@ func TestHandlerLatencySampling(t *testing.T) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	avgFB, tps := stats.recentLatency()
+	avgFB, tps := recorder.Stats.RecentLatency()
 	if avgFB <= 0 {
 		t.Errorf("avgFB=%v want >0（应采样到首字延迟）", avgFB)
 	}
@@ -462,25 +463,25 @@ func TestCountTokensFlightTag(t *testing.T) {
 	}
 
 	// The handler defer archives before response EOF; the finished list here must contain this stream.
-	finishedMu.Lock()
-	if len(finished) == 0 {
-		finishedMu.Unlock()
+	recorder.FinishedMu.Lock()
+	if len(recorder.Finished) == 0 {
+		recorder.FinishedMu.Unlock()
 		t.Fatal("完成流列表为空（handler defer 应已归档本流）")
 	}
-	ff := finished[len(finished)-1]
-	finishedMu.Unlock()
-	if !ff.countTokens {
+	ff := recorder.Finished[len(recorder.Finished)-1]
+	recorder.FinishedMu.Unlock()
+	if !ff.CountTokens {
 		t.Error("完成流缺 countTokens 标记（网页将无法区分探针与空响应）")
 	}
-	if !strings.Contains(string(ff.content), `"input_tokens":42`) {
-		t.Errorf("完成流内容 = %q（应含 tee 下来的上游原文）", ff.content)
+	if !strings.Contains(string(ff.Content), `"input_tokens":42`) {
+		t.Errorf("完成流内容 = %q（应含 tee 下来的上游原文）", ff.Content)
 	}
 
 	// Stats immunity: input/output must both stay 0 (parseSSEStats needs data: prefixes,
 	// parseNonStreamUsage needs a top-level usage key; the count_tokens response has neither).
-	stats.mu.Lock()
-	in, out := stats.inputTokens, stats.outputTokens
-	stats.mu.Unlock()
+	recorder.Stats.Mu.Lock()
+	in, out := recorder.Stats.InputTokens, recorder.Stats.OutputTokens
+	recorder.Stats.Mu.Unlock()
 	if in != 0 || out != 0 {
 		t.Errorf("count_tokens 响应污染了统计: input=%d output=%d（应均为 0）", in, out)
 	}
@@ -489,44 +490,44 @@ func TestCountTokensFlightTag(t *testing.T) {
 // TestAddFinishedTotalMs verifies the finished-archive totalMs column: totalMs counts from flight creation
 // (proxy received the downstream request) to archiving (handler returns, response fully sent downstream), and shares ended's clock.
 func TestAddFinishedTotalMs(t *testing.T) {
-	f := &flight{id: flights.nextID.Add(1), start: time.Now().Add(-123 * time.Millisecond)}
-	addFinished(f)
-	finishedMu.Lock()
-	ff := finished[len(finished)-1]
-	finishedMu.Unlock()
-	if ff.id != f.id {
-		t.Fatalf("归档末位 id=%d, want %d", ff.id, f.id)
+	f := &recorder.Flight{ID: recorder.Flights.NextID.Add(1), Start: time.Now().Add(-123 * time.Millisecond)}
+	recorder.AddFinished(f)
+	recorder.FinishedMu.Lock()
+	ff := recorder.Finished[len(recorder.Finished)-1]
+	recorder.FinishedMu.Unlock()
+	if ff.ID != f.ID {
+		t.Fatalf("归档末位 id=%d, want %d", ff.ID, f.ID)
 	}
-	if ff.totalMs < 123 {
-		t.Errorf("totalMs=%d, want ≥123（应为 flight 建立到归档的耗时）", ff.totalMs)
+	if ff.TotalMs < 123 {
+		t.Errorf("totalMs=%d, want ≥123（应为 flight 建立到归档的耗时）", ff.TotalMs)
 	}
-	if ff.ended.Before(f.start) {
-		t.Errorf("ended=%v 不应早于 start=%v", ff.ended, f.start)
+	if ff.Ended.Before(f.Start) {
+		t.Errorf("ended=%v 不应早于 start=%v", ff.Ended, f.Start)
 	}
 }
 
 // TestAddFinishedAttempts verifies the finished archive keeps the attempt count (the data source of the status column's [重试N次]):
 // flight.attempt is archived as-is — first-try success = 1, 2 retries = 3.
 func TestAddFinishedAttempts(t *testing.T) {
-	f := &flight{id: flights.nextID.Add(1), start: time.Now()}
-	f.attempt.Store(3)
-	addFinished(f)
-	finishedMu.Lock()
-	ff := finished[len(finished)-1]
-	finishedMu.Unlock()
-	if ff.attempts != 3 {
-		t.Errorf("attempts=%d, want 3（重试 2 次）", ff.attempts)
+	f := &recorder.Flight{ID: recorder.Flights.NextID.Add(1), Start: time.Now()}
+	f.Attempt.Store(3)
+	recorder.AddFinished(f)
+	recorder.FinishedMu.Lock()
+	ff := recorder.Finished[len(recorder.Finished)-1]
+	recorder.FinishedMu.Unlock()
+	if ff.Attempts != 3 {
+		t.Errorf("attempts=%d, want 3（重试 2 次）", ff.Attempts)
 	}
 }
 
 // TestFlightAttemptMs verifies current-attempt timing: attemptStart=0 (in retry backoff) returns -1; once sent it returns the awaited milliseconds.
 func TestFlightAttemptMs(t *testing.T) {
-	f := &flight{}
-	if got := f.attemptMs(); got != -1 {
+	f := &recorder.Flight{}
+	if got := f.AttemptMs(); got != -1 {
 		t.Fatalf("attemptStart=0 应返回 -1（退避中），got %d", got)
 	}
-	f.attemptStart.Store(time.Now().Add(-1500 * time.Millisecond).UnixNano())
-	if got := f.attemptMs(); got < 1400 || got > 5000 {
+	f.AttemptStart.Store(time.Now().Add(-1500 * time.Millisecond).UnixNano())
+	if got := f.AttemptMs(); got < 1400 || got > 5000 {
 		t.Fatalf("attemptMs 应约 1500ms，got %d", got)
 	}
 }
@@ -546,13 +547,13 @@ func TestHasCatchAllRoute(t *testing.T) {
 
 // TestClearStatsFinished verifies 「清空统计」 also clears the finished-streams list (in-flight streams and stream numbering untouched).
 func TestClearStatsFinished(t *testing.T) {
-	finishedMu.Lock()
-	finished = append(finished, finishedFlight{id: 999999})
-	finishedMu.Unlock()
+	recorder.FinishedMu.Lock()
+	recorder.Finished = append(recorder.Finished, recorder.FinishedFlight{ID: 999999})
+	recorder.FinishedMu.Unlock()
 	clearStats(&config.Config{RecentSampleWindow: 5})
-	finishedMu.Lock()
-	n := len(finished)
-	finishedMu.Unlock()
+	recorder.FinishedMu.Lock()
+	n := len(recorder.Finished)
+	recorder.FinishedMu.Unlock()
 	if n != 0 {
 		t.Errorf("clearStats 后 finished 剩 %d 条, want 0", n)
 	}
@@ -560,13 +561,13 @@ func TestClearStatsFinished(t *testing.T) {
 
 // TestClearStatsUpstreamBytes verifies 「清空统计」 zeroes the upstream-traffic counters (bytesUp/bytesDown).
 func TestClearStatsUpstreamBytes(t *testing.T) {
-	stats.bytesUp.Store(123)
-	stats.bytesDown.Store(456)
+	recorder.Stats.BytesUp.Store(123)
+	recorder.Stats.BytesDown.Store(456)
 	clearStats(&config.Config{RecentSampleWindow: 5})
-	if got := stats.bytesUp.Load(); got != 0 {
+	if got := recorder.Stats.BytesUp.Load(); got != 0 {
 		t.Errorf("clearStats 后 bytesUp=%d, want 0", got)
 	}
-	if got := stats.bytesDown.Load(); got != 0 {
+	if got := recorder.Stats.BytesDown.Load(); got != 0 {
 		t.Errorf("clearStats 后 bytesDown=%d, want 0", got)
 	}
 }
@@ -574,23 +575,23 @@ func TestClearStatsUpstreamBytes(t *testing.T) {
 // TestHeatSlotRotation pins the 15-minute ring semantics: slots are keyed by absolute unix/900 slot number,
 // and writing a position whose stored slot number is stale (48h later lands on the same position) zeroes it first.
 func TestHeatSlotRotation(t *testing.T) {
-	heatMu.Lock()
-	heat = [heatSlots]heatSlot{}
-	heatMu.Unlock()
+	recorder.HeatMu.Lock()
+	recorder.Heat = [recorder.HeatSlots]recorder.HeatSlot{}
+	recorder.HeatMu.Unlock()
 
 	t0 := time.Unix(900*200000, 0) // arbitrary slot-aligned instant
-	heatAdd(t0, 3, 100, 200, 10, 20)
-	heatAdd(t0, 2, 50, 60, 5, 5)
-	if got := heatAt(t0); got != [5]int64{5, 150, 260, 15, 25} {
+	recorder.HeatAdd(t0, 3, 100, 200, 10, 20)
+	recorder.HeatAdd(t0, 2, 50, 60, 5, 5)
+	if got := recorder.HeatAt(t0); got != [5]int64{5, 150, 260, 15, 25} {
 		t.Fatalf("同一槽累计=%v, want [5 150 260 15 25]", got)
 	}
 	// Same ring position 192 slots (48h) later: the stale entry must be zeroed before recording.
-	later := t0.Add(heatSlots * 15 * time.Minute)
-	heatAdd(later, 1, 7, 8, 0, 0)
-	if got := heatAt(later); got != [5]int64{1, 7, 8, 0, 0} {
+	later := t0.Add(recorder.HeatSlots * 15 * time.Minute)
+	recorder.HeatAdd(later, 1, 7, 8, 0, 0)
+	if got := recorder.HeatAt(later); got != [5]int64{1, 7, 8, 0, 0} {
 		t.Fatalf("过期槽未清零: %v, want [1 7 8 0 0]", got)
 	}
-	if got := heatAt(t0); got != [5]int64{} {
+	if got := recorder.HeatAt(t0); got != [5]int64{} {
 		t.Fatalf("旧槽仍可读: %v, want 全零", got)
 	}
 }
@@ -603,46 +604,46 @@ func TestHeatPersistenceRoundTrip(t *testing.T) {
 	config.SetCurrentPath(filepath.Join(dir, "config.json"))
 	defer config.SetCurrentPath(old)
 
-	heatMu.Lock()
-	heat = [heatSlots]heatSlot{}
-	heatMu.Unlock()
+	recorder.HeatMu.Lock()
+	recorder.Heat = [recorder.HeatSlots]recorder.HeatSlot{}
+	recorder.HeatMu.Unlock()
 
 	now := time.Now()
 	recent := now.Add(-30 * time.Minute)
-	heatAdd(recent, 4, 200, 300, 40, 60)
-	heatAdd(now, 1, 2, 3, 4, 5)
-	if err := heatSave(); err != nil {
+	recorder.HeatAdd(recent, 4, 200, 300, 40, 60)
+	recorder.HeatAdd(now, 1, 2, 3, 4, 5)
+	if err := recorder.HeatSave(); err != nil {
 		t.Fatalf("heatSave: %v", err)
 	}
-	heatMu.Lock()
-	heat = [heatSlots]heatSlot{}
-	heatMu.Unlock()
-	if err := heatLoad(); err != nil {
+	recorder.HeatMu.Lock()
+	recorder.Heat = [recorder.HeatSlots]recorder.HeatSlot{}
+	recorder.HeatMu.Unlock()
+	if err := recorder.HeatLoad(); err != nil {
 		t.Fatalf("heatLoad: %v", err)
 	}
-	if got := heatAt(recent); got != [5]int64{4, 200, 300, 40, 60} {
+	if got := recorder.HeatAt(recent); got != [5]int64{4, 200, 300, 40, 60} {
 		t.Errorf("半小时前的槽未恢复: %v", got)
 	}
-	if got := heatAt(now); got != [5]int64{1, 2, 3, 4, 5} {
+	if got := recorder.HeatAt(now); got != [5]int64{1, 2, 3, 4, 5} {
 		t.Errorf("当前槽未恢复: %v", got)
 	}
 
 	// A slot exactly 48h old is outside the window and must be dropped on load.
-	heatMu.Lock()
-	heat = [heatSlots]heatSlot{}
-	heatMu.Unlock()
-	ancient := now.Add(-heatSlots * 15 * time.Minute)
-	heatAdd(ancient, 9, 9, 9, 9, 9)
-	if err := heatSave(); err != nil {
+	recorder.HeatMu.Lock()
+	recorder.Heat = [recorder.HeatSlots]recorder.HeatSlot{}
+	recorder.HeatMu.Unlock()
+	ancient := now.Add(-recorder.HeatSlots * 15 * time.Minute)
+	recorder.HeatAdd(ancient, 9, 9, 9, 9, 9)
+	if err := recorder.HeatSave(); err != nil {
 		t.Fatalf("heatSave: %v", err)
 	}
-	heatMu.Lock()
-	heat = [heatSlots]heatSlot{}
-	heatMu.Unlock()
-	if err := heatLoad(); err != nil {
+	recorder.HeatMu.Lock()
+	recorder.Heat = [recorder.HeatSlots]recorder.HeatSlot{}
+	recorder.HeatMu.Unlock()
+	if err := recorder.HeatLoad(); err != nil {
 		t.Fatalf("heatLoad: %v", err)
 	}
-	if got := heatAt(ancient); got != [5]int64{} {
+	if got := recorder.HeatAt(ancient); got != [5]int64{} {
 		t.Errorf("过期槽应被丢弃: %v", got)
 	}
 
@@ -650,13 +651,13 @@ func TestHeatPersistenceRoundTrip(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "heatmap.dat"), []byte(`{"v":1,"slots":[{"slot":1,"req":9}]}`), 0644); err != nil {
 		t.Fatalf("write v1: %v", err)
 	}
-	heatMu.Lock()
-	heat = [heatSlots]heatSlot{}
-	heatMu.Unlock()
-	if err := heatLoad(); err != nil {
+	recorder.HeatMu.Lock()
+	recorder.Heat = [recorder.HeatSlots]recorder.HeatSlot{}
+	recorder.HeatMu.Unlock()
+	if err := recorder.HeatLoad(); err != nil {
 		t.Fatalf("heatLoad: %v", err)
 	}
-	for i, e := range heat {
+	for i, e := range recorder.Heat {
 		if e.Slot != 0 {
 			t.Fatalf("v1 文件应整体拒绝, 槽 %d = %+v", i, e)
 		}
@@ -671,7 +672,7 @@ func TestHeatPathUsesDatName(t *testing.T) {
 	config.SetCurrentPath(filepath.Join(dir, "config.json"))
 	defer config.SetCurrentPath(old)
 
-	if got := filepath.Base(heatPath()); got != "heatmap.dat" {
+	if got := filepath.Base(recorder.HeatPath()); got != "heatmap.dat" {
 		t.Fatalf("热图文件名应为 heatmap.dat(避免被配置切换枚举识别), got %s", got)
 	}
 }
@@ -684,9 +685,9 @@ func TestHeatLegacyJSONMigration(t *testing.T) {
 	config.SetCurrentPath(filepath.Join(dir, "config.json"))
 	defer config.SetCurrentPath(old)
 
-	heatMu.Lock()
-	heat = [heatSlots]heatSlot{}
-	heatMu.Unlock()
+	recorder.HeatMu.Lock()
+	recorder.Heat = [recorder.HeatSlots]recorder.HeatSlot{}
+	recorder.HeatMu.Unlock()
 
 	slot := time.Now().Unix() / 900
 	legacy := filepath.Join(dir, "heatmap.json")
@@ -694,10 +695,10 @@ func TestHeatLegacyJSONMigration(t *testing.T) {
 	if err := os.WriteFile(legacy, body, 0644); err != nil {
 		t.Fatalf("write legacy: %v", err)
 	}
-	if err := heatLoad(); err != nil {
+	if err := recorder.HeatLoad(); err != nil {
 		t.Fatalf("heatLoad: %v", err)
 	}
-	if got := heatAt(time.Unix(slot*900, 0)); got != [5]int64{7, 70, 30, 1, 2} {
+	if got := recorder.HeatAt(time.Unix(slot*900, 0)); got != [5]int64{7, 70, 30, 1, 2} {
 		t.Errorf("旧 heatmap.json 的数据应迁入环形缓冲: %v", got)
 	}
 	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
@@ -710,12 +711,12 @@ func TestHeatLegacyJSONMigration(t *testing.T) {
 
 // TestClearStatsHeat verifies 清空统计 also zeroes the activity heatmap ring.
 func TestClearStatsHeat(t *testing.T) {
-	heatMu.Lock()
-	heat = [heatSlots]heatSlot{}
-	heatMu.Unlock()
-	heatAdd(time.Now(), 2, 10, 20, 5, 5)
+	recorder.HeatMu.Lock()
+	recorder.Heat = [recorder.HeatSlots]recorder.HeatSlot{}
+	recorder.HeatMu.Unlock()
+	recorder.HeatAdd(time.Now(), 2, 10, 20, 5, 5)
 	clearStats(&config.Config{RecentSampleWindow: 5})
-	if got := heatAt(time.Now()); got != [5]int64{} {
+	if got := recorder.HeatAt(time.Now()); got != [5]int64{} {
 		t.Errorf("clearStats 后热图槽=%v, want 全零", got)
 	}
 }
@@ -724,11 +725,11 @@ func TestClearStatsHeat(t *testing.T) {
 // heat[0]) and a 192-entry heat array ordered oldest-first, each entry
 // [requests, output tokens, input tokens, bytes up, bytes down].
 func TestLogDataHeat(t *testing.T) {
-	heatMu.Lock()
-	heat = [heatSlots]heatSlot{}
-	heatMu.Unlock()
+	recorder.HeatMu.Lock()
+	recorder.Heat = [recorder.HeatSlots]recorder.HeatSlot{}
+	recorder.HeatMu.Unlock()
 	now := time.Now()
-	heatAdd(now, 3, 30, 300, 3000, 30000)
+	recorder.HeatAdd(now, 3, 30, 300, 3000, 30000)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/__logs/data", nil)
@@ -742,13 +743,13 @@ func TestLogDataHeat(t *testing.T) {
 		t.Fatalf("logData JSON: %v", err)
 	}
 	cur := now.Unix() / 900
-	if d.HeatBase != cur-heatSlots+1 {
-		t.Errorf("heatBase=%d, want %d", d.HeatBase, cur-heatSlots+1)
+	if d.HeatBase != cur-recorder.HeatSlots+1 {
+		t.Errorf("heatBase=%d, want %d", d.HeatBase, cur-recorder.HeatSlots+1)
 	}
-	if len(d.Heat) != heatSlots {
-		t.Fatalf("heat 长度=%d, want %d", len(d.Heat), heatSlots)
+	if len(d.Heat) != recorder.HeatSlots {
+		t.Fatalf("heat 长度=%d, want %d", len(d.Heat), recorder.HeatSlots)
 	}
-	if got := d.Heat[heatSlots-1]; got != [5]int64{3, 30, 300, 3000, 30000} {
+	if got := d.Heat[recorder.HeatSlots-1]; got != [5]int64{3, 30, 300, 3000, 30000} {
 		t.Errorf("最新槽=%v, want [3 30 300 3000 30000]", got)
 	}
 }
@@ -757,9 +758,9 @@ func TestLogDataHeat(t *testing.T) {
 // (delivered), consistent with the upstream provider's backend view; local errors and non-200 statuses are unaffected.
 func TestMarkClientGone499(t *testing.T) {
 	mark := func(status int, delivered, cancelCtx bool) int {
-		f := &flight{id: flights.nextID.Add(1), start: time.Now(), status: status}
+		f := &recorder.Flight{ID: recorder.Flights.NextID.Add(1), Start: time.Now(), Status: status}
 		if delivered {
-			f.delivered.Store(true)
+			f.Delivered.Store(true)
 		}
 		ctx := context.Background()
 		if cancelCtx {
@@ -767,11 +768,11 @@ func TestMarkClientGone499(t *testing.T) {
 			cancel() // Simulate a downstream disconnect (ctx already cancelled at handler wrap-up defer time)
 			ctx = c
 		}
-		markClientGone(f, ctx)
-		addFinished(f)
-		finishedMu.Lock()
-		got := finished[len(finished)-1].status
-		finishedMu.Unlock()
+		recorder.MarkClientGone(f, ctx)
+		recorder.AddFinished(f)
+		recorder.FinishedMu.Lock()
+		got := recorder.Finished[len(recorder.Finished)-1].Status
+		recorder.FinishedMu.Unlock()
 		return got
 	}
 
@@ -806,19 +807,19 @@ func TestForwardDeliveredOnMessageStop(t *testing.T) {
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 
-	run := func(body io.Reader) *flight {
-		f := &flight{id: flights.nextID.Add(1), start: time.Now()}
+	run := func(body io.Reader) *recorder.Flight {
+		f := &recorder.Flight{ID: recorder.Flights.NextID.Add(1), Start: time.Now()}
 		resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(body)}
 		rec := httptest.NewRecorder()
 		forward(rec, resp, nil, bufio.NewReader(resp.Body), f, false)
 		return f
 	}
 
-	if f := run(strings.NewReader(sseFull)); !f.delivered.Load() {
+	if f := run(strings.NewReader(sseFull)); !f.Delivered.Load() {
 		t.Error("含 message_stop 的完整流应标记 delivered")
 	}
 	// Stream breaks midway (non-EOF error read): not marked (the wrap-up defer re-marks such streams as 499).
-	if f := run(&errAfterReader{b: []byte("event: message_start\ndata: {\"type\":\"message_start\"}\n\n"), err: io.ErrUnexpectedEOF}); f.delivered.Load() {
+	if f := run(&errAfterReader{b: []byte("event: message_start\ndata: {\"type\":\"message_start\"}\n\n"), err: io.ErrUnexpectedEOF}); f.Delivered.Load() {
 		t.Error("上游流中途出错不应标记 delivered")
 	}
 }
@@ -854,7 +855,7 @@ func TestParseToolCallName(t *testing.T) {
 		{"", ""},
 	}
 	for _, c := range cases {
-		if got := parseToolCallName([]byte(c.line)); got != c.want {
+		if got := recorder.ParseToolCallName([]byte(c.line)); got != c.want {
 			t.Errorf("parseToolCallName(%q)=%q, want %q", c.line, got, c.want)
 		}
 	}
@@ -866,20 +867,20 @@ func TestParseToolCallName(t *testing.T) {
 // web_search_call at action's query+sources).
 func TestParseToolEmptySignals(t *testing.T) {
 	// start: index and start's own input must both be captured (a complete server_tool_use block directly concludes non-empty)
-	ts, ok := parseToolCallStart([]byte(`data: {"type":"content_block_start","index":3,"content_block":{"type":"server_tool_use","id":"s1","name":"web_search","input":{"query":"q"}}}`))
-	if !ok || ts.index != 3 || ts.name != "web_search" || isEmptyArgsJSON(string(ts.input)) {
+	ts, ok := recorder.ParseToolCallStart([]byte(`data: {"type":"content_block_start","index":3,"content_block":{"type":"server_tool_use","id":"s1","name":"web_search","input":{"query":"q"}}}`))
+	if !ok || ts.Index != 3 || ts.Name != "web_search" || recorder.IsEmptyArgsJSON(string(ts.Input)) {
 		t.Errorf("parseToolCallStart 非空 input=%+v ok=%v", ts, ok)
 	}
 	// delta: only input_json_delta counts, text_delta doesn't
-	idx, partial, ok := parseToolArgsDelta([]byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}}`))
+	idx, partial, ok := recorder.ParseToolArgsDelta([]byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}}`))
 	if !ok || idx != 2 || partial != `{"a":` {
 		t.Errorf("parseToolArgsDelta=(%d,%q,%v)", idx, partial, ok)
 	}
-	if _, _, ok := parseToolArgsDelta([]byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"x"}}`)); ok {
+	if _, _, ok := recorder.ParseToolArgsDelta([]byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"x"}}`)); ok {
 		t.Error("text_delta 不应认作参数 delta")
 	}
 	// stop: only the index is needed
-	if idx, ok := parseToolBlockStop([]byte(`data: {"type":"content_block_stop","index":2}`)); !ok || idx != 2 {
+	if idx, ok := recorder.ParseToolBlockStop([]byte(`data: {"type":"content_block_stop","index":2}`)); !ok || idx != 2 {
 		t.Errorf("parseToolBlockStop=(%d,%v)", idx, ok)
 	}
 	// Responses done: terminal empty-args state of the three item kinds
@@ -899,19 +900,19 @@ func TestParseToolEmptySignals(t *testing.T) {
 		{`data: {"type":"response.output_item.added","item":{"id":"f1","type":"function_call","name":"Read"}}`, "", false, false},
 	}
 	for _, c := range doneCases {
-		id, empty, ok := parseResponsesToolDone([]byte(c.line))
+		id, empty, ok := recorder.ParseResponsesToolDone([]byte(c.line))
 		if id != c.id || empty != c.empty || ok != c.ok {
 			t.Errorf("parseResponsesToolDone(%q)=(%q,%v,%v), want (%q,%v,%v)", c.line, id, empty, ok, c.id, c.empty, c.ok)
 		}
 	}
 	// isEmptyArgsJSON boundaries
 	for _, s := range []string{"", "{}", " { } ", "null", "\n\t"} {
-		if !isEmptyArgsJSON(s) {
+		if !recorder.IsEmptyArgsJSON(s) {
 			t.Errorf("isEmptyArgsJSON(%q) 应为 true", s)
 		}
 	}
 	for _, s := range []string{`{"a":1}`, `"{}"`, `["x"]`} {
-		if isEmptyArgsJSON(s) {
+		if recorder.IsEmptyArgsJSON(s) {
 			t.Errorf("isEmptyArgsJSON(%q) 应为 false", s)
 		}
 	}
@@ -932,13 +933,13 @@ func TestForwardToolCallCount(t *testing.T) {
 		"data: {\"type\":\"content_block_stop\",\"index\":2}\n\n" +
 		"data: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"s1\",\"name\":\"web_search\",\"input\":{}}}\n\n" +
 		"data: {\"type\":\"message_stop\"}\n\n"
-	f := &flight{id: flights.nextID.Add(1), start: time.Now()}
+	f := &recorder.Flight{ID: recorder.Flights.NextID.Add(1), Start: time.Now()}
 	resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(sse))}
 	rec := httptest.NewRecorder()
 	forward(rec, resp, nil, bufio.NewReader(resp.Body), f, false)
 	// Read single with args→*1; Edit twice with empty args still shows the raw count *2; web_search single empty-args→*0
 	// (index 3 has no content_block_stop: at stream wrap-up, unclosed calls are judged empty from received content).
-	if got, want := f.toolCallsTag(), "[Read*1][Edit*2][web_search*0]"; got != want {
+	if got, want := f.ToolCallsTag(), "[Read*1][Edit*2][web_search*0]"; got != want {
 		t.Errorf("toolCallsTag=%q, want %q", got, want)
 	}
 }
@@ -946,22 +947,22 @@ func TestForwardToolCallCount(t *testing.T) {
 // TestToolCallsTag locks formatting boundaries: no calls → empty string, empty names ignored, same-name counts merge keeping first-appearance order;
 // a single call shows *1, a single empty-args call shows *0, multiple calls show the raw *N (empty-args marks don't affect it).
 func TestToolCallsTag(t *testing.T) {
-	f := &flight{}
-	if got := f.toolCallsTag(); got != "" {
+	f := &recorder.Flight{}
+	if got := f.ToolCallsTag(); got != "" {
 		t.Errorf("无工具调用 want 空串, got %q", got)
 	}
-	f.noteToolCall("") // Empty names ignored
-	f.noteToolCall("Bash")
-	f.noteToolCall("Read")
-	f.noteToolCall("Bash")
-	f.noteToolCall("Bash")
-	if got, want := f.toolCallsTag(), "[Bash*3][Read*1]"; got != want {
+	f.NoteToolCall("") // Empty names ignored
+	f.NoteToolCall("Bash")
+	f.NoteToolCall("Read")
+	f.NoteToolCall("Bash")
+	f.NoteToolCall("Bash")
+	if got, want := f.ToolCallsTag(), "[Bash*3][Read*1]"; got != want {
 		t.Errorf("toolCallsTag=%q, want %q", got, want)
 	}
-	f.noteToolCallEmpty("Read")   // Single call with empty args → *0
-	f.noteToolCallEmpty("Bash")   // Multiple calls show the raw *N; empty-args marks don't affect it
-	f.noteToolCallEmpty("Nobody") // Uncounted tools: ignored
-	if got, want := f.toolCallsTag(), "[Bash*3][Read*0]"; got != want {
+	f.NoteToolCallEmpty("Read")   // Single call with empty args → *0
+	f.NoteToolCallEmpty("Bash")   // Multiple calls show the raw *N; empty-args marks don't affect it
+	f.NoteToolCallEmpty("Nobody") // Uncounted tools: ignored
+	if got, want := f.ToolCallsTag(), "[Bash*3][Read*0]"; got != want {
 		t.Errorf("toolCallsTag=%q, want %q", got, want)
 	}
 }
@@ -1119,10 +1120,10 @@ func TestMaybeRewriteClassifierLow(t *testing.T) {
 		if mt, _ := p["max_tokens"].(float64); mt != 2048 {
 			t.Errorf("max_tokens=%v want 2048 (untouched)", p["max_tokens"])
 		}
-		if rw := stats.classifierRewrites.Load(); rw != 1 {
+		if rw := recorder.Stats.ClassifierRewrites.Load(); rw != 1 {
 			t.Errorf("rewrites=%d want 1", rw)
 		}
-		if rwCC := stats.classifierRewritesCC.Load(); rwCC != 1 {
+		if rwCC := recorder.Stats.ClassifierRewritesCC.Load(); rwCC != 1 {
 			t.Errorf("rewritesCC=%d want 1", rwCC)
 		}
 	})
@@ -1143,7 +1144,7 @@ func TestMaybeRewriteClassifierLow(t *testing.T) {
 		if keys := topLevelKeys(t, out); !reflect.DeepEqual(keys, want) {
 			t.Errorf("key order:\n got %v\nwant %v", keys, want)
 		}
-		if rwCodex := stats.classifierRewritesCodex.Load(); rwCodex != 1 {
+		if rwCodex := recorder.Stats.ClassifierRewritesCodex.Load(); rwCodex != 1 {
 			t.Errorf("rewritesCodex=%d want 1", rwCodex)
 		}
 	})
@@ -1174,7 +1175,7 @@ func TestMaybeRewriteClassifierLow(t *testing.T) {
 		if p["reasoning_effort"] != "none" {
 			t.Errorf("reasoning_effort=%v want none: %s", p["reasoning_effort"], bare)
 		}
-		if rw := stats.classifierRewrites.Load(); rw != 1 {
+		if rw := recorder.Stats.ClassifierRewrites.Load(); rw != 1 {
 			t.Errorf("rewrites=%d want 1 (only the bare body is rewritten)", rw)
 		}
 	})
@@ -1207,7 +1208,7 @@ func TestClassifierHitCounting(t *testing.T) {
 
 	check := func(h, rw, hCC, rwCC, hCX, rwCX int64, note string) {
 		t.Helper()
-		got := []int64{stats.classifierHits.Load(), stats.classifierRewrites.Load(), stats.classifierHitsCC.Load(), stats.classifierRewritesCC.Load(), stats.classifierHitsCodex.Load(), stats.classifierRewritesCodex.Load()}
+		got := []int64{recorder.Stats.ClassifierHits.Load(), recorder.Stats.ClassifierRewrites.Load(), recorder.Stats.ClassifierHitsCC.Load(), recorder.Stats.ClassifierRewritesCC.Load(), recorder.Stats.ClassifierHitsCodex.Load(), recorder.Stats.ClassifierRewritesCodex.Load()}
 		want := []int64{h, rw, hCC, rwCC, hCX, rwCX}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: counters (hits,rewrites,hitsCC,rewritesCC,hitsCodex,rewritesCodex)=%v, want %v", note, got, want)
@@ -1242,12 +1243,12 @@ func TestClassifierHitCounting(t *testing.T) {
 // (the status card's hover tooltip / click modal read them for the per-source breakdown).
 func TestLogDataClassifierSplit(t *testing.T) {
 	resetStats()
-	stats.classifierHits.Store(5)
-	stats.classifierRewrites.Store(3)
-	stats.classifierHitsCC.Store(3)
-	stats.classifierRewritesCC.Store(1)
-	stats.classifierHitsCodex.Store(2)
-	stats.classifierRewritesCodex.Store(2)
+	recorder.Stats.ClassifierHits.Store(5)
+	recorder.Stats.ClassifierRewrites.Store(3)
+	recorder.Stats.ClassifierHitsCC.Store(3)
+	recorder.Stats.ClassifierRewritesCC.Store(1)
+	recorder.Stats.ClassifierHitsCodex.Store(2)
+	recorder.Stats.ClassifierRewritesCodex.Store(2)
 
 	req := httptest.NewRequest("GET", "/__logs/data", nil)
 	req.RemoteAddr = "127.0.0.1:1234" // isLocalRequest gate
@@ -1507,8 +1508,8 @@ func TestForwardNoStopBadge(t *testing.T) {
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n"
 	sseStop := "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 
-	run := func(body, contentType string, cancel bool) *flight {
-		f := &flight{id: flights.nextID.Add(1), start: time.Now()}
+	run := func(body, contentType string, cancel bool) *recorder.Flight {
+		f := &recorder.Flight{ID: recorder.Flights.NextID.Add(1), Start: time.Now()}
 		req := httptest.NewRequest("POST", "http://upstream.test/v1/messages", nil)
 		if cancel {
 			ctx, stop := context.WithCancel(req.Context())
@@ -1521,16 +1522,16 @@ func TestForwardNoStopBadge(t *testing.T) {
 		return f
 	}
 
-	if f := run(sseHead, "text/event-stream", false); !f.noStop {
+	if f := run(sseHead, "text/event-stream", false); !f.NoStop {
 		t.Error("200 SSE 流结束但没收到 message_stop 应置 noStop")
 	}
-	if f := run(sseHead+sseStop, "text/event-stream", false); f.noStop {
+	if f := run(sseHead+sseStop, "text/event-stream", false); f.NoStop {
 		t.Error("含 message_stop 的完整流不应置 noStop")
 	}
-	if f := run(`{"usage":{"input_tokens":1,"output_tokens":2}}`, "application/json", false); f.noStop {
+	if f := run(`{"usage":{"input_tokens":1,"output_tokens":2}}`, "application/json", false); f.NoStop {
 		t.Error("非 SSE JSON 响应没有 message_stop 概念，不应置 noStop")
 	}
-	if f := run(sseHead, "text/event-stream", true); f.noStop {
+	if f := run(sseHead, "text/event-stream", true); f.NoStop {
 		t.Error("下游取消导致的断流（499 场景）不应置 noStop")
 	}
 }
@@ -1538,9 +1539,9 @@ func TestForwardNoStopBadge(t *testing.T) {
 // TestRecentFlightsNoStopField verifies the finished-streams JSON carries the noStop flag for the web badge.
 func TestRecentFlightsNoStopField(t *testing.T) {
 	resetStats()
-	oldFinished := finished
-	defer func() { finished = oldFinished }()
-	finished = []finishedFlight{{id: 1, noStop: true}}
+	oldFinished := recorder.Finished
+	defer func() { recorder.Finished = oldFinished }()
+	recorder.Finished = []recorder.FinishedFlight{{ID: 1, NoStop: true}}
 
 	req := httptest.NewRequest("GET", "/__recentflights", nil)
 	req.RemoteAddr = "127.0.0.1:1"
@@ -1834,7 +1835,7 @@ func TestRouteHandler(t *testing.T) {
 			{Pattern: "claude-opus*", URL: routeMock.URL, API: "sk-route-xxx", Model: "deepseek-V4-pro"},
 		},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -1897,7 +1898,7 @@ func TestReservedRoutePattern(t *testing.T) {
 		},
 	})
 	defer config.Store(&config.Config{})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -1970,7 +1971,7 @@ func TestNoRouteFallback(t *testing.T) {
 		RecentSampleWindow: 5,
 		// No Routes set: default upstream, client token passed through
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2053,7 +2054,7 @@ func TestClassifierRouteHit(t *testing.T) {
 			{Pattern: "claude-opus*", URL: modelRouteMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2125,7 +2126,7 @@ func TestClassifierRouteFallback(t *testing.T) {
 			{Pattern: "claude-opus*", URL: modelMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2202,7 +2203,7 @@ func TestClassifierRouteNotClassifier(t *testing.T) {
 			{Pattern: "claude-opus*", URL: modelMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2289,7 +2290,7 @@ func TestFastRouteHit(t *testing.T) {
 			{Pattern: "claude-opus*", URL: modelRouteMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2365,7 +2366,7 @@ func TestFastRouteNotConfigured(t *testing.T) {
 			{Pattern: "claude-opus*", URL: modelRouteMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2428,7 +2429,7 @@ func TestFastRouteClassifierPriority(t *testing.T) {
 			Model: "deepseek-v4-pro",
 		},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2485,7 +2486,7 @@ func TestFastRouteHeaderOnly(t *testing.T) {
 			{Pattern: "claude-sonnet*", URL: modelRouteMock.URL, API: "sk-model-xxx", Model: "glm-5.2"},
 		},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2542,7 +2543,7 @@ func TestFastRouteBodyWhitespace(t *testing.T) {
 			Model: "deepseek-v4-pro",
 		},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2630,7 +2631,7 @@ func TestImageFallbackRoute(t *testing.T) {
 		},
 		MultimodalFallback: &config.MultimodalRoute{URL: fbMock.URL, API: "sk-mm-xxx", Model: "glm-4.5v"},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2699,7 +2700,7 @@ func TestImageFallbackNoImage(t *testing.T) {
 		},
 		MultimodalFallback: &config.MultimodalRoute{URL: fbMock.URL, API: "sk-mm-xxx", Model: "glm-4.5v"},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2762,7 +2763,7 @@ func TestImageFallbackNotTextOnly(t *testing.T) {
 		},
 		MultimodalFallback: &config.MultimodalRoute{URL: fbMock.URL, API: "sk-mm-xxx", Model: "glm-4.5v"},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2813,7 +2814,7 @@ func TestImageFallbackNotConfigured(t *testing.T) {
 		},
 		// MultimodalFallback not configured
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2894,7 +2895,7 @@ func TestSearchFallbackRoute(t *testing.T) {
 		},
 		SearchFallback: &config.SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -2962,7 +2963,7 @@ func TestSearchFallbackNoSearch(t *testing.T) {
 		},
 		SearchFallback: &config.SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -3024,7 +3025,7 @@ func TestSearchFallbackNotNoSearch(t *testing.T) {
 		},
 		SearchFallback: &config.SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -3088,7 +3089,7 @@ func TestEnhanceSearchRoute(t *testing.T) {
 		},
 	})
 	defer config.Store(&config.Config{})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -3169,7 +3170,7 @@ func TestSearchFallbackWithImage(t *testing.T) {
 		SearchFallback:     &config.SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "deepseek-search"},
 		MultimodalFallback: &config.MultimodalRoute{URL: mfMock.URL, API: "sk-mf-xxx", Model: "kimi-vl"}, // NoSearch defaults to false; search supported
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -3235,7 +3236,7 @@ func TestSearchFallbackWithImageSfSupports(t *testing.T) {
 		SearchFallback:     &config.SearchRoute{URL: sfMock.URL, API: "sk-sf-xxx", Model: "kimi-vl"},
 		MultimodalFallback: &config.MultimodalRoute{URL: mfMock.URL, API: "sk-mf-xxx", Model: "kimi-vl"},
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -3289,7 +3290,7 @@ func TestSearchFallbackNotConfigured(t *testing.T) {
 		},
 		// Neither SearchFallback nor MultimodalFallback configured
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -3340,7 +3341,7 @@ func TestRetryPingKeepalive(t *testing.T) {
 		PingIntervalSec:    0.03,
 		RecentSampleWindow: 5,
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -3384,7 +3385,7 @@ func TestRetryBackoffCancellable(t *testing.T) {
 		PingIntervalSec:    1,
 		RecentSampleWindow: 5,
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -3430,7 +3431,7 @@ func TestRetryExhaustedSSEError(t *testing.T) {
 		PingIntervalSec:    0.02,
 		RecentSampleWindow: 5,
 	})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -3460,20 +3461,20 @@ func TestRetryExhaustedSSEError(t *testing.T) {
 // which the finished-stream status column shows as [重试尽]; the Anthropic port sends overloaded_error,
 // the Responses native passthrough port sends response.failed.
 func TestWriteSSEErrorGaveUp(t *testing.T) {
-	f := &flight{}
+	f := &recorder.Flight{}
 	rec := httptest.NewRecorder()
 	writeSSEError(rec, nil, "upstream status 429", f)
-	if !f.gaveUp {
+	if !f.GaveUp {
 		t.Error("writeSSEError 未置 gaveUp")
 	}
 	if s := rec.Body.String(); !strings.Contains(s, "overloaded_error") || !strings.Contains(s, "upstream status 429") {
 		t.Errorf("Anthropic 兜底事件形态不对: %q", s)
 	}
 
-	f2 := &flight{translated: translate.TranslatedResponsesRaw}
+	f2 := &recorder.Flight{Translated: translate.TranslatedResponsesRaw}
 	rec2 := httptest.NewRecorder()
 	writeSSEError(rec2, nil, "x", f2)
-	if !f2.gaveUp {
+	if !f2.GaveUp {
 		t.Error("responses-raw 未置 gaveUp")
 	}
 	if s := rec2.Body.String(); !strings.Contains(s, "response.failed") {
@@ -3502,7 +3503,7 @@ func TestClassifierThinkingPerSource(t *testing.T) {
 		if th, _ := p["thinking"].(map[string]interface{}); th["type"] != "disabled" {
 			t.Errorf("codex falls back to shared low: thinking=%v want disabled (off phase)", p["thinking"])
 		}
-		if rwCC, rwCX := stats.classifierRewritesCC.Load(), stats.classifierRewritesCodex.Load(); rwCC != 1 || rwCX != 1 {
+		if rwCC, rwCX := recorder.Stats.ClassifierRewritesCC.Load(), recorder.Stats.ClassifierRewritesCodex.Load(); rwCC != 1 || rwCX != 1 {
 			t.Errorf("rewrites CC/Codex = %d/%d, want 1/1", rwCC, rwCX)
 		}
 	})
@@ -3645,7 +3646,7 @@ func TestClassifierLowOffThenUpgrade(t *testing.T) {
 		if bytes.Contains(respBody, []byte("thinking_delta")) {
 			t.Errorf("upgraded response must be stripped, got: %s", respBody)
 		}
-		if got := stats.classifierRewrites.Load(); got != 1 {
+		if got := recorder.Stats.ClassifierRewrites.Load(); got != 1 {
 			t.Errorf("classifierRewrites=%d want 1 (the upgrade is the one real rewrite; the skipped off phase must not count)", got)
 		}
 	})
@@ -3662,7 +3663,7 @@ func TestClassifierLowOffThenUpgrade(t *testing.T) {
 		if !bytes.Contains(respBody, []byte("thinking_delta")) {
 			t.Errorf("the client asked for thinking (low): the response must keep thinking blocks, got: %s", respBody)
 		}
-		if got := stats.classifierRewrites.Load(); got != 0 {
+		if got := recorder.Stats.ClassifierRewrites.Load(); got != 0 {
 			t.Errorf("classifierRewrites=%d want 0 (no rewrite happened)", got)
 		}
 	})
@@ -3728,7 +3729,7 @@ func TestClassifierAlreadyTargetPassThrough(t *testing.T) {
 			if !tc.wantPass && bytes.Equal(out, []byte(tc.body)) {
 				t.Errorf("want a rewrite, body unchanged")
 			}
-			if got := stats.classifierRewrites.Load(); got != tc.wantCount {
+			if got := recorder.Stats.ClassifierRewrites.Load(); got != tc.wantCount {
 				t.Errorf("classifierRewrites=%d want %d", got, tc.wantCount)
 			}
 		})

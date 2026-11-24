@@ -17,6 +17,7 @@ import (
 	"proxy429/internal/config"
 	"proxy429/internal/jsonutil"
 	"proxy429/internal/platform"
+	"proxy429/internal/recorder"
 	"proxy429/internal/translate"
 )
 
@@ -68,32 +69,32 @@ func resolveProgramUILang() {
 // and rebuilds sample capacity per the given config's RecentSampleWindow. In-flight streams and stream numbering are kept (avoids id collisions).
 // Called only by the web "clear stats" button (switches/reloads don't clear stats; stats persist across configs).
 func clearStats(c *config.Config) {
-	stats.mu.Lock()
-	stats.cacheRead = 0
-	stats.cacheCreation = 0
-	stats.inputTokens = 0
-	stats.outputTokens = 0
-	stats.modelStats = nil
-	stats.mu.Unlock()
-	stats.bytesUp.Store(0)
-	stats.bytesDown.Store(0)
-	stats.statusRetries.Store(0)
-	stats.classifierRewrites.Store(0)
-	stats.classifierHits.Store(0)
-	stats.classifierHitsCC.Store(0)
-	stats.classifierHitsCodex.Store(0)
-	stats.classifierRewritesCC.Store(0)
-	stats.classifierRewritesCodex.Store(0)
-	stats.resetSampleCap(c.RecentSampleWindow)
-	finishedMu.Lock()
-	finished = nil
-	cacheObsMap = map[string]*cacheObsEntry{} // Clear the empirical cache-lifetime observations too
-	finishedMu.Unlock()
+	recorder.Stats.Mu.Lock()
+	recorder.Stats.CacheRead = 0
+	recorder.Stats.CacheCreation = 0
+	recorder.Stats.InputTokens = 0
+	recorder.Stats.OutputTokens = 0
+	recorder.Stats.ModelStats = nil
+	recorder.Stats.Mu.Unlock()
+	recorder.Stats.BytesUp.Store(0)
+	recorder.Stats.BytesDown.Store(0)
+	recorder.Stats.StatusRetries.Store(0)
+	recorder.Stats.ClassifierRewrites.Store(0)
+	recorder.Stats.ClassifierHits.Store(0)
+	recorder.Stats.ClassifierHitsCC.Store(0)
+	recorder.Stats.ClassifierHitsCodex.Store(0)
+	recorder.Stats.ClassifierRewritesCC.Store(0)
+	recorder.Stats.ClassifierRewritesCodex.Store(0)
+	recorder.Stats.ResetSampleCap(c.RecentSampleWindow)
+	recorder.FinishedMu.Lock()
+	recorder.Finished = nil
+	recorder.CacheObsMap = map[string]*recorder.CacheObsEntry{} // Clear the empirical cache-lifetime observations too
+	recorder.FinishedMu.Unlock()
 	// 清空统计连带清掉活跃度热图，并重写持久化文件为空。
-	heatMu.Lock()
-	heat = [heatSlots]heatSlot{}
-	heatMu.Unlock()
-	_ = heatSave()
+	recorder.HeatMu.Lock()
+	recorder.Heat = [recorder.HeatSlots]recorder.HeatSlot{}
+	recorder.HeatMu.Unlock()
+	_ = recorder.HeatSave()
 }
 
 // reloadConfig re-reads the current config file and atomically swaps the active config, without clearing stats (only the "clear stats" button clears).
@@ -147,11 +148,11 @@ func main() {
 	}
 	config.Store(c)
 	config.SetConfigWarnings(warns)
-	stats.resetSampleCap(c.RecentSampleWindow) // Initialize the "last X" latency/throughput sliding-window capacity
-	resolveProgramUILang()                     // First launch: program-settings.txt wins, legacy config ui_lang is migrated, otherwise follow the OS
+	recorder.Stats.ResetSampleCap(c.RecentSampleWindow) // Initialize the "last X" latency/throughput sliding-window capacity
+	resolveProgramUILang()                              // First launch: program-settings.txt wins, legacy config ui_lang is migrated, otherwise follow the OS
 	// The flight registry and log buffer are always initialized (handlers always register flights; the map must not be nil).
-	flights.m = make(map[uint64]*flight)
-	logBuf.lines = make([]string, 0, maxLogBuf)
+	recorder.Flights.M = make(map[uint64]*recorder.Flight)
+	recorder.LogBuf.Lines = make([]string, 0, recorder.MaxLogBuf)
 
 	// Set a "first-byte timeout" for upstream requests: beyond it the request is considered stuck and resent internally (case-0 retry).
 	// ResponseHeaderTimeout, not client.Timeout, so only the first-byte wait is limited and streaming Bodies are never cut.
@@ -163,12 +164,12 @@ func main() {
 		tr.ResponseHeaderTimeout = time.Duration(c.UpstreamHeaderTimeoutSec * float64(time.Second))
 		base = tr
 	}
-	client.Transport = trafficRT{base: base}
+	recorder.Client.Transport = recorder.TrafficRT{Base: base}
 
 	// Log output: always into logRing (polled by the web 「查看日志」 page) + stderr.
 	// The program has no terminal UI: Windows builds with the GUI subsystem have no console, macOS .apps have no terminal — writing stderr is harmless;
 	// when log_file is explicitly configured, logs are additionally persisted for later troubleshooting.
-	var logOut io.Writer = io.MultiWriter(logBufAppender{}, os.Stderr)
+	var logOut io.Writer = io.MultiWriter(recorder.LogBufAppender{}, os.Stderr)
 	if c.LogFile != "" {
 		if f, err := os.OpenFile(c.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 			logOut = io.MultiWriter(logOut, f)
@@ -251,8 +252,8 @@ func runServer(c *config.Config) {
 	http.HandleFunc(uiLangPath, uiLangHandler)
 	http.HandleFunc("/", handler)
 	// 活跃度热图：装载 48h 窗口内的持久化数据（缺失/损坏文件即从空开始），并启动每分钟脏落盘。
-	heatLoad()
-	go heatSaverLoop()
+	recorder.HeatLoad()
+	go recorder.HeatSaverLoop()
 	err := http.ListenAndServe(c.Listen, nil)
 	log.Fatal(err)
 }

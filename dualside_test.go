@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/recorder"
 	"proxy429/internal/translate"
 	"strconv"
 	"strings"
@@ -15,11 +16,11 @@ import (
 // ensureFlightsMap initializes the global in-flight table (the real startup path builds it in main; unit tests run
 // back-to-back in file order within one process, and this file sorts before the other table-building cases, so it must self-build idempotently).
 func ensureFlightsMap() {
-	flights.mu.Lock()
-	if flights.m == nil {
-		flights.m = make(map[uint64]*flight)
+	recorder.Flights.Mu.Lock()
+	if recorder.Flights.M == nil {
+		recorder.Flights.M = make(map[uint64]*recorder.Flight)
 	}
-	flights.mu.Unlock()
+	recorder.Flights.Mu.Unlock()
 }
 
 // serveFlightSide requests /__flight?id=N[&full=1][&side=S] with a localhost RemoteAddr,
@@ -70,25 +71,25 @@ func serveFlightReqSide(t *testing.T, id uint64, side string) (int, string, []by
 // streams without a downstream-side record auto-fall back to the upstream side for side=down (X-Proxy429-Side: up); in-flight and finished-archive queries behave identically.
 func TestFlightSideEndpoints(t *testing.T) {
 	ensureFlightsMap()
-	oldFinished := finished
-	defer func() { finished = oldFinished }()
-	finished = nil
+	oldFinished := recorder.Finished
+	defer func() { recorder.Finished = oldFinished }()
+	recorder.Finished = nil
 
 	// A stream with both sides recorded (simulating a translation-stream shape).
-	dual := &flight{id: flights.nextID.Add(1), start: time.Now()}
-	dual.setReqBody([]byte(`{"up":1}`))
-	dual.setReqDown([]byte(`{"down":1}`))
-	dual.appendContent([]byte("UP-SSE"))
-	dual.appendContentDown([]byte("DOWN-JSON"))
-	flights.register(dual)
-	defer flights.unregister(dual.id)
+	dual := &recorder.Flight{ID: recorder.Flights.NextID.Add(1), Start: time.Now()}
+	dual.SetReqBody([]byte(`{"up":1}`))
+	dual.SetReqDown([]byte(`{"down":1}`))
+	dual.AppendContent([]byte("UP-SSE"))
+	dual.AppendContentDown([]byte("DOWN-JSON"))
+	recorder.Flights.Register(dual)
+	defer recorder.Flights.Unregister(dual.ID)
 
 	// A stream with only the upstream side (simulating an unrewritten native-stream shape).
-	upOnly := &flight{id: flights.nextID.Add(1), start: time.Now()}
-	upOnly.setReqBody([]byte(`{"up":2}`))
-	upOnly.appendContent([]byte("UP-ONLY"))
-	flights.register(upOnly)
-	defer flights.unregister(upOnly.id)
+	upOnly := &recorder.Flight{ID: recorder.Flights.NextID.Add(1), Start: time.Now()}
+	upOnly.SetReqBody([]byte(`{"up":2}`))
+	upOnly.AppendContent([]byte("UP-ONLY"))
+	recorder.Flights.Register(upOnly)
+	defer recorder.Flights.Unregister(upOnly.ID)
 
 	cases := []struct {
 		name     string
@@ -97,11 +98,11 @@ func TestFlightSideEndpoints(t *testing.T) {
 		wantSide string
 		wantBody string
 	}{
-		{"双侧-缺省为up", dual.id, "", "up", "UP-SSE"},
-		{"双侧-up", dual.id, "up", "up", "UP-SSE"},
-		{"双侧-down", dual.id, "down", "down", "DOWN-JSON"},
-		{"单侧-缺省up", upOnly.id, "", "up", "UP-ONLY"},
-		{"单侧-down回退up", upOnly.id, "down", "up", "UP-ONLY"},
+		{"双侧-缺省为up", dual.ID, "", "up", "UP-SSE"},
+		{"双侧-up", dual.ID, "up", "up", "UP-SSE"},
+		{"双侧-down", dual.ID, "down", "down", "DOWN-JSON"},
+		{"单侧-缺省up", upOnly.ID, "", "up", "UP-ONLY"},
+		{"单侧-down回退up", upOnly.ID, "down", "up", "UP-ONLY"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -119,25 +120,25 @@ func TestFlightSideEndpoints(t *testing.T) {
 	}
 
 	// The request-body endpoint follows the same rules: each side returns its own; a down-only miss falls back to up.
-	code, served, body := serveFlightReqSide(t, dual.id, "down")
+	code, served, body := serveFlightReqSide(t, dual.ID, "down")
 	if code != 200 || served != "down" || string(body) != `{"down":1}` {
 		t.Errorf("请求体 down 侧: code=%d side=%q body=%q, want 200/down/{\"down\":1}", code, served, body)
 	}
-	code, served, body = serveFlightReqSide(t, upOnly.id, "down")
+	code, served, body = serveFlightReqSide(t, upOnly.ID, "down")
 	if code != 200 || served != "up" || string(body) != `{"up":2}` {
 		t.Errorf("请求体 down 回退: code=%d side=%q body=%q, want 200/up/{\"up\":2}", code, served, body)
 	}
 
 	// After archiving to finished (removed from the in-flight table), both sides and the fallback remain queryable.
-	addFinished(dual)
-	addFinished(upOnly)
-	flights.unregister(dual.id)
-	flights.unregister(upOnly.id)
-	code, served, body = serveFlightSide(t, dual.id, "down", false)
+	recorder.AddFinished(dual)
+	recorder.AddFinished(upOnly)
+	recorder.Flights.Unregister(dual.ID)
+	recorder.Flights.Unregister(upOnly.ID)
+	code, served, body = serveFlightSide(t, dual.ID, "down", false)
 	if code != 200 || served != "down" || string(body) != "DOWN-JSON" {
 		t.Errorf("归档 down 侧: code=%d side=%q body=%q, want 200/down/DOWN-JSON", code, served, body)
 	}
-	code, served, body = serveFlightSide(t, upOnly.id, "down", false)
+	code, served, body = serveFlightSide(t, upOnly.ID, "down", false)
 	if code != 200 || served != "up" || string(body) != "UP-ONLY" {
 		t.Errorf("归档 down 回退: code=%d side=%q body=%q, want 200/up/UP-ONLY", code, served, body)
 	}
@@ -147,30 +148,30 @@ func TestFlightSideEndpoints(t *testing.T) {
 // when the 储存完整结构体 toggle is on and differing content exists; without a downstream-side copy it falls back to the upstream side and says so truthfully.
 func TestFlightSideFullDownload(t *testing.T) {
 	ensureFlightsMap()
-	defer fullStore.Store(false)
-	fullStore.Store(true)
+	defer recorder.FullStore.Store(false)
+	recorder.FullStore.Store(true)
 
-	f := &flight{id: flights.nextID.Add(1), start: time.Now()}
-	f.appendContent([]byte("FULL-UP"))
-	f.appendContentDown([]byte("FULL-DOWN"))
-	flights.register(f)
-	defer flights.unregister(f.id)
+	f := &recorder.Flight{ID: recorder.Flights.NextID.Add(1), Start: time.Now()}
+	f.AppendContent([]byte("FULL-UP"))
+	f.AppendContentDown([]byte("FULL-DOWN"))
+	recorder.Flights.Register(f)
+	defer recorder.Flights.Unregister(f.ID)
 
-	code, served, body := serveFlightSide(t, f.id, "down", true)
+	code, served, body := serveFlightSide(t, f.ID, "down", true)
 	if code != 200 || served != "down" || string(body) != "FULL-DOWN" {
 		t.Errorf("full down: code=%d side=%q body=%q, want 200/down/FULL-DOWN", code, served, body)
 	}
-	code, served, body = serveFlightSide(t, f.id, "up", true)
+	code, served, body = serveFlightSide(t, f.ID, "up", true)
 	if code != 200 || served != "up" || string(body) != "FULL-UP" {
 		t.Errorf("full up: code=%d side=%q body=%q, want 200/up/FULL-UP", code, served, body)
 	}
 
 	// No downstream-side full copy: side=down falls back to the upstream side.
-	g := &flight{id: flights.nextID.Add(1), start: time.Now()}
-	g.appendContent([]byte("ONLY-UP"))
-	flights.register(g)
-	defer flights.unregister(g.id)
-	code, served, body = serveFlightSide(t, g.id, "down", true)
+	g := &recorder.Flight{ID: recorder.Flights.NextID.Add(1), Start: time.Now()}
+	g.AppendContent([]byte("ONLY-UP"))
+	recorder.Flights.Register(g)
+	defer recorder.Flights.Unregister(g.ID)
+	code, served, body = serveFlightSide(t, g.ID, "down", true)
 	if code != 200 || served != "up" || string(body) != "ONLY-UP" {
 		t.Errorf("full down 回退: code=%d side=%q body=%q, want 200/up/ONLY-UP", code, served, body)
 	}
@@ -180,9 +181,9 @@ func TestFlightSideFullDownload(t *testing.T) {
 // and the Responses-shaped response actually received; the upstream side stores the translated Anthropic request body and the upstream's raw SSE stream.
 func TestDualSideTranslatedFlow(t *testing.T) {
 	resetStats()
-	oldFinished := finished
-	defer func() { finished = oldFinished }()
-	finished = nil
+	oldFinished := recorder.Finished
+	defer func() { recorder.Finished = oldFinished }()
+	recorder.Finished = nil
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -213,26 +214,26 @@ func TestDualSideTranslatedFlow(t *testing.T) {
 		t.Fatalf("状态=%d, want 200: %s", resp.StatusCode, body)
 	}
 
-	if len(finished) != 1 {
-		t.Fatalf("归档流数=%d, want 1", len(finished))
+	if len(recorder.Finished) != 1 {
+		t.Fatalf("归档流数=%d, want 1", len(recorder.Finished))
 	}
-	ff := finished[0]
+	ff := recorder.Finished[0]
 	// Downstream-side request body = the client's Responses original (verbatim); upstream side = the translated Anthropic body.
-	if string(ff.reqDown) != raw {
-		t.Errorf("reqDown=%q, want 客户端原文 %q", ff.reqDown, raw)
+	if string(ff.ReqDown) != raw {
+		t.Errorf("reqDown=%q, want 客户端原文 %q", ff.ReqDown, raw)
 	}
-	if !strings.Contains(string(ff.reqBody), `"messages"`) || !strings.Contains(string(ff.reqBody), `"deepseek-v4-flash"`) {
-		t.Errorf("reqBody 应为翻译并路由改写后的 Anthropic 体: %s", ff.reqBody)
+	if !strings.Contains(string(ff.ReqBody), `"messages"`) || !strings.Contains(string(ff.ReqBody), `"deepseek-v4-flash"`) {
+		t.Errorf("reqBody 应为翻译并路由改写后的 Anthropic 体: %s", ff.ReqBody)
 	}
 	// Downstream-side response = the Responses JSON the client actually received; upstream side = the upstream Anthropic SSE raw stream.
-	if !strings.Contains(string(ff.contentDown), `"object":"response"`) {
-		t.Errorf("contentDown 应为 Responses JSON: %.200s", ff.contentDown)
+	if !strings.Contains(string(ff.ContentDown), `"object":"response"`) {
+		t.Errorf("contentDown 应为 Responses JSON: %.200s", ff.ContentDown)
 	}
-	if !strings.Contains(string(ff.content), "message_start") {
-		t.Errorf("content 应为上游 Anthropic SSE: %.200s", ff.content)
+	if !strings.Contains(string(ff.Content), "message_start") {
+		t.Errorf("content 应为上游 Anthropic SSE: %.200s", ff.Content)
 	}
-	if !strings.Contains(string(ff.content), `"model":"deepseek-v4-flash"`) {
-		t.Errorf("content 应保留上游原始模型名（未经写回）: %.200s", ff.content)
+	if !strings.Contains(string(ff.Content), `"model":"deepseek-v4-flash"`) {
+		t.Errorf("content 应保留上游原始模型名（未经写回）: %.200s", ff.Content)
 	}
 }
 
@@ -241,9 +242,9 @@ func TestDualSideTranslatedFlow(t *testing.T) {
 // only when the body is rewritten (routed model change) is reqDown stored separately.
 func TestDualSideDirectFlow(t *testing.T) {
 	resetStats()
-	oldFinished := finished
-	defer func() { finished = oldFinished }()
-	finished = nil
+	oldFinished := recorder.Finished
+	defer func() { recorder.Finished = oldFinished }()
+	recorder.Finished = nil
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -272,10 +273,10 @@ func TestDualSideDirectFlow(t *testing.T) {
 		}
 	}
 	// Find the archived stream by request-body content (addFinished is newest-first; don't guess by position; finished is a value slice, so a returned pointer must come from indexing).
-	findFF := func(sub string) *finishedFlight {
-		for i := range finished {
-			if strings.Contains(string(finished[i].reqBody), sub) {
-				return &finished[i]
+	findFF := func(sub string) *recorder.FinishedFlight {
+		for i := range recorder.Finished {
+			if strings.Contains(string(recorder.Finished[i].ReqBody), sub) {
+				return &recorder.Finished[i]
 			}
 		}
 		return nil
@@ -285,17 +286,17 @@ func TestDualSideDirectFlow(t *testing.T) {
 	post("claude-x1")
 	ff := findFF("claude-x1")
 	if ff == nil {
-		t.Fatalf("透传流未归档（finished=%d 条）", len(finished))
+		t.Fatalf("透传流未归档（finished=%d 条）", len(recorder.Finished))
 	}
-	if ff.reqDown != nil {
-		t.Errorf("同文流不应双存 reqDown: %q", ff.reqDown)
+	if ff.ReqDown != nil {
+		t.Errorf("同文流不应双存 reqDown: %q", ff.ReqDown)
 	}
-	if len(ff.contentDown) != 0 {
-		t.Errorf("同文流不应双存 contentDown（%d 字节）", len(ff.contentDown))
+	if len(ff.ContentDown) != 0 {
+		t.Errorf("同文流不应双存 contentDown（%d 字节）", len(ff.ContentDown))
 	}
 
-	if ff.contentDown != nil {
-		t.Errorf("同文流 contentDown 应为 nil（空非 nil 切片会让 respDown 旗标说谎）: %#v", ff.contentDown)
+	if ff.ContentDown != nil {
+		t.Errorf("同文流 contentDown 应为 nil（空非 nil 切片会让 respDown 旗标说谎）: %#v", ff.ContentDown)
 	}
 	// Route-rewritten model: the body changed; the downstream side stores the client's original, the upstream side the rewritten body.
 	config.Store(&config.Config{
@@ -307,10 +308,10 @@ func TestDualSideDirectFlow(t *testing.T) {
 	post("claude-y1")
 	ff = findFF("k3-256k")
 	if ff == nil {
-		t.Fatalf("改写流未归档（finished=%d 条）", len(finished))
+		t.Fatalf("改写流未归档（finished=%d 条）", len(recorder.Finished))
 	}
-	if ff.reqDown == nil || !strings.Contains(string(ff.reqDown), `"claude-y1"`) {
-		t.Errorf("改写流 reqDown 应存客户端原文: %q", ff.reqDown)
+	if ff.ReqDown == nil || !strings.Contains(string(ff.ReqDown), `"claude-y1"`) {
+		t.Errorf("改写流 reqDown 应存客户端原文: %q", ff.ReqDown)
 	}
 }
 
@@ -321,9 +322,9 @@ func TestDualSideDirectFlow(t *testing.T) {
 func TestDualSideModelWriteBack(t *testing.T) {
 	resetStats()
 	ensureFlightsMap()
-	oldFinished := finished
-	defer func() { finished = oldFinished }()
-	finished = nil
+	oldFinished := recorder.Finished
+	defer func() { recorder.Finished = oldFinished }()
+	recorder.Finished = nil
 
 	// The upstream's SSE carries its own model name in message_start (testSSEAllBlocks: deepseek-v4-flash),
 	// which the proxy must write back to the client's original model because the route rewrote the request model.
@@ -360,26 +361,26 @@ func TestDualSideModelWriteBack(t *testing.T) {
 		t.Errorf("客户端实收应写回 claude-y1 且不含上游模型名: %.200s", got)
 	}
 
-	if len(finished) != 1 {
-		t.Fatalf("归档流数=%d, want 1", len(finished))
+	if len(recorder.Finished) != 1 {
+		t.Fatalf("归档流数=%d, want 1", len(recorder.Finished))
 	}
-	ff := &finished[0]
+	ff := &recorder.Finished[0]
 	// Upstream side: the exact bytes the upstream sent — its own model name intact, no written-back name anywhere.
-	if !strings.Contains(string(ff.content), `"model":"deepseek-v4-flash"`) {
-		t.Errorf("上游侧应保留上游原始模型名 deepseek-v4-flash: %.200s", ff.content)
+	if !strings.Contains(string(ff.Content), `"model":"deepseek-v4-flash"`) {
+		t.Errorf("上游侧应保留上游原始模型名 deepseek-v4-flash: %.200s", ff.Content)
 	}
-	if strings.Contains(string(ff.content), "claude-y1") {
-		t.Errorf("上游侧不应含写回后的客户端模型名: %.200s", ff.content)
+	if strings.Contains(string(ff.Content), "claude-y1") {
+		t.Errorf("上游侧不应含写回后的客户端模型名: %.200s", ff.Content)
 	}
 	// Downstream side: the bytes the client actually received — model written back, upstream name gone.
-	if len(ff.contentDown) == 0 {
+	if len(ff.ContentDown) == 0 {
 		t.Fatalf("模型写回流的下游侧应单独记录响应（contentDown 为空）")
 	}
-	if !strings.Contains(string(ff.contentDown), `"model":"claude-y1"`) || strings.Contains(string(ff.contentDown), "deepseek-v4-flash") {
-		t.Errorf("下游侧应为写回后的客户端实收: %.200s", ff.contentDown)
+	if !strings.Contains(string(ff.ContentDown), `"model":"claude-y1"`) || strings.Contains(string(ff.ContentDown), "deepseek-v4-flash") {
+		t.Errorf("下游侧应为写回后的客户端实收: %.200s", ff.ContentDown)
 	}
 	// The side endpoint must serve the downstream side truthfully (no silent fallback to up).
-	code, served, sbody := serveFlightSide(t, ff.id, "down", false)
+	code, served, sbody := serveFlightSide(t, ff.ID, "down", false)
 	if code != 200 || served != "down" || !strings.Contains(string(sbody), `"model":"claude-y1"`) {
 		t.Errorf("side=down: code=%d side=%q, want 200/down（含写回模型名）body=%.120s", code, served, sbody)
 	}

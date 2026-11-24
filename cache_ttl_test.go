@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"proxy429/internal/recorder"
 	"strings"
 	"testing"
 	"time"
@@ -54,13 +55,13 @@ func TestExtractConvID(t *testing.T) {
 
 // TestConvKeyOf verifies the anchor key: no session identifier returns empty (no cache-age display or protection), otherwise convID|convAnchor.
 func TestConvKeyOf(t *testing.T) {
-	f := &flight{}
-	if got := convKeyOf(f); got != "" {
+	f := &recorder.Flight{}
+	if got := recorder.ConvKeyOf(f); got != "" {
 		t.Errorf("无 convID 应返回空，实际 %q", got)
 	}
-	f.convID = "sid-1"
-	f.convAnchor = "route:claude-*"
-	if got := convKeyOf(f); got != "sid-1|route:claude-*" {
+	f.ConvID = "sid-1"
+	f.ConvAnchor = "route:claude-*"
+	if got := recorder.ConvKeyOf(f); got != "sid-1|route:claude-*" {
 		t.Errorf("锚定键 = %q", got)
 	}
 }
@@ -69,45 +70,45 @@ func TestConvKeyOf(t *testing.T) {
 // does not refresh the anchor (the archive's convKey is emptied, showing "-", and the key's anchor stays on the previous same-key stream); a green-light
 // (forwarding, stage=3) disconnect refreshes the anchor as usual (this row shows its age normally).
 func TestAddFinished499Anchor(t *testing.T) {
-	oldFinished, oldCap := finished, finishedCap.Load()
+	oldFinished, oldCap := recorder.Finished, recorder.FinishedCap.Load()
 	defer func() {
-		finished = oldFinished
-		finishedCap.Store(oldCap)
+		recorder.Finished = oldFinished
+		recorder.FinishedCap.Store(oldCap)
 	}()
 
-	mkFlight := func(id uint64, status, stage int32) *flight {
-		f := &flight{id: id, convID: "s1", convAnchor: "route:a", status: int(status)}
-		f.stage.Store(stage)
-		f.start = time.Now() // Protection window = start + fixed 5min; protected within the window
+	mkFlight := func(id uint64, status, stage int32) *recorder.Flight {
+		f := &recorder.Flight{ID: id, ConvID: "s1", ConvAnchor: "route:a", Status: int(status)}
+		f.Stage.Store(stage)
+		f.Start = time.Now() // Protection window = start + fixed 5min; protected within the window
 		return f
 	}
 
 	// Yellow-light 499: no anchor key after archiving; when cap=1 triggers a trim, the protected row is the old #1 (#2 has no key and doesn't steal the anchor; both rows stay)
-	finished = nil
-	finishedCap.Store(200)
-	addFinished(mkFlight(1, 200, 3))
-	addFinished(mkFlight(2, 499, 2))
-	if got := finished[1].convKey; got != "" {
+	recorder.Finished = nil
+	recorder.FinishedCap.Store(200)
+	recorder.AddFinished(mkFlight(1, 200, 3))
+	recorder.AddFinished(mkFlight(2, 499, 2))
+	if got := recorder.Finished[1].ConvKey; got != "" {
 		t.Errorf("黄灯 499 应置空锚定键，实际 %q", got)
 	}
-	finishedCap.Store(1)
-	trimFinishedLocked()
-	if len(finished) != 2 || finished[0].id != 1 {
-		t.Fatalf("黄灯 499 不抢锚，#1 应受保护留 2 行，实际 %+v", finished)
+	recorder.FinishedCap.Store(1)
+	recorder.TrimFinishedLocked()
+	if len(recorder.Finished) != 2 || recorder.Finished[0].ID != 1 {
+		t.Fatalf("黄灯 499 不抢锚，#1 应受保护留 2 行，实际 %+v", recorder.Finished)
 	}
 
 	// Green-light 499: anchored as usual; at cap=1, #3 is the key's newest row and still inside the protection window, so the old row #1 is evicted
-	finished = nil
-	finishedCap.Store(200)
-	addFinished(mkFlight(1, 200, 3))
-	addFinished(mkFlight(3, 499, 3))
-	if got := finished[1].convKey; got != "s1|route:a" {
+	recorder.Finished = nil
+	recorder.FinishedCap.Store(200)
+	recorder.AddFinished(mkFlight(1, 200, 3))
+	recorder.AddFinished(mkFlight(3, 499, 3))
+	if got := recorder.Finished[1].ConvKey; got != "s1|route:a" {
 		t.Errorf("绿灯 499 应保留锚定键，实际 %q", got)
 	}
-	finishedCap.Store(1)
-	trimFinishedLocked()
-	if len(finished) != 1 || finished[0].id != 3 {
-		t.Fatalf("绿灯 499 照常锚定，应只留 #3，实际 %+v", finished)
+	recorder.FinishedCap.Store(1)
+	recorder.TrimFinishedLocked()
+	if len(recorder.Finished) != 1 || recorder.Finished[0].ID != 3 {
+		t.Fatalf("绿灯 499 照常锚定，应只留 #3，实际 %+v", recorder.Finished)
 	}
 }
 
@@ -116,12 +117,12 @@ func TestAddFinished499Anchor(t *testing.T) {
 // yellow-light in-flight streams (stage<3) and different-key in-flight streams don't trigger it; real-time counting resumes once the in-flight stream ends.
 func TestRecentFlightsCacheRefreshed(t *testing.T) {
 	resetStats() // Initialize flights.m and other globals (initialization normally done only in main(); tests must reset explicitly)
-	oldFinished := finished
-	defer func() { finished = oldFinished }()
+	oldFinished := recorder.Finished
+	defer func() { recorder.Finished = oldFinished }()
 
 	key := "s1|route:a"
 	t0 := time.Now()
-	finished = []finishedFlight{{id: 1, convKey: key, start: t0.Add(-3 * time.Minute)}} // Cache written 3 minutes ago
+	recorder.Finished = []recorder.FinishedFlight{{ID: 1, ConvKey: key, Start: t0.Add(-3 * time.Minute)}} // Cache written 3 minutes ago
 
 	call := func() string {
 		req := httptest.NewRequest("GET", "/__recentflights", nil)
@@ -142,13 +143,13 @@ func TestRecentFlightsCacheRefreshed(t *testing.T) {
 		return d.List[0].CacheAge
 	}
 	register := func(id uint64, convID, anchor string, stage int32, start time.Time) {
-		f := &flight{id: id, convID: convID, convAnchor: anchor, start: start}
-		f.stage.Store(stage)
-		flights.register(f)
+		f := &recorder.Flight{ID: id, ConvID: convID, ConvAnchor: anchor, Start: start}
+		f.Stage.Store(stage)
+		recorder.Flights.Register(f)
 	}
-	defer flights.unregister(90)
-	defer flights.unregister(91)
-	defer flights.unregister(92)
+	defer recorder.Flights.Unregister(90)
+	defer recorder.Flights.Unregister(91)
+	defer recorder.Flights.Unregister(92)
 
 	if got := call(); !strings.Contains(got, ":") {
 		t.Errorf("无在途流应为实时年龄（约 3:0x），实际 %q", got)
@@ -166,7 +167,7 @@ func TestRecentFlightsCacheRefreshed(t *testing.T) {
 	if got := call(); got != "[2:20]" {
 		t.Errorf("同键绿灯在途流应冻结显示 [2:20]，实际 %q", got)
 	}
-	flights.unregister(92)
+	recorder.Flights.Unregister(92)
 	if got := call(); !strings.Contains(got, ":") {
 		t.Errorf("在途流结束后应恢复实时递增，实际 %q", got)
 	}
@@ -178,16 +179,16 @@ func TestRecentFlightsCacheRefreshed(t *testing.T) {
 // in-flight start. The row shows the plain counting age instead.
 func TestRecentFlightsCacheAgeNoNegative(t *testing.T) {
 	resetStats()
-	oldFinished := finished
-	defer func() { finished = oldFinished }()
+	oldFinished := recorder.Finished
+	defer func() { recorder.Finished = oldFinished }()
 
 	t0 := time.Now()
-	finished = []finishedFlight{{id: 1, convKey: "s1|route:a", start: t0.Add(-1 * time.Minute)}}
+	recorder.Finished = []recorder.FinishedFlight{{ID: 1, ConvKey: "s1|route:a", Start: t0.Add(-1 * time.Minute)}}
 	// An older same-key stream is still forwarding (started 10 minutes ago, long response).
-	f := &flight{id: 93, convID: "s1", convAnchor: "route:a", start: t0.Add(-10 * time.Minute)}
-	f.stage.Store(3)
-	flights.register(f)
-	defer flights.unregister(93)
+	f := &recorder.Flight{ID: 93, ConvID: "s1", ConvAnchor: "route:a", Start: t0.Add(-10 * time.Minute)}
+	f.Stage.Store(3)
+	recorder.Flights.Register(f)
+	defer recorder.Flights.Unregister(93)
 
 	req := httptest.NewRequest("GET", "/__recentflights", nil)
 	req.RemoteAddr = "127.0.0.1:1"
@@ -217,85 +218,85 @@ func TestRecentFlightsCacheAgeNoNegative(t *testing.T) {
 // rows that are "the newest of their anchor key and still inside the protection window (start + defaultCacheTTL)" are protected from eviction (no compensating extension; row count may exceed cap);
 // rows past the window, rows superseded by a newer same-key row, and keyless rows are evicted FIFO as usual.
 func TestTrimFinishedLocked(t *testing.T) {
-	oldFinished, oldCap := finished, finishedCap.Load()
+	oldFinished, oldCap := recorder.Finished, recorder.FinishedCap.Load()
 	defer func() {
-		finished = oldFinished
-		finishedCap.Store(oldCap)
+		recorder.Finished = oldFinished
+		recorder.FinishedCap.Store(oldCap)
 	}()
 
 	fresh := time.Now()                 // Inside the protection window (start is < 5min ago)
 	stale := time.Now().Add(-time.Hour) // Past the protection window
-	mk := func(id uint64, key string, start time.Time) finishedFlight {
-		return finishedFlight{id: id, convKey: key, start: start}
+	mk := func(id uint64, key string, start time.Time) recorder.FinishedFlight {
+		return recorder.FinishedFlight{ID: id, ConvKey: key, Start: start}
 	}
 
 	t.Run("用户例子：14 行留 10，最旧 1 行窗口内 S2 受保护，留 11 行", func(t *testing.T) {
 		// Row 0 (oldest) = S2's newest and inside the window; rows 1..13 = S1 (row 13 is S1's newest)
-		finished = []finishedFlight{mk(0, "S2|route:a", fresh)}
+		recorder.Finished = []recorder.FinishedFlight{mk(0, "S2|route:a", fresh)}
 		for i := 1; i <= 13; i++ {
-			finished = append(finished, mk(uint64(i), "S1|route:b", fresh))
+			recorder.Finished = append(recorder.Finished, mk(uint64(i), "S1|route:b", fresh))
 		}
-		finishedCap.Store(10)
-		trimFinishedLocked()
-		if len(finished) != 11 {
-			t.Fatalf("应留 11 行，实际 %d", len(finished))
+		recorder.FinishedCap.Store(10)
+		recorder.TrimFinishedLocked()
+		if len(recorder.Finished) != 11 {
+			t.Fatalf("应留 11 行，实际 %d", len(recorder.Finished))
 		}
-		if finished[0].convKey != "S2|route:a" {
-			t.Errorf("首行应是被保护的 S2，实际 %q", finished[0].convKey)
+		if recorder.Finished[0].ConvKey != "S2|route:a" {
+			t.Errorf("首行应是被保护的 S2，实际 %q", recorder.Finished[0].ConvKey)
 		}
 		// The evicted ones should be S1's oldest 3 rows (id 1..3); S1's newest 10 rows (id 4..13) all stay
-		for i, ff := range finished[1:] {
-			if wantID := uint64(i + 4); ff.id != wantID {
-				t.Errorf("finished[%d].id = %d，期望 %d", i+1, ff.id, wantID)
+		for i, ff := range recorder.Finished[1:] {
+			if wantID := uint64(i + 4); ff.ID != wantID {
+				t.Errorf("finished[%d].id = %d，期望 %d", i+1, ff.ID, wantID)
 			}
 		}
 	})
 
 	t.Run("窗口内被同键更新行刷新的行不保护", func(t *testing.T) {
 		// Both same-key rows are inside the protection window; the older one (not the newest) is still evicted when inside the eviction window
-		finished = []finishedFlight{mk(0, "K|r", fresh), mk(1, "K|r", fresh)}
-		finishedCap.Store(1)
-		trimFinishedLocked()
-		if len(finished) != 1 || finished[0].id != 1 {
-			t.Fatalf("应只剩最新行 id=1，实际 %+v", finished)
+		recorder.Finished = []recorder.FinishedFlight{mk(0, "K|r", fresh), mk(1, "K|r", fresh)}
+		recorder.FinishedCap.Store(1)
+		recorder.TrimFinishedLocked()
+		if len(recorder.Finished) != 1 || recorder.Finished[0].ID != 1 {
+			t.Fatalf("应只剩最新行 id=1，实际 %+v", recorder.Finished)
 		}
 	})
 
 	t.Run("出保护窗口的行不保护", func(t *testing.T) {
 		// Row 0 is K's newest but past the protection window; row 1 has no key. At cap=1, row 0 is inside the eviction window and gets evicted
-		finished = []finishedFlight{mk(0, "K|r", stale), mk(1, "", fresh)}
-		finishedCap.Store(1)
-		trimFinishedLocked()
-		if len(finished) != 1 || finished[0].id != 1 {
-			t.Fatalf("超窗口行应被裁，实际 %+v", finished)
+		recorder.Finished = []recorder.FinishedFlight{mk(0, "K|r", stale), mk(1, "", fresh)}
+		recorder.FinishedCap.Store(1)
+		recorder.TrimFinishedLocked()
+		if len(recorder.Finished) != 1 || recorder.Finished[0].ID != 1 {
+			t.Fatalf("超窗口行应被裁，实际 %+v", recorder.Finished)
 		}
 	})
 
 	t.Run("无键行不保护", func(t *testing.T) {
-		finished = []finishedFlight{mk(0, "", fresh), mk(1, "K|r", fresh)}
-		finishedCap.Store(1)
-		trimFinishedLocked()
-		if len(finished) != 1 || finished[0].id != 1 {
-			t.Fatalf("无键行应被裁，实际 %+v", finished)
+		recorder.Finished = []recorder.FinishedFlight{mk(0, "", fresh), mk(1, "K|r", fresh)}
+		recorder.FinishedCap.Store(1)
+		recorder.TrimFinishedLocked()
+		if len(recorder.Finished) != 1 || recorder.Finished[0].ID != 1 {
+			t.Fatalf("无键行应被裁，实际 %+v", recorder.Finished)
 		}
 	})
 
 	t.Run("行数不超 cap 时不动作", func(t *testing.T) {
-		finished = []finishedFlight{mk(0, "", stale), mk(1, "K|r", stale)}
-		finishedCap.Store(10)
-		trimFinishedLocked()
-		if len(finished) != 2 {
-			t.Fatalf("不应裁剪，实际 %d 行", len(finished))
+		recorder.Finished = []recorder.FinishedFlight{mk(0, "", stale), mk(1, "K|r", stale)}
+		recorder.FinishedCap.Store(10)
+		recorder.TrimFinishedLocked()
+		if len(recorder.Finished) != 2 {
+			t.Fatalf("不应裁剪，实际 %d 行", len(recorder.Finished))
 		}
 	})
 
 	t.Run("裁员窗口内全是无键/超窗口行时退化为纯 FIFO", func(t *testing.T) {
-		finished = []finishedFlight{mk(0, "", stale), mk(1, "K|r", stale), mk(2, "K|r", fresh), mk(3, "", stale)}
-		finishedCap.Store(2)
-		trimFinishedLocked()
+		recorder.Finished = []recorder.FinishedFlight{mk(0, "", stale), mk(1, "K|r", stale), mk(2, "K|r", fresh), mk(3, "", stale)}
+		recorder.FinishedCap.Store(2)
+		recorder.TrimFinishedLocked()
 		// Eviction window = rows 0..1: row 0 has no key, row 1 is not K's newest and past the window — both evicted; ids 2 and 3 stay
-		if len(finished) != 2 || finished[0].id != 2 || finished[1].id != 3 {
-			t.Fatalf("应留 id 2、3，实际 %+v", finished)
+		if len(recorder.Finished) != 2 || recorder.Finished[0].ID != 2 || recorder.Finished[1].ID != 3 {
+			t.Fatalf("应留 id 2、3，实际 %+v", recorder.Finished)
 		}
 	})
 }
@@ -303,21 +304,21 @@ func TestTrimFinishedLocked(t *testing.T) {
 // TestObsKeyOf verifies the observed cache-lifetime pairing key: an empty convID or upstreamKey on either side returns empty (no observation);
 // with both present it joins convID|upstreamKey; maliciously over-long session identifiers are truncated to prevent memory bloat.
 func TestObsKeyOf(t *testing.T) {
-	f := &flight{}
-	if got := obsKeyOf(f); got != "" {
+	f := &recorder.Flight{}
+	if got := recorder.ObsKeyOf(f); got != "" {
 		t.Errorf("convID/upstreamKey 都空应返回空，实际 %q", got)
 	}
-	f.convID = "sid-1"
-	if got := obsKeyOf(f); got != "" {
+	f.ConvID = "sid-1"
+	if got := recorder.ObsKeyOf(f); got != "" {
 		t.Errorf("upstreamKey 空应返回空，实际 %q", got)
 	}
-	f.upstreamKey = "https://api.x.com|model-a"
-	if got := obsKeyOf(f); got != "sid-1|https://api.x.com|model-a" {
+	f.UpstreamKey = "https://api.x.com|model-a"
+	if got := recorder.ObsKeyOf(f); got != "sid-1|https://api.x.com|model-a" {
 		t.Errorf("配对键 = %q", got)
 	}
-	f.convID = strings.Repeat("x", 600)
-	if got := obsKeyOf(f); len(got) != cacheObsMaxKeyLen {
-		t.Errorf("超长配对键应截断到 %d，实际 %d", cacheObsMaxKeyLen, len(got))
+	f.ConvID = strings.Repeat("x", 600)
+	if got := recorder.ObsKeyOf(f); len(got) != recorder.CacheObsMaxKeyLen {
+		t.Errorf("超长配对键应截断到 %d，实际 %d", recorder.CacheObsMaxKeyLen, len(got))
 	}
 }
 
@@ -330,27 +331,27 @@ func TestClassifyCacheObservation(t *testing.T) {
 		name                        string
 		prevCR, curCR, curIn, curCC int64
 		interval                    time.Duration
-		want                        cacheObsKind
+		want                        recorder.CacheObsKind
 	}{
-		{"存活：命中率 100%", 2000, 5000, 100, 0, 5 * time.Minute, obsAlive},
-		{"存活：命中率恰 95% 边界（总量 2000）", 2000, 1900, 100, 0, 3 * time.Minute, obsAlive},
-		{"中间地带 94% 不观测", 2000, 1880, 120, 0, 3 * time.Minute, obsNone},
-		{"中间地带 60% 不观测", 1000, 1200, 800, 0, 5 * time.Minute, obsNone},
-		{"死亡：前条命中过 + 后条零命中", 1000, 0, 3000, 0, 8 * time.Minute, obsDead},
-		{"死亡：残留命中 20% 也算（系统提示词缓存）", 1000, 400, 1600, 0, 8 * time.Minute, obsDead},
-		{"命中率恰 50% 边界不观测", 1000, 1000, 1000, 0, 8 * time.Minute, obsNone},
-		{"前条未命中过的零命中不算死亡（前条没写过缓存）", 0, 0, 3000, 0, 8 * time.Minute, obsNone},
-		{"体量不足 1024 不观测（命中率虽达标，总体量 1000）", 1000, 950, 50, 0, 5 * time.Minute, obsNone},
-		{"间隔为零不观测", 1000, 5000, 100, 0, 0, obsNone},
-		{"间隔为负不观测", 1000, 5000, 100, 0, -time.Minute, obsNone},
-		{"体量不足优先于死亡判定", 1000, 0, 500, 0, 8 * time.Minute, obsNone},
+		{"存活：命中率 100%", 2000, 5000, 100, 0, 5 * time.Minute, recorder.ObsAlive},
+		{"存活：命中率恰 95% 边界（总量 2000）", 2000, 1900, 100, 0, 3 * time.Minute, recorder.ObsAlive},
+		{"中间地带 94% 不观测", 2000, 1880, 120, 0, 3 * time.Minute, recorder.ObsNone},
+		{"中间地带 60% 不观测", 1000, 1200, 800, 0, 5 * time.Minute, recorder.ObsNone},
+		{"死亡：前条命中过 + 后条零命中", 1000, 0, 3000, 0, 8 * time.Minute, recorder.ObsDead},
+		{"死亡：残留命中 20% 也算（系统提示词缓存）", 1000, 400, 1600, 0, 8 * time.Minute, recorder.ObsDead},
+		{"命中率恰 50% 边界不观测", 1000, 1000, 1000, 0, 8 * time.Minute, recorder.ObsNone},
+		{"前条未命中过的零命中不算死亡（前条没写过缓存）", 0, 0, 3000, 0, 8 * time.Minute, recorder.ObsNone},
+		{"体量不足 1024 不观测（命中率虽达标，总体量 1000）", 1000, 950, 50, 0, 5 * time.Minute, recorder.ObsNone},
+		{"间隔为零不观测", 1000, 5000, 100, 0, 0, recorder.ObsNone},
+		{"间隔为负不观测", 1000, 5000, 100, 0, -time.Minute, recorder.ObsNone},
+		{"体量不足优先于死亡判定", 1000, 0, 500, 0, 8 * time.Minute, recorder.ObsNone},
 	}
 	for _, c := range cases {
-		got, gotIv := classifyCacheObservation(c.prevCR, c.curCR, c.curIn, c.curCC, c.interval)
+		got, gotIv := recorder.ClassifyCacheObservation(c.prevCR, c.curCR, c.curIn, c.curCC, c.interval)
 		if got != c.want {
 			t.Errorf("%s: kind = %v，期望 %v", c.name, got, c.want)
 		}
-		if got != obsNone && gotIv != c.interval {
+		if got != recorder.ObsNone && gotIv != c.interval {
 			t.Errorf("%s: interval = %v，期望 %v", c.name, gotIv, c.interval)
 		}
 	}
@@ -360,86 +361,86 @@ func TestClassifyCacheObservation(t *testing.T) {
 // dead interval takes min (observed upper bound only falls), observation count accumulates; different upstream keys don't interfere.
 // On contradiction (upstream TTL changed mid-way / early eviction) the newer observation wins and the refuted side is discarded and re-measured.
 func TestRecordCacheObsLocked(t *testing.T) {
-	oldMap := cacheObsMap
-	defer func() { cacheObsMap = oldMap }()
-	cacheObsMap = map[string]*cacheObsEntry{}
+	oldMap := recorder.CacheObsMap
+	defer func() { recorder.CacheObsMap = oldMap }()
+	recorder.CacheObsMap = map[string]*recorder.CacheObsEntry{}
 
-	recordCacheObsLocked("u|m", obsAlive, 5*time.Minute)
-	if cacheObsMap["u|m"].aliveAt.IsZero() {
+	recorder.RecordCacheObsLocked("u|m", recorder.ObsAlive, 5*time.Minute)
+	if recorder.CacheObsMap["u|m"].AliveAt.IsZero() {
 		t.Error("首次成界应记下界形成时间 aliveAt")
 	}
 	stale := time.Now().Add(-time.Hour) // Sentinel: an observation that doesn't change the value must leave the formation time untouched
 
-	cacheObsMap["u|m"].aliveAt = stale
-	recordCacheObsLocked("u|m", obsAlive, 3*time.Minute) // A smaller value doesn't raise the lower bound; formation time not reset
-	if !cacheObsMap["u|m"].aliveAt.Equal(stale) {
+	recorder.CacheObsMap["u|m"].AliveAt = stale
+	recorder.RecordCacheObsLocked("u|m", recorder.ObsAlive, 3*time.Minute) // A smaller value doesn't raise the lower bound; formation time not reset
+	if !recorder.CacheObsMap["u|m"].AliveAt.Equal(stale) {
 		t.Error("下界数值未变化不应重置形成时间")
 	}
-	recordCacheObsLocked("u|m", obsAlive, 9*time.Minute) // A larger value raises the lower bound; formation time resets
-	if !cacheObsMap["u|m"].aliveAt.After(stale) {
+	recorder.RecordCacheObsLocked("u|m", recorder.ObsAlive, 9*time.Minute) // A larger value raises the lower bound; formation time resets
+	if !recorder.CacheObsMap["u|m"].AliveAt.After(stale) {
 		t.Error("下界抬高应重置形成时间")
 	}
-	recordCacheObsLocked("u|m", obsDead, 20*time.Minute)
-	recordCacheObsLocked("u|m", obsDead, 30*time.Minute) // A larger value doesn't lower the upper bound
-	recordCacheObsLocked("u2|m2", obsAlive, time.Minute)
+	recorder.RecordCacheObsLocked("u|m", recorder.ObsDead, 20*time.Minute)
+	recorder.RecordCacheObsLocked("u|m", recorder.ObsDead, 30*time.Minute) // A larger value doesn't lower the upper bound
+	recorder.RecordCacheObsLocked("u2|m2", recorder.ObsAlive, time.Minute)
 
-	e := cacheObsMap["u|m"]
-	if e.aliveMax != 9*time.Minute {
-		t.Errorf("aliveMax = %v，期望 9min", e.aliveMax)
+	e := recorder.CacheObsMap["u|m"]
+	if e.AliveMax != 9*time.Minute {
+		t.Errorf("aliveMax = %v，期望 9min", e.AliveMax)
 	}
-	if e.deadMin != 20*time.Minute {
-		t.Errorf("deadMin = %v，期望 20min", e.deadMin)
+	if e.DeadMin != 20*time.Minute {
+		t.Errorf("deadMin = %v，期望 20min", e.DeadMin)
 	}
-	if e.samples != 5 {
-		t.Errorf("samples = %d，期望 5", e.samples)
+	if e.Samples != 5 {
+		t.Errorf("samples = %d，期望 5", e.Samples)
 	}
-	if e2 := cacheObsMap["u2|m2"]; e2.aliveMax != time.Minute || e2.samples != 1 {
+	if e2 := recorder.CacheObsMap["u2|m2"]; e2.AliveMax != time.Minute || e2.Samples != 1 {
 		t.Errorf("另一上游键应独立累积，实际 %+v", e2)
 	}
 
 	// TTL grew mid-way: a new alive observation of 25min crosses the old upper bound of 20min → the upper bound is discarded (its formation time zeroed too), the lower bound rises as usual; the observation count restarts (this one is #1)
-	cacheObsMap["u|m"].aliveAt = stale
-	recordCacheObsLocked("u|m", obsAlive, 25*time.Minute)
-	if e.aliveMax != 25*time.Minute || e.deadMin != 0 {
-		t.Errorf("新存活越过旧上界：上界应作废，实际 aliveMax=%v deadMin=%v", e.aliveMax, e.deadMin)
+	recorder.CacheObsMap["u|m"].AliveAt = stale
+	recorder.RecordCacheObsLocked("u|m", recorder.ObsAlive, 25*time.Minute)
+	if e.AliveMax != 25*time.Minute || e.DeadMin != 0 {
+		t.Errorf("新存活越过旧上界：上界应作废，实际 aliveMax=%v deadMin=%v", e.AliveMax, e.DeadMin)
 	}
-	if !e.deadAt.IsZero() {
+	if !e.DeadAt.IsZero() {
 		t.Error("上界作废重测时其形成时间应清零（界不存在则形成时间不存在）")
 	}
-	if e.samples != 1 {
-		t.Errorf("交叉作废后 samples = %d，期望 1（归零重计，本次观测为第 1 次）", e.samples)
+	if e.Samples != 1 {
+		t.Errorf("交叉作废后 samples = %d，期望 1（归零重计，本次观测为第 1 次）", e.Samples)
 	}
-	if !e.aliveAt.After(stale) {
+	if !e.AliveAt.After(stale) {
 		t.Error("下界抬高应重置下界形成时间")
 	}
 	// A dead observation not contradicting the lower bound stands as usual (alive at 25min, dead by 40min; both sides coexist), count accumulates; the lower bound's formation time doesn't move
-	cacheObsMap["u|m"].aliveAt = stale
-	recordCacheObsLocked("u|m", obsDead, 40*time.Minute)
-	if e.aliveMax != 25*time.Minute || e.deadMin != 40*time.Minute {
-		t.Errorf("不矛盾的死亡应两侧并存，实际 aliveMax=%v deadMin=%v", e.aliveMax, e.deadMin)
+	recorder.CacheObsMap["u|m"].AliveAt = stale
+	recorder.RecordCacheObsLocked("u|m", recorder.ObsDead, 40*time.Minute)
+	if e.AliveMax != 25*time.Minute || e.DeadMin != 40*time.Minute {
+		t.Errorf("不矛盾的死亡应两侧并存，实际 aliveMax=%v deadMin=%v", e.AliveMax, e.DeadMin)
 	}
-	if e.samples != 2 {
-		t.Errorf("不矛盾观测后 samples = %d，期望 2", e.samples)
+	if e.Samples != 2 {
+		t.Errorf("不矛盾观测后 samples = %d，期望 2", e.Samples)
 	}
-	if !e.aliveAt.Equal(stale) {
+	if !e.AliveAt.Equal(stale) {
 		t.Error("新增死亡观测不应动下界形成时间")
 	}
-	if e.deadAt.IsZero() {
+	if e.DeadAt.IsZero() {
 		t.Error("上界成立应记上界形成时间 deadAt")
 	}
 	// TTL shrank mid-way (or early eviction): a new dead observation of 10min falls below the old lower bound of 25min → the lower bound is discarded (formation time zeroed), observation count restarts again
-	cacheObsMap["u|m"].deadAt = stale
-	recordCacheObsLocked("u|m", obsDead, 10*time.Minute)
-	if e.aliveMax != 0 || e.deadMin != 10*time.Minute {
-		t.Errorf("新死亡跌破旧下界：下界应作废，实际 aliveMax=%v deadMin=%v", e.aliveMax, e.deadMin)
+	recorder.CacheObsMap["u|m"].DeadAt = stale
+	recorder.RecordCacheObsLocked("u|m", recorder.ObsDead, 10*time.Minute)
+	if e.AliveMax != 0 || e.DeadMin != 10*time.Minute {
+		t.Errorf("新死亡跌破旧下界：下界应作废，实际 aliveMax=%v deadMin=%v", e.AliveMax, e.DeadMin)
 	}
-	if !e.aliveAt.IsZero() {
+	if !e.AliveAt.IsZero() {
 		t.Error("下界作废重测时其形成时间应清零（界不存在则形成时间不存在）")
 	}
-	if e.samples != 1 {
-		t.Errorf("再次交叉作废后 samples = %d，期望 1", e.samples)
+	if e.Samples != 1 {
+		t.Errorf("再次交叉作废后 samples = %d，期望 1", e.Samples)
 	}
-	if !e.deadAt.After(stale) {
+	if !e.DeadAt.After(stale) {
 		t.Error("上界压低应重置上界形成时间")
 	}
 }
@@ -447,25 +448,25 @@ func TestRecordCacheObsLocked(t *testing.T) {
 // TestSnapshotCacheObs locks the observed cache-lifetime snapshot: the key splits into URL (scheme stripped) + model, lower/upper bounds format as
 // mm:ss ("00:30", ≥1h shows h:mm:ss like "1:42:00", a side without observations stays empty), observation count passes through, sorted by URL+model; an empty table returns nil.
 func TestSnapshotCacheObs(t *testing.T) {
-	oldMap := cacheObsMap
-	defer func() { cacheObsMap = oldMap }()
+	oldMap := recorder.CacheObsMap
+	defer func() { recorder.CacheObsMap = oldMap }()
 
-	cacheObsMap = map[string]*cacheObsEntry{}
-	if got := snapshotCacheObs(); got != nil {
+	recorder.CacheObsMap = map[string]*recorder.CacheObsEntry{}
+	if got := recorder.SnapshotCacheObs(); got != nil {
 		t.Errorf("无观测应返回 nil，实际 %+v", got)
 	}
 
-	cacheObsMap = map[string]*cacheObsEntry{
-		"https://api.kimi.com/coding|k3-256k": {aliveMax: 23*time.Minute + 30*time.Second, deadMin: 41*time.Minute + 5*time.Second, samples: 12},
-		"http://a.com|m":                      {aliveMax: 102 * time.Minute, samples: 3},
-		"https://b.com|d":                     {deadMin: 7*time.Minute + 9*time.Second, samples: 2},
+	recorder.CacheObsMap = map[string]*recorder.CacheObsEntry{
+		"https://api.kimi.com/coding|k3-256k": {AliveMax: 23*time.Minute + 30*time.Second, DeadMin: 41*time.Minute + 5*time.Second, Samples: 12},
+		"http://a.com|m":                      {AliveMax: 102 * time.Minute, Samples: 3},
+		"https://b.com|d":                     {DeadMin: 7*time.Minute + 9*time.Second, Samples: 2},
 	}
-	got := snapshotCacheObs()
+	got := recorder.SnapshotCacheObs()
 	if len(got) != 3 {
 		t.Fatalf("应有 3 行，实际 %+v", got)
 	}
 	// Sort order: a.com < api.kimi.com < b.com
-	want := []cacheObsRow{
+	want := []recorder.CacheObsRow{
 		{URL: "a.com", Model: "m", Alive: "1:42:00", Dead: "", Samples: 3},
 		{URL: "api.kimi.com/coding", Model: "k3-256k", Alive: "23:30", Dead: "41:05", Samples: 12},
 		{URL: "b.com", Model: "d", Alive: "", Dead: "07:09", Samples: 2},
@@ -478,9 +479,9 @@ func TestSnapshotCacheObs(t *testing.T) {
 
 	// ≥formed/<formed columns: how long each bound's value has stood (m:ss); when a bound doesn't exist its formation time stays empty too,
 	// even if the entry still holds that side's timestamp (defensive: the display rule only looks at whether the bound exists)
-	cacheObsMap["https://b.com|d"].deadAt = time.Now().Add(-90 * time.Second)
-	cacheObsMap["https://b.com|d"].aliveAt = time.Now().Add(-3 * time.Minute) // No lower bound; this timestamp must not be displayed
-	got = snapshotCacheObs()
+	recorder.CacheObsMap["https://b.com|d"].DeadAt = time.Now().Add(-90 * time.Second)
+	recorder.CacheObsMap["https://b.com|d"].AliveAt = time.Now().Add(-3 * time.Minute) // No lower bound; this timestamp must not be displayed
+	got = recorder.SnapshotCacheObs()
 	if got[2].DeadAge != "1:30" || got[2].AliveAge != "" {
 		t.Errorf("b.com 应 <形成 1:30、≥形成空（无下界），实际 %+v", got[2])
 	}

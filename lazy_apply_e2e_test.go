@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"proxy429/internal/config"
 	"proxy429/internal/jsonutil"
+	"proxy429/internal/recorder"
 	"proxy429/internal/translate"
 	"strings"
 	"sync"
@@ -151,7 +152,7 @@ func TestLazyApplyTextOnlyMultimodalE2E(t *testing.T) {
 				MultimodalFallback: &config.MultimodalRoute{URL: fbMock.URL, API: "sk-mm", Model: "glm-4.5v"},
 				LazyApply:          lazy,
 			})
-			stats.resetSampleCap(5)
+			recorder.Stats.ResetSampleCap(5)
 			proxy := httptest.NewServer(http.HandlerFunc(handler))
 			defer proxy.Close()
 

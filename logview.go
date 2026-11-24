@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -17,6 +16,7 @@ import (
 
 	"proxy429/internal/config"
 	"proxy429/internal/platform"
+	"proxy429/internal/recorder"
 )
 
 // Web console mount path (same port as the proxy, localhost only).
@@ -140,29 +140,29 @@ type flightInfo struct {
 
 // logData is the JSON returned by /__logs/data: recent logs + full status counters + the in-flight stream list.
 type logData struct {
-	Lines         []string          `json:"lines"`
-	Active        int               `json:"active"`
-	Waiting       int               `json:"waiting"`
-	Version       string            `json:"version"`
-	CacheRead     int64             `json:"cacheRead"`
-	CacheCreation int64             `json:"cacheCreation"`
-	InputTokens   int64             `json:"inputTokens"`
-	OutputTokens  int64             `json:"outputTokens"`
-	ModelStats    []modelUsageEntry `json:"modelStats"`
-	CacheObs      []cacheObsRow     `json:"cacheObs"`  // Observed cache lifetimes (by upstream URL+model); the cache-hit popup's second table
-	BytesUp       int64             `json:"bytesUp"`   // Bytes sent upstream (request bodies; each retry attempt counted)
-	BytesDown     int64             `json:"bytesDown"` // Bytes returned from upstream (response bodies, counted as read)
-	HeatBase      int64             `json:"heatBase"`  // Absolute slot number (unix/900) of Heat[0]; the 活跃度 heatmap window base
-	Heat          [][5]int64        `json:"heat"`      // 192 quarter-hour slots oldest-first, each [requests, output tokens, input tokens, bytes up, bytes down]
-	Retries       int64             `json:"retries"`
-	Classifiers   int64             `json:"classifiers"`
-	AvgFirstByte  float64           `json:"avgFirstByte"` // ms
-	Tps           float64           `json:"tps"`          // tok/s
-	Flights       []flightInfo      `json:"flights"`
-	CurrentCfg    string            `json:"currentCfg"`           // Currently active config file name
-	FinishedCap   int32             `json:"finishedCap"`          // How many finished streams to keep, N (adjustable on the status page)
-	FullStore     bool              `json:"fullStore"`            // The 储存完整结构体 toggle (switchable on the status page, default off)
-	HijackRisk    bool              `json:"hijackRisk,omitempty"` // Loopback-hijack trap armed (system proxy on, NO_PROXY missing) -> status-tab red banner
+	Lines         []string                   `json:"lines"`
+	Active        int                        `json:"active"`
+	Waiting       int                        `json:"waiting"`
+	Version       string                     `json:"version"`
+	CacheRead     int64                      `json:"cacheRead"`
+	CacheCreation int64                      `json:"cacheCreation"`
+	InputTokens   int64                      `json:"inputTokens"`
+	OutputTokens  int64                      `json:"outputTokens"`
+	ModelStats    []recorder.ModelUsageEntry `json:"modelStats"`
+	CacheObs      []recorder.CacheObsRow     `json:"cacheObs"`  // Observed cache lifetimes (by upstream URL+model); the cache-hit popup's second table
+	BytesUp       int64                      `json:"bytesUp"`   // Bytes sent upstream (request bodies; each retry attempt counted)
+	BytesDown     int64                      `json:"bytesDown"` // Bytes returned from upstream (response bodies, counted as read)
+	HeatBase      int64                      `json:"heatBase"`  // Absolute slot number (unix/900) of Heat[0]; the 活跃度 heatmap window base
+	Heat          [][5]int64                 `json:"heat"`      // 192 quarter-hour slots oldest-first, each [requests, output tokens, input tokens, bytes up, bytes down]
+	Retries       int64                      `json:"retries"`
+	Classifiers   int64                      `json:"classifiers"`
+	AvgFirstByte  float64                    `json:"avgFirstByte"` // ms
+	Tps           float64                    `json:"tps"`          // tok/s
+	Flights       []flightInfo               `json:"flights"`
+	CurrentCfg    string                     `json:"currentCfg"`           // Currently active config file name
+	FinishedCap   int32                      `json:"finishedCap"`          // How many finished streams to keep, N (adjustable on the status page)
+	FullStore     bool                       `json:"fullStore"`            // The 储存完整结构体 toggle (switchable on the status page, default off)
+	HijackRisk    bool                       `json:"hijackRisk,omitempty"` // Loopback-hijack trap armed (system proxy on, NO_PROXY missing) -> status-tab red banner
 
 	// ClassifierNoThink is the thinking-rewrite count: +1 only when a body is actually rewritten (off or low).
 	// (Classifiers is the count of requests matching a classifier signature: tallied whether or not rerouted/rewritten.)
@@ -181,63 +181,63 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
-	d := logData{Lines: logBuf.window(0, maxLogBuf), Version: Version, CurrentCfg: filepath.Base(config.CurrentConfigPath()), FinishedCap: finishedCap.Load(), FullStore: fullStore.Load(), HijackRisk: platform.ProxyHijackRisk()}
-	stats.mu.Lock()
-	d.Active = stats.active
-	d.Waiting = stats.waiting
-	d.CacheRead = stats.cacheRead
-	d.CacheCreation = stats.cacheCreation
-	d.InputTokens = stats.inputTokens
-	d.OutputTokens = stats.outputTokens
-	stats.mu.Unlock()
-	d.ModelStats = stats.snapshotModelStats()
-	d.CacheObs = snapshotCacheObs()
-	d.HeatBase, d.Heat = snapshotHeat()
-	d.BytesUp = stats.bytesUp.Load()
-	d.BytesDown = stats.bytesDown.Load()
-	d.Retries = stats.statusRetries.Load()
-	d.Classifiers = stats.classifierHits.Load()
-	d.ClassifierNoThink = stats.classifierRewrites.Load()
-	d.ClassifiersCC = stats.classifierHitsCC.Load()
-	d.ClassifiersCodex = stats.classifierHitsCodex.Load()
-	d.ClassifierRewritesCC = stats.classifierRewritesCC.Load()
-	d.ClassifierRewritesCodex = stats.classifierRewritesCodex.Load()
-	d.AvgFirstByte, d.Tps = stats.recentLatency()
+	d := logData{Lines: recorder.LogBuf.Window(0, recorder.MaxLogBuf), Version: Version, CurrentCfg: filepath.Base(config.CurrentConfigPath()), FinishedCap: recorder.FinishedCap.Load(), FullStore: recorder.FullStore.Load(), HijackRisk: platform.ProxyHijackRisk()}
+	recorder.Stats.Mu.Lock()
+	d.Active = recorder.Stats.Active
+	d.Waiting = recorder.Stats.Waiting
+	d.CacheRead = recorder.Stats.CacheRead
+	d.CacheCreation = recorder.Stats.CacheCreation
+	d.InputTokens = recorder.Stats.InputTokens
+	d.OutputTokens = recorder.Stats.OutputTokens
+	recorder.Stats.Mu.Unlock()
+	d.ModelStats = recorder.Stats.SnapshotModelStats()
+	d.CacheObs = recorder.SnapshotCacheObs()
+	d.HeatBase, d.Heat = recorder.SnapshotHeat()
+	d.BytesUp = recorder.Stats.BytesUp.Load()
+	d.BytesDown = recorder.Stats.BytesDown.Load()
+	d.Retries = recorder.Stats.StatusRetries.Load()
+	d.Classifiers = recorder.Stats.ClassifierHits.Load()
+	d.ClassifierNoThink = recorder.Stats.ClassifierRewrites.Load()
+	d.ClassifiersCC = recorder.Stats.ClassifierHitsCC.Load()
+	d.ClassifiersCodex = recorder.Stats.ClassifierHitsCodex.Load()
+	d.ClassifierRewritesCC = recorder.Stats.ClassifierRewritesCC.Load()
+	d.ClassifierRewritesCodex = recorder.Stats.ClassifierRewritesCodex.Load()
+	d.AvgFirstByte, d.Tps = recorder.Stats.RecentLatency()
 
 	// In-flight stream list: sorted by ID (snapshot is already sorted), showing model and forwarding progress.
-	for _, f := range flights.snapshot() {
-		model := f.origModel
-		if f.targetModel != "" && f.targetModel != f.origModel {
-			model = f.origModel + " -> " + f.targetModel
+	for _, f := range recorder.Flights.Snapshot() {
+		model := f.OrigModel
+		if f.TargetModel != "" && f.TargetModel != f.OrigModel {
+			model = f.OrigModel + " -> " + f.TargetModel
 		}
 		d.Flights = append(d.Flights, flightInfo{
-			ID:              f.id,
+			ID:              f.ID,
 			Model:           model,
-			Phase:           int(f.phase.Load()),
-			Bytes:           f.bytes.Load(),
-			Status:          f.status,
-			Stage:           f.stage.Load(),
-			Attempt:         f.attempt.Load(),
-			AttemptMs:       f.attemptMs(),
-			RouteReason:     f.routeReason.Load(),
-			Translated:      f.translated,
-			CountTokens:     f.countTokens,
-			SearchPrompt:    f.searchPrompt,
-			SearchMarker:    f.searchMarker,
-			SearchLevel:     f.searchLevel,
-			SearchThinkFrom: f.searchThinkFrom,
-			SearchThinkTo:   f.searchThinkTo,
-			Tools:           f.toolCallsTag(),             // Tool calls accumulate live; the in-flight model column fills in progressively with the 500ms polls
-			Stripped:        int(f.searchStripped.Load()), // Watermark strips are booked at stream creation; 400-fallback strips accrue during forwarding
-			ReqTrunc:        f.reqTrunc(),
-			HasFull:         f.hasFullContent(),
-			ReqDown:         f.hasReqDown(),
-			RespDown:        f.hasContentDown(),
-			ReqDownTrunc:    f.reqDownTrunc(),
-			HasFullDown:     f.hasFullContentDown(),
-			StageMs:         f.stageMs(),
-			Think:           f.think,
-			Last:            f.lastFlight,
+			Phase:           int(f.Phase.Load()),
+			Bytes:           f.Bytes.Load(),
+			Status:          f.Status,
+			Stage:           f.Stage.Load(),
+			Attempt:         f.Attempt.Load(),
+			AttemptMs:       f.AttemptMs(),
+			RouteReason:     f.RouteReason.Load(),
+			Translated:      f.Translated,
+			CountTokens:     f.CountTokens,
+			SearchPrompt:    f.SearchPrompt,
+			SearchMarker:    f.SearchMarker,
+			SearchLevel:     f.SearchLevel,
+			SearchThinkFrom: f.SearchThinkFrom,
+			SearchThinkTo:   f.SearchThinkTo,
+			Tools:           f.ToolCallsTag(),             // Tool calls accumulate live; the in-flight model column fills in progressively with the 500ms polls
+			Stripped:        int(f.SearchStripped.Load()), // Watermark strips are booked at stream creation; 400-fallback strips accrue during forwarding
+			ReqTrunc:        f.ReqTrunc(),
+			HasFull:         f.HasFullContent(),
+			ReqDown:         f.HasReqDown(),
+			RespDown:        f.HasContentDown(),
+			ReqDownTrunc:    f.ReqDownTrunc(),
+			HasFullDown:     f.HasFullContentDown(),
+			StageMs:         f.StageMs(),
+			Think:           f.Think,
+			Last:            f.LastFlight,
 		})
 	}
 	if d.Flights == nil {
@@ -660,7 +660,7 @@ func clearLogsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	logBuf.clear()
+	recorder.LogBuf.Clear()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
@@ -696,27 +696,27 @@ func flightHandler(w http.ResponseWriter, r *http.Request) {
 	side := r.URL.Query().Get("side") // up=proxy↔upstream (default) / down=downstream↔proxy
 	if r.URL.Query().Get("full") == "1" {
 		// Download the raw output: full content is recorded only with the 储存完整结构体 toggle on.
-		if !fullStore.Load() {
+		if !recorder.FullStore.Load() {
 			http.Error(w, "store-full-payloads is off", http.StatusForbidden)
 			return
 		}
-		flights.mu.RLock()
-		f0, ok0 := flights.m[id]
-		flights.mu.RUnlock()
+		recorder.Flights.Mu.RLock()
+		f0, ok0 := recorder.Flights.M[id]
+		recorder.Flights.Mu.RUnlock()
 		var up, down []byte
 		if ok0 {
-			up = f0.snapshotFullContent()
-			down = f0.snapshotFullContentDown()
+			up = f0.SnapshotFullContent()
+			down = f0.SnapshotFullContentDown()
 		} else {
-			finishedMu.Lock()
-			for _, ff := range finished {
-				if ff.id == id {
-					up = ff.fullContent
-					down = ff.fullContentDown
+			recorder.FinishedMu.Lock()
+			for _, ff := range recorder.Finished {
+				if ff.ID == id {
+					up = ff.FullContent
+					down = ff.FullContentDown
 					break
 				}
 			}
-			finishedMu.Unlock()
+			recorder.FinishedMu.Unlock()
 		}
 		full, served := pickFlightSide(side, up, down)
 		if len(full) == 0 {
@@ -729,24 +729,24 @@ func flightHandler(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(full)
 		return
 	}
-	flights.mu.RLock()
-	f, ok := flights.m[id]
-	flights.mu.RUnlock()
+	recorder.Flights.Mu.RLock()
+	f, ok := recorder.Flights.M[id]
+	recorder.Flights.Mu.RUnlock()
 	var up, down []byte
 	if ok {
-		up = f.snapshotContent()
-		down = f.snapshotContentDown()
+		up = f.SnapshotContent()
+		down = f.SnapshotContentDown()
 	} else {
 		// Not in-flight: check the finished-streams archive (content is a static snapshot).
-		finishedMu.Lock()
-		for _, ff := range finished {
-			if ff.id == id {
-				up = ff.content
-				down = ff.contentDown
+		recorder.FinishedMu.Lock()
+		for _, ff := range recorder.Finished {
+			if ff.ID == id {
+				up = ff.Content
+				down = ff.ContentDown
 				break
 			}
 		}
-		finishedMu.Unlock()
+		recorder.FinishedMu.Unlock()
 		if up == nil && down == nil {
 			http.Error(w, "stream already finished or does not exist", http.StatusNotFound)
 			return
@@ -771,24 +771,24 @@ func flightReqHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	flights.mu.RLock()
-	f, ok := flights.m[id]
-	flights.mu.RUnlock()
+	recorder.Flights.Mu.RLock()
+	f, ok := recorder.Flights.M[id]
+	recorder.Flights.Mu.RUnlock()
 	var up, down []byte
 	if ok {
-		up = f.snapshotReqBody()
-		down = f.snapshotReqDown()
+		up = f.SnapshotReqBody()
+		down = f.SnapshotReqDown()
 	} else {
 		// Not in-flight: check the finished-streams archive (reqBody is a static snapshot).
-		finishedMu.Lock()
-		for _, ff := range finished {
-			if ff.id == id {
-				up = ff.reqBody
-				down = ff.reqDown
+		recorder.FinishedMu.Lock()
+		for _, ff := range recorder.Finished {
+			if ff.ID == id {
+				up = ff.ReqBody
+				down = ff.ReqDown
 				break
 			}
 		}
-		finishedMu.Unlock()
+		recorder.FinishedMu.Unlock()
 	}
 	// side=up (default, the body actually sent proxy→upstream) / side=down (downstream→proxy original, stored only for rewritten/translated streams), missing side falls back.
 	body, served := pickFlightSide(r.URL.Query().Get("side"), up, down)
@@ -800,24 +800,6 @@ func flightReqHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Proxy429-Side", served)
 	_, _ = w.Write(body)
-}
-
-// fmtCacheAge formats a cache age (time since the cache was created) as m:ss (h:mm:ss when ≥1h).
-func fmtCacheAge(d time.Duration) string {
-	s := int(d.Seconds())
-	if h := s / 3600; h > 0 {
-		return fmt.Sprintf("%d:%02d:%02d", h, s%3600/60, s%60)
-	}
-	return fmt.Sprintf("%d:%02d", s/60, s%60)
-}
-
-// fmtObsDur formats an observed interval as mm:ss ("00:30" / "23:30", minutes zero-padded to two digits; ≥1h uses the same h:mm:ss form as cache age, e.g. "4:44:13").
-func fmtObsDur(d time.Duration) string {
-	s := int(d.Seconds())
-	if s >= 3600 {
-		return fmtCacheAge(d)
-	}
-	return fmt.Sprintf("%02d:%02d", s/60, s%60)
 }
 
 // recentFlightsHandler returns the recently finished streams list (summary, no content), newest first. Localhost only.
@@ -835,76 +817,76 @@ func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 	// Exception: an in-flight stream that started BEFORE the newest finished row (concurrent same-key streams) does not freeze the row —
 	// the finished row is already the newer refresh, so plain counting age shows (freezing would print a negative bracket like [-9:00]).
 	streaming := make(map[string]time.Time)
-	for _, f := range flights.snapshot() {
-		if f.stage.Load() == 3 {
-			if k := convKeyOf(f); k != "" {
-				if ts, ok := streaming[k]; !ok || f.start.Before(ts) {
-					streaming[k] = f.start
+	for _, f := range recorder.Flights.Snapshot() {
+		if f.Stage.Load() == 3 {
+			if k := recorder.ConvKeyOf(f); k != "" {
+				if ts, ok := streaming[k]; !ok || f.Start.Before(ts) {
+					streaming[k] = f.Start
 				}
 			}
 		}
 	}
-	finishedMu.Lock()
+	recorder.FinishedMu.Lock()
 	now := time.Now()
 	// Index of each key's newest row (finished is ascending; later entries overwrite earlier ones). After eviction an old row may get "promoted" to visible-newest,
 	// showing its own age — lifetimes are dynamic, and a large age only means the session hasn't written cache in a long time.
 	latest := make(map[string]int)
-	for i := range finished {
-		if finished[i].convKey != "" {
-			latest[finished[i].convKey] = i
+	for i := range recorder.Finished {
+		if recorder.Finished[i].ConvKey != "" {
+			latest[recorder.Finished[i].ConvKey] = i
 		}
 	}
-	out := make([]map[string]any, 0, len(finished))
-	for i := len(finished) - 1; i >= 0; i-- {
-		ff := finished[i]
+	out := make([]map[string]any, 0, len(recorder.Finished))
+	for i := len(recorder.Finished) - 1; i >= 0; i-- {
+		ff := recorder.Finished[i]
 		cacheAge := "-"
-		if ff.convKey != "" && latest[ff.convKey] == i {
-			if ts, ok := streaming[ff.convKey]; ok && ts.After(ff.start) {
-				cacheAge = "[" + fmtCacheAge(ts.Sub(ff.start)) + "]"
+		if ff.ConvKey != "" && latest[ff.ConvKey] == i {
+			if ts, ok := streaming[ff.ConvKey]; ok && ts.After(ff.Start) {
+				cacheAge = "[" + recorder.FmtCacheAge(ts.Sub(ff.Start)) + "]"
 			} else {
-				cacheAge = fmtCacheAge(now.Sub(ff.start))
+				cacheAge = recorder.FmtCacheAge(now.Sub(ff.Start))
 			}
 		}
 		out = append(out, map[string]any{
-			"id":              ff.id,
-			"model":           ff.model,
-			"routeReason":     ff.routeReason,
-			"translated":      ff.translated,
-			"countTokens":     ff.countTokens,
-			"think":           ff.think,
-			"last":            ff.lastFlight,
-			"status":          ff.status,
-			"gaveUp":          ff.gaveUp,
-			"noStop":          ff.noStop,
-			"searchGuard":     ff.searchGuard,
-			"attempts":        ff.attempts,
-			"bytes":           ff.bytes,
-			"total":           fmtMs(ff.totalMs),
-			"stage":           ff.stage,
-			"ended":           ff.ended.Format("15:04:05"),
-			"hitRate":         cacheHitRate(ff.cacheRead, ff.inTokens, ff.cacheCreation),
+			"id":              ff.ID,
+			"model":           ff.Model,
+			"routeReason":     ff.RouteReason,
+			"translated":      ff.Translated,
+			"countTokens":     ff.CountTokens,
+			"think":           ff.Think,
+			"last":            ff.LastFlight,
+			"status":          ff.Status,
+			"gaveUp":          ff.GaveUp,
+			"noStop":          ff.NoStop,
+			"searchGuard":     ff.SearchGuard,
+			"attempts":        ff.Attempts,
+			"bytes":           ff.Bytes,
+			"total":           recorder.FmtMs(ff.TotalMs),
+			"stage":           ff.Stage,
+			"ended":           ff.Ended.Format("15:04:05"),
+			"hitRate":         recorder.CacheHitRate(ff.CacheRead, ff.InTokens, ff.CacheCreation),
 			"cacheAge":        cacheAge,
-			"cacheRead":       ff.cacheRead,
-			"cacheCreation":   ff.cacheCreation,
-			"inTokens":        ff.inTokens,
-			"firstByte":       fmtFirstByte(ff.firstByteMs),
-			"tps":             fmtTps(ff.tps),
-			"searchPrompt":    ff.searchPrompt,
-			"searchMarker":    ff.searchMarker,
-			"searchLevel":     ff.searchLevel,
-			"searchThinkFrom": ff.searchThinkFrom,
-			"searchThinkTo":   ff.searchThinkTo,
-			"tools":           ff.tools,
-			"stripped":        ff.searchStripped,
-			"reqTrunc":        ff.reqTruncated,
-			"hasFull":         ff.fullContent != nil,
-			"reqDown":         ff.reqDown != nil,
-			"respDown":        ff.contentDown != nil,
-			"reqDownTrunc":    ff.reqDownTruncated,
-			"hasFullDown":     ff.fullContentDown != nil,
+			"cacheRead":       ff.CacheRead,
+			"cacheCreation":   ff.CacheCreation,
+			"inTokens":        ff.InTokens,
+			"firstByte":       recorder.FmtFirstByte(ff.FirstByteMs),
+			"tps":             recorder.FmtTps(ff.TPS),
+			"searchPrompt":    ff.SearchPrompt,
+			"searchMarker":    ff.SearchMarker,
+			"searchLevel":     ff.SearchLevel,
+			"searchThinkFrom": ff.SearchThinkFrom,
+			"searchThinkTo":   ff.SearchThinkTo,
+			"tools":           ff.Tools,
+			"stripped":        ff.SearchStripped,
+			"reqTrunc":        ff.ReqTruncated,
+			"hasFull":         ff.FullContent != nil,
+			"reqDown":         ff.ReqDown != nil,
+			"respDown":        ff.ContentDown != nil,
+			"reqDownTrunc":    ff.ReqDownTruncated,
+			"hasFullDown":     ff.FullContentDown != nil,
 		})
 	}
-	finishedMu.Unlock()
+	recorder.FinishedMu.Unlock()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{"list": out})
@@ -933,10 +915,10 @@ func finishedCapHandler(w http.ResponseWriter, r *http.Request) {
 	if b.N > 200 {
 		b.N = 200
 	}
-	finishedCap.Store(int32(b.N))
-	finishedMu.Lock()
-	trimFinishedLocked()
-	finishedMu.Unlock()
+	recorder.FinishedCap.Store(int32(b.N))
+	recorder.FinishedMu.Lock()
+	recorder.TrimFinishedLocked()
+	recorder.FinishedMu.Unlock()
 	log.Printf("[flight] keep-finished set to %d", b.N)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "n": b.N})
@@ -961,21 +943,21 @@ func fullStoreHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	fullStore.Store(b.Enabled)
+	recorder.FullStore.Store(b.Enabled)
 	if !b.Enabled {
 		// Switching off releases the full copies: in-flight streams are purged one by one, archives likewise.
-		for _, f := range flights.snapshot() {
-			f.purgeFull()
+		for _, f := range recorder.Flights.Snapshot() {
+			f.PurgeFull()
 		}
-		finishedMu.Lock()
-		for i := range finished {
-			finished[i].fullContent = nil
-			if len(finished[i].reqBody) > flightContentCap {
-				finished[i].reqBody = finished[i].reqBody[:flightContentCap]
-				finished[i].reqTruncated = true
+		recorder.FinishedMu.Lock()
+		for i := range recorder.Finished {
+			recorder.Finished[i].FullContent = nil
+			if len(recorder.Finished[i].ReqBody) > recorder.FlightContentCap {
+				recorder.Finished[i].ReqBody = recorder.Finished[i].ReqBody[:recorder.FlightContentCap]
+				recorder.Finished[i].ReqTruncated = true
 			}
 		}
-		finishedMu.Unlock()
+		recorder.FinishedMu.Unlock()
 	}
 	log.Printf("[fullstore] store-full-payloads set to %v", b.Enabled)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

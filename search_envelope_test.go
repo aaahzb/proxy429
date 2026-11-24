@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/recorder"
 	"proxy429/internal/translate"
 	"strings"
 	"testing"
@@ -86,11 +87,11 @@ func TestSearchEnvelopeFailSoftRetry(t *testing.T) {
 	}
 
 	// [剥N] counting: the finished archive should record 2 400-fallback strips (stu+result each count 1).
-	finishedMu.Lock()
-	ff := finished[len(finished)-1]
-	finishedMu.Unlock()
-	if ff.searchStripped != 2 {
-		t.Errorf("完成流剥块计数=%d, want 2（400 兜底剥 stu+result）", ff.searchStripped)
+	recorder.FinishedMu.Lock()
+	ff := recorder.Finished[len(recorder.Finished)-1]
+	recorder.FinishedMu.Unlock()
+	if ff.SearchStripped != 2 {
+		t.Errorf("完成流剥块计数=%d, want 2（400 兜底剥 stu+result）", ff.SearchStripped)
 	}
 }
 
@@ -143,9 +144,9 @@ func TestSearchEnvelopeCutoffLearning(t *testing.T) {
 		}
 	}
 	lastStripped := func() int {
-		finishedMu.Lock()
-		defer finishedMu.Unlock()
-		return finished[len(finished)-1].searchStripped
+		recorder.FinishedMu.Lock()
+		defer recorder.FinishedMu.Unlock()
+		return recorder.Finished[len(recorder.Finished)-1].SearchStripped
 	}
 
 	// First round: a new envelope restores upstream → upstream 400 → fallback strips 2 blocks, retry 200, watermark set to the envelope's sealing moment.

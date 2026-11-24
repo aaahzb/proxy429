@@ -3,6 +3,7 @@ package main
 import (
 	"proxy429/internal/config"
 	"proxy429/internal/platform"
+	"proxy429/internal/recorder"
 
 	"net/http/httptest"
 	"os"
@@ -19,16 +20,16 @@ func TestTrayState(t *testing.T) {
 	if s := trayState(); s != 0 {
 		t.Errorf("空闲 want 0, got %d", s)
 	}
-	stats.mu.Lock()
-	stats.waiting = 1
-	stats.mu.Unlock()
+	recorder.Stats.Mu.Lock()
+	recorder.Stats.Waiting = 1
+	recorder.Stats.Mu.Unlock()
 	if s := trayState(); s != 1 {
 		t.Errorf("waiting want 1, got %d", s)
 	}
 	// active beats waiting: with both set, green wins.
-	stats.mu.Lock()
-	stats.active = 1
-	stats.mu.Unlock()
+	recorder.Stats.Mu.Lock()
+	recorder.Stats.Active = 1
+	recorder.Stats.Mu.Unlock()
 	if s := trayState(); s != 2 {
 		t.Errorf("active+waiting want 2, got %d", s)
 	}

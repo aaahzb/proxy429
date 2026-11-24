@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"proxy429/internal/recorder"
 	"testing"
 	"time"
 )
@@ -63,7 +64,7 @@ func TestCollectStreamToJSONAllBlocks(t *testing.T) {
 		Body:       io.NopCloser(bytes.NewReader([]byte(sse))),
 	}
 	rec := httptest.NewRecorder()
-	f := &flight{id: 1, origModel: "claude-sonnet-5", targetModel: "deepseek-v4-flash", start: time.Now()}
+	f := &recorder.Flight{ID: 1, OrigModel: "claude-sonnet-5", TargetModel: "deepseek-v4-flash", Start: time.Now()}
 	ok, _ := collectStreamToJSON(rec, resp, head, br, f)
 	if !ok {
 		t.Fatalf("ok=false, want true")

@@ -1,4 +1,4 @@
-package main
+package recorder
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 // On seeing a message_delta with usage, set *sawDeltaUsage=true: the real usage breakdown arrives in that event
 // (ARK's start is all zeros; Kimi's start.input includes cache_read and start.cr=0);
 // if the stream breaks before it arrives, the caller should roll back this stream's accumulated deltas (see rollbackUsageStats). Pass nil to skip the flag.
-func parseSSEStats(line []byte, lastOutput, lastInput, lastCacheRead, lastCacheCreation *int64, sawDeltaUsage *bool) {
+func ParseSSEStats(line []byte, lastOutput, lastInput, lastCacheRead, lastCacheCreation *int64, sawDeltaUsage *bool) {
 	s := bytes.TrimRight(line, "\r\n")
 	if !bytes.HasPrefix(s, []byte("data:")) {
 		return
@@ -41,8 +41,8 @@ func parseSSEStats(line []byte, lastOutput, lastInput, lastCacheRead, lastCacheC
 	if usage == nil {
 		return
 	}
-	stats.mu.Lock()
-	defer stats.mu.Unlock()
+	Stats.Mu.Lock()
+	defer Stats.Mu.Unlock()
 	// Each usage field takes its last-seen value in this stream (later values overwrite earlier ones); the global total only gains the new-minus-last delta.
 	// So once a response completes, both the per-stream and global figures hold each field's final value.
 	// Upstream semantics differ: ARK's message_start is all zeros, the real values arrive in message_delta;
@@ -52,28 +52,28 @@ func parseSSEStats(line []byte, lastOutput, lastInput, lastCacheRead, lastCacheC
 	if v, ok := usage["input_tokens"]; ok {
 		in := jsonutil.ToInt64(v)
 		if in != *lastInput {
-			stats.inputTokens += in - *lastInput
+			Stats.InputTokens += in - *lastInput
 			*lastInput = in
 		}
 	}
 	if v, ok := usage["cache_read_input_tokens"]; ok {
 		cr := jsonutil.ToInt64(v)
 		if cr != *lastCacheRead {
-			stats.cacheRead += cr - *lastCacheRead
+			Stats.CacheRead += cr - *lastCacheRead
 			*lastCacheRead = cr
 		}
 	}
 	if v, ok := usage["cache_creation_input_tokens"]; ok {
 		cc := jsonutil.ToInt64(v)
 		if cc != *lastCacheCreation {
-			stats.cacheCreation += cc - *lastCacheCreation
+			Stats.CacheCreation += cc - *lastCacheCreation
 			*lastCacheCreation = cc
 		}
 	}
 	if v, ok := usage["output_tokens"]; ok {
 		out := jsonutil.ToInt64(v)
 		if out != *lastOutput {
-			stats.outputTokens += out - *lastOutput
+			Stats.OutputTokens += out - *lastOutput
 			*lastOutput = out
 		}
 	}
@@ -84,15 +84,15 @@ func parseSSEStats(line []byte, lastOutput, lastInput, lastCacheRead, lastCacheC
 // input is the arguments carried by the start event itself (tool_use always carries {}, real arguments arrive in later deltas; server_tool_use
 // may already be complete, and Kimi's empty search has no input).
 type toolCallStart struct {
-	index int
-	name  string
-	input json.RawMessage
+	Index int
+	Name  string
+	Input json.RawMessage
 }
 
 // parseToolCallStart parses a tool-call block-start event from an SSE data line: returns a result only for content_block_start
 // with block type tool_use/server_tool_use, otherwise ok=false. A substring pre-filter runs before JSON parsing,
 // avoiding a full deserialization of every line.
-func parseToolCallStart(line []byte) (ts toolCallStart, ok bool) {
+func ParseToolCallStart(line []byte) (ts toolCallStart, ok bool) {
 	s := bytes.TrimSpace(line)
 	if !bytes.HasPrefix(s, []byte("data:")) {
 		return ts, false
@@ -115,21 +115,21 @@ func parseToolCallStart(line []byte) (ts toolCallStart, ok bool) {
 	}
 	switch ev.ContentBlock.Type {
 	case "tool_use", "server_tool_use":
-		return toolCallStart{index: ev.Index, name: ev.ContentBlock.Name, input: ev.ContentBlock.Input}, true
+		return toolCallStart{Index: ev.Index, Name: ev.ContentBlock.Name, Input: ev.ContentBlock.Input}, true
 	}
 	return ts, false
 }
 
 // parseToolCallName extracts the tool-call name from an SSE data line (the name part of parseToolCallStart).
-func parseToolCallName(line []byte) string {
-	if ts, ok := parseToolCallStart(line); ok {
-		return ts.name
+func ParseToolCallName(line []byte) string {
+	if ts, ok := ParseToolCallStart(line); ok {
+		return ts.Name
 	}
 	return ""
 }
 
 // parseToolArgsDelta parses an input_json_delta from an SSE data line, returning the owning block's index and the argument fragment.
-func parseToolArgsDelta(line []byte) (index int, partial string, ok bool) {
+func ParseToolArgsDelta(line []byte) (index int, partial string, ok bool) {
 	s := bytes.TrimSpace(line)
 	if !bytes.HasPrefix(s, []byte("data:")) {
 		return 0, "", false
@@ -153,7 +153,7 @@ func parseToolArgsDelta(line []byte) (index int, partial string, ok bool) {
 }
 
 // parseToolBlockStop parses a content_block_stop from an SSE data line, returning the ending block's index.
-func parseToolBlockStop(line []byte) (index int, ok bool) {
+func ParseToolBlockStop(line []byte) (index int, ok bool) {
 	s := bytes.TrimSpace(line)
 	if !bytes.HasPrefix(s, []byte("data:")) {
 		return 0, false
@@ -174,7 +174,7 @@ func parseToolBlockStop(line []byte) (index int, ok bool) {
 
 // isEmptyArgsJSON reports whether a JSON text is equivalent to an "empty arguments object": empty string, {}, or null
 // (all whitespace ignored). Dedicated to the *0 tag decision.
-func isEmptyArgsJSON(s string) bool {
+func IsEmptyArgsJSON(s string) bool {
 	s = strings.Map(func(r rune) rune {
 		switch r {
 		case ' ', '\t', '\n', '\r':
@@ -188,14 +188,14 @@ func isEmptyArgsJSON(s string) bool {
 // openToolCall tracks one in-progress streaming tool call so the block end can judge whether the arguments object is empty
 // (the *0 tag). Argument fragments keep only the first 64 bytes: anything longer can't be an empty object, and large arguments
 // (an Edit's full diff) don't deserve a full copy.
-type openToolCall struct {
-	name    string
-	hasArgs bool   // The start event already carried a non-empty input (complete server_tool_use block)
+type OpenToolCall struct {
+	Name    string
+	HasArgs bool   // The start event already carried a non-empty input (complete server_tool_use block)
 	buf     []byte // input_json_delta fragments (≤64 bytes, judged via isEmptyArgsJSON at stop)
 }
 
 // notePartial accumulates argument fragments, capped at 64 bytes.
-func (t *openToolCall) notePartial(p string) {
+func (t *OpenToolCall) NotePartial(p string) {
 	if len(t.buf) >= 64 {
 		return
 	}
@@ -207,8 +207,8 @@ func (t *openToolCall) notePartial(p string) {
 }
 
 // argsEmpty reports whether the arguments object was empty at block end.
-func (t *openToolCall) argsEmpty() bool {
-	return !t.hasArgs && isEmptyArgsJSON(string(t.buf))
+func (t *OpenToolCall) ArgsEmpty() bool {
+	return !t.HasArgs && IsEmptyArgsJSON(string(t.buf))
 }
 
 // parseResponsesStreamStats is the Responses-protocol version of parseSSEStats (for url_response_api passthrough streams).
@@ -217,7 +217,7 @@ func (t *openToolCall) argsEmpty() bool {
 // fresh = input - cached (floor 0) + cr = cached, aligning with Anthropic semantics before joining the global aggregation.
 // On seeing the terminal usage, set *sawDeltaUsage=true (same semantics as Anthropic's message_delta usage:
 // the real usage has arrived; if the stream breaks first, the caller rolls back — the trackers are all 0 in that case, so the rollback is a no-op).
-func parseResponsesStreamStats(line []byte, lastOutput, lastInput, lastCacheRead, lastCacheCreation *int64, sawDeltaUsage *bool) {
+func ParseResponsesStreamStats(line []byte, lastOutput, lastInput, lastCacheRead, lastCacheCreation *int64, sawDeltaUsage *bool) {
 	s := bytes.TrimSpace(line)
 	if !bytes.HasPrefix(s, []byte("data:")) {
 		return
@@ -258,23 +258,23 @@ func parseResponsesStreamStats(line []byte, lastOutput, lastInput, lastCacheRead
 	if sawDeltaUsage != nil {
 		*sawDeltaUsage = true
 	}
-	stats.mu.Lock()
-	defer stats.mu.Unlock()
+	Stats.Mu.Lock()
+	defer Stats.Mu.Unlock()
 	// Same pattern as parseSSEStats: later values overwrite earlier ones, the global total only gains the delta (usage arrives only once, but keeping the same shape lets the trackers be reused).
 	if in != *lastInput {
-		stats.inputTokens += in - *lastInput
+		Stats.InputTokens += in - *lastInput
 		*lastInput = in
 	}
 	if cr != *lastCacheRead {
-		stats.cacheRead += cr - *lastCacheRead
+		Stats.CacheRead += cr - *lastCacheRead
 		*lastCacheRead = cr
 	}
 	if cc != *lastCacheCreation {
-		stats.cacheCreation += cc - *lastCacheCreation
+		Stats.CacheCreation += cc - *lastCacheCreation
 		*lastCacheCreation = cc
 	}
 	if out != *lastOutput {
-		stats.outputTokens += out - *lastOutput
+		Stats.OutputTokens += out - *lastOutput
 		*lastOutput = out
 	}
 }
@@ -283,7 +283,7 @@ func parseResponsesStreamStats(line []byte, lastOutput, lastInput, lastCacheRead
 // from response.output_item.added — function_call/custom_tool_call take item.name;
 // web_search_call (a server-side tool, no name) fixedly returns "web_search".
 // itemID aligns with output_item.done (the *0 empty-args decision). Pre-filter before parsing, avoiding per-line deserialization.
-func parseResponsesToolStart(line []byte) (itemID, name string, ok bool) {
+func ParseResponsesToolStart(line []byte) (itemID, name string, ok bool) {
 	s := bytes.TrimSpace(line)
 	if !bytes.HasPrefix(s, []byte("data:")) {
 		return "", "", false
@@ -313,8 +313,8 @@ func parseResponsesToolStart(line []byte) (itemID, name string, ok bool) {
 }
 
 // parseResponsesToolName extracts the tool-call name from an SSE data line (the name part of parseResponsesToolStart).
-func parseResponsesToolName(line []byte) string {
-	if _, name, ok := parseResponsesToolStart(line); ok {
+func ParseResponsesToolName(line []byte) string {
+	if _, name, ok := ParseResponsesToolStart(line); ok {
 		return name
 	}
 	return ""
@@ -323,7 +323,7 @@ func parseResponsesToolName(line []byte) string {
 // parseResponsesToolDone extracts (itemID, arguments-object-empty) from a response.output_item.done event:
 // function_call checks the final arguments, custom_tool_call checks input, web_search_call checks action
 // (no query and no sources = empty). done events carry complete arguments, so no cross-line accumulation is needed. Other item types return ok=false.
-func parseResponsesToolDone(line []byte) (itemID string, argsEmpty bool, ok bool) {
+func ParseResponsesToolDone(line []byte) (itemID string, argsEmpty bool, ok bool) {
 	s := bytes.TrimSpace(line)
 	if !bytes.HasPrefix(s, []byte("data:")) {
 		return "", false, false
@@ -347,10 +347,10 @@ func parseResponsesToolDone(line []byte) (itemID string, argsEmpty bool, ok bool
 	}
 	switch ev.Item.Type {
 	case "function_call":
-		return ev.Item.ID, isEmptyArgsJSON(ev.Item.Arguments), true
+		return ev.Item.ID, IsEmptyArgsJSON(ev.Item.Arguments), true
 	case "custom_tool_call":
 		// A custom tool's input is a bare value: empty = absent / null / empty string.
-		return ev.Item.ID, len(ev.Item.Input) == 0 || isEmptyArgsJSON(string(ev.Item.Input)) || string(ev.Item.Input) == `""`, true
+		return ev.Item.ID, len(ev.Item.Input) == 0 || IsEmptyArgsJSON(string(ev.Item.Input)) || string(ev.Item.Input) == `""`, true
 	case "web_search_call":
 		var action struct {
 			Query   string        `json:"query"`
@@ -367,13 +367,13 @@ func parseResponsesToolDone(line []byte) (itemID string, argsEmpty bool, ok bool
 // Used for interrupted streams (client disconnect / upstream dropout, before the message_delta with the real breakdown arrived):
 // all that has been counted is message_start's estimated usage — Kimi's start.input measurably includes cache_read
 // and start.cr=0, so keeping it would count the entire context as missed input, severely dragging down the aggregate hit rate.
-func rollbackUsageStats(in, cr, cc, out int64) {
-	stats.mu.Lock()
-	stats.inputTokens -= in
-	stats.cacheRead -= cr
-	stats.cacheCreation -= cc
-	stats.outputTokens -= out
-	stats.mu.Unlock()
+func RollbackUsageStats(in, cr, cc, out int64) {
+	Stats.Mu.Lock()
+	Stats.InputTokens -= in
+	Stats.CacheRead -= cr
+	Stats.CacheCreation -= cc
+	Stats.OutputTokens -= out
+	Stats.Mu.Unlock()
 }
 
 // parseNonStreamUsage extracts the usage field from a non-streaming JSON response body (classifier and similar requests return non-streaming JSON).
@@ -382,7 +382,7 @@ func rollbackUsageStats(in, cr, cc, out int64) {
 // and Responses non-streaming (when a passthrough-stream client sends stream:false, the upstream returns a whole response object:
 // usage.input_tokens includes the cache total and input_tokens_details.cached_tokens is the hit portion, split with the same semantics as streaming).
 // Returns ok=false when nothing can be extracted.
-func parseNonStreamUsage(content []byte) (input, cacheRead, cacheCreation, output int64, ok bool) {
+func ParseNonStreamUsage(content []byte) (input, cacheRead, cacheCreation, output int64, ok bool) {
 	var obj map[string]interface{}
 	if json.Unmarshal(content, &obj) != nil {
 		return 0, 0, 0, 0, false

@@ -1,4 +1,4 @@
-package main
+package recorder
 
 import (
 	"bytes"
@@ -172,23 +172,23 @@ func findLineageParent(convID string, id uint64, elems [][]byte, hashes []uint64
 			best, bestFull, bestTail, bestContained = fid, full, tail, contained
 		}
 	}
-	for _, f := range flights.snapshot() {
-		consider(f.convID, f.id, f.msgHashes, f.msgTail)
+	for _, f := range Flights.Snapshot() {
+		consider(f.ConvID, f.ID, f.MsgHashes, f.msgTail)
 	}
-	finishedMu.Lock()
-	for i := range finished {
-		consider(finished[i].convID, finished[i].id, finished[i].msgHashes, finished[i].msgTail)
+	FinishedMu.Lock()
+	for i := range Finished {
+		consider(Finished[i].ConvID, Finished[i].ID, Finished[i].MsgHashes, Finished[i].msgTail)
 	}
-	finishedMu.Unlock()
+	FinishedMu.Unlock()
 	return best
 }
 
 // computeLineage fills a flight's message-hash chain, tail copy, and parent link at request receipt (the handler
 // calls it right after convID is settled, on the body the lineage should reflect). Requests without a session
 // identifier or a message array stay parentless; the web then shows a bare #N.
-func computeLineage(f *flight, body []byte) {
+func ComputeLineage(f *Flight, body []byte) {
 	elems, hashes := hashLineage(body)
-	f.msgHashes = hashes
+	f.MsgHashes = hashes
 	if len(elems) > 0 {
 		tail := elems[len(elems)-1]
 		if len(tail) > lineageTailCap {
@@ -196,8 +196,8 @@ func computeLineage(f *flight, body []byte) {
 		}
 		f.msgTail = bytes.Clone(tail) // Clone: the flight outlives the parsed body; don't pin the whole element backing.
 	}
-	if f.convID == "" || len(hashes) == 0 {
+	if f.ConvID == "" || len(hashes) == 0 {
 		return
 	}
-	f.lastFlight = findLineageParent(f.convID, f.id, elems, hashes)
+	f.LastFlight = findLineageParent(f.ConvID, f.ID, elems, hashes)
 }

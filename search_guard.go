@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"proxy429/internal/recorder"
 )
 
 const (
@@ -113,7 +114,7 @@ func synthesizeSearchGuardSSE(id uint64, model string, usage searchGuardUsage) [
 // only the actual socket write is deferred. Flush is intentionally held so no discarded prefix can escape.
 type searchGuardWriter struct {
 	dst         http.ResponseWriter
-	flight      *flight
+	flight      *recorder.Flight
 	headersSent bool
 	status      int
 	wroteHeader bool
@@ -121,7 +122,7 @@ type searchGuardWriter struct {
 	downstream  bytes.Buffer
 }
 
-func newSearchGuardWriter(dst http.ResponseWriter, f *flight, headersSent bool) *searchGuardWriter {
+func newSearchGuardWriter(dst http.ResponseWriter, f *recorder.Flight, headersSent bool) *searchGuardWriter {
 	return &searchGuardWriter{dst: dst, flight: f, headersSent: headersSent, status: http.StatusOK, wroteHeader: headersSent}
 }
 
@@ -162,26 +163,26 @@ func (w *searchGuardWriter) finish(usage searchGuardUsage) {
 	}
 	payload := w.downstream.Bytes()
 	if replace {
-		payload = synthesizeSearchGuardSSE(w.flight.id, w.flight.origModel, usage)
-		w.flight.searchGuard = true
-		w.flight.bytes.Store(0)
+		payload = synthesizeSearchGuardSSE(w.flight.ID, w.flight.OrigModel, usage)
+		w.flight.SearchGuard = true
+		w.flight.Bytes.Store(0)
 		// Bytes buffered internally were never sent. Discard their downstream mirror before recording the real replacement.
-		w.flight.contentMu.Lock()
-		w.flight.contentDown = nil
-		w.flight.fullContentDown = nil
-		w.flight.fullPartialDown = false
-		w.flight.contentMu.Unlock()
-		log.Printf("[search-guard] #%d all web search results were empty; discarded %s of upstream response and synthesized the fixed no-results stream", w.flight.id, humanBytes(int64(w.downstream.Len())))
+		w.flight.ContentMu.Lock()
+		w.flight.ContentDown = nil
+		w.flight.FullContentDown = nil
+		w.flight.FullPartialDown = false
+		w.flight.ContentMu.Unlock()
+		log.Printf("[search-guard] #%d all web search results were empty; discarded %s of upstream response and synthesized the fixed no-results stream", w.flight.ID, recorder.HumanBytes(int64(w.downstream.Len())))
 	}
 	if len(payload) > 0 {
 		n, err := w.dst.Write(payload)
 		if replace {
 			if n > 0 {
-				w.flight.bytes.Add(int64(n))
-				w.flight.appendContentDown(payload[:n])
+				w.flight.Bytes.Add(int64(n))
+				w.flight.AppendContentDown(payload[:n])
 			}
 			if err == nil && n == len(payload) {
-				w.flight.delivered.Store(true)
+				w.flight.Delivered.Store(true)
 			}
 		}
 	}

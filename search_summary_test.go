@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/recorder"
 	"strings"
 	"sync"
 	"testing"
@@ -346,7 +347,7 @@ func runSearchE2E(t *testing.T, sf *config.SearchRoute, clientBody string) (clie
 		SearchFallback: sf,
 	})
 	defer config.Store(&config.Config{})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -517,7 +518,7 @@ func runSearchE2EFull(t *testing.T, rr config.RouteRule, sf *config.SearchRoute,
 	}
 	config.Store(runtimeCfg)
 	defer config.Store(&config.Config{})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()

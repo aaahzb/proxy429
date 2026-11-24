@@ -12,14 +12,9 @@ import (
 
 	"proxy429/internal/config"
 	"proxy429/internal/jsonutil"
+	"proxy429/internal/recorder"
 	"proxy429/internal/translate"
 )
-
-// defaultCacheTTL is the fixed protection window for finished-stream trimming: the newest row of each anchor key
-// cannot be evicted by finishedCap within 5 minutes of stream start. The upstream cache lifetime is empirically
-// dynamic (see cache observations), so there is no configurable "TTL" — the cache_time option is gone,
-// leaving this one fixed window, enough to cover typical conversation pacing.
-const defaultCacheTTL = 5 * time.Minute
 
 // classifierSystemPrefix is the fixed system-field prefix of Claude Code classifier (safety check) requests.
 // The proxy uses it to recognize classifier requests, route them to a cheap model, and disable thinking. Hardcoded: a client implementation detail that users shouldn't configure.
@@ -441,11 +436,11 @@ func maybeRewriteClassifier(body []byte) (newBody []byte, rewritten bool) {
 		return body, false
 	}
 	log.Printf("[rewrite] classifier%s signature hit; thinking disabled (body %d->%d bytes)", classifierTag(kind), len(body), len(newBody))
-	stats.classifierRewrites.Add(1) // Live status row count: classifier thinking rewrites (off, or the off phase of low)
+	recorder.Stats.ClassifierRewrites.Add(1) // Live status row count: classifier thinking rewrites (off, or the off phase of low)
 	if kind == config.ClassifierCodex {
-		stats.classifierRewritesCodex.Add(1)
+		recorder.Stats.ClassifierRewritesCodex.Add(1)
 	} else {
-		stats.classifierRewritesCC.Add(1)
+		recorder.Stats.ClassifierRewritesCC.Add(1)
 	}
 	return newBody, true
 }

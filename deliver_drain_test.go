@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/recorder"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,9 +23,9 @@ const drainSSEPartial = "data: {\"type\":\"message_start\",\"message\":{\"usage\
 	"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"
 
 func finishedCount() int {
-	finishedMu.Lock()
-	defer finishedMu.Unlock()
-	return len(finished)
+	recorder.FinishedMu.Lock()
+	defer recorder.FinishedMu.Unlock()
+	return len(recorder.Finished)
 }
 
 // lastFinishedStatus waits for a new finished stream beyond baseN and returns its archived status.
@@ -32,13 +33,13 @@ func lastFinishedStatus(t *testing.T, baseN int) int {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		finishedMu.Lock()
-		n := len(finished)
+		recorder.FinishedMu.Lock()
+		n := len(recorder.Finished)
 		st := 0
 		if n > baseN {
-			st = finished[n-1].status
+			st = recorder.Finished[n-1].Status
 		}
-		finishedMu.Unlock()
+		recorder.FinishedMu.Unlock()
 		if n > baseN {
 			return st
 		}
@@ -51,7 +52,7 @@ func lastFinishedStatus(t *testing.T, baseN int) int {
 func drainTestProxy(t *testing.T, upstream *httptest.Server) *httptest.Server {
 	t.Helper()
 	config.Store(&config.Config{Upstream: upstream.URL, MaxRetries: 0, TotalBudgetSec: 10, RecentSampleWindow: 5})
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	t.Cleanup(proxy.Close)
 	return proxy

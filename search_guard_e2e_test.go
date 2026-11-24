@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/recorder"
 	"proxy429/internal/translate"
 	"strings"
 	"sync"
@@ -39,21 +40,21 @@ type searchGuardE2EResult struct {
 	status       int
 	upstreamBody string
 	recent       string
-	flight       finishedFlight
+	flight       recorder.FinishedFlight
 }
 
 // runSearchGuardE2E serves a caller-supplied upstream response through the real native handler and archives one flight.
 func runSearchGuardE2E(t *testing.T, rr config.RouteRule, sf *config.SearchRoute, routeServes bool, clientBody string, status int, contentType, responseBody string, lazy ...*config.LazyApplyConfig) searchGuardE2EResult {
 	t.Helper()
 	resetStats()
-	finishedMu.Lock()
-	oldFinished := finished
-	finished = nil
-	finishedMu.Unlock()
+	recorder.FinishedMu.Lock()
+	oldFinished := recorder.Finished
+	recorder.Finished = nil
+	recorder.FinishedMu.Unlock()
 	defer func() {
-		finishedMu.Lock()
-		finished = oldFinished
-		finishedMu.Unlock()
+		recorder.FinishedMu.Lock()
+		recorder.Finished = oldFinished
+		recorder.FinishedMu.Unlock()
 	}()
 	oldCfg := config.Current()
 	defer config.Store(oldCfg)
@@ -100,7 +101,7 @@ func runSearchGuardE2E(t *testing.T, rr config.RouteRule, sf *config.SearchRoute
 		runtimeCfg.LazyApply = lazy[0]
 	}
 	config.Store(runtimeCfg)
-	stats.resetSampleCap(5)
+	recorder.Stats.ResetSampleCap(5)
 
 	proxy := httptest.NewServer(http.HandlerFunc(handler))
 	defer proxy.Close()
@@ -124,16 +125,16 @@ func runSearchGuardE2E(t *testing.T, rr config.RouteRule, sf *config.SearchRoute
 		req.RemoteAddr = "127.0.0.1:1"
 		recentFlightsHandler(rec, req)
 		result.recent = rec.Body.String()
-		finishedMu.Lock()
-		if len(finished) == 1 {
-			result.flight = finished[0]
-			finishedMu.Unlock()
+		recorder.FinishedMu.Lock()
+		if len(recorder.Finished) == 1 {
+			result.flight = recorder.Finished[0]
+			recorder.FinishedMu.Unlock()
 			break
 		}
-		finishedMu.Unlock()
+		recorder.FinishedMu.Unlock()
 		time.Sleep(20 * time.Millisecond)
 	}
-	if result.flight.id == 0 {
+	if result.flight.ID == 0 {
 		t.Fatalf("flight was not archived; recent response: %s", result.recent)
 	}
 	return result
@@ -162,21 +163,21 @@ func TestSearchGuardReplacesEmptyResponse(t *testing.T) {
 	if !strings.Contains(got.upstreamBody, searchGuardInstruction) {
 		t.Errorf("armed request did not carry the guard instruction: %s", got.upstreamBody)
 	}
-	if !strings.Contains(string(got.flight.content), searchGuardFabricatedAnswer) {
+	if !strings.Contains(string(got.flight.Content), searchGuardFabricatedAnswer) {
 		t.Error("upstream-side flight recording must preserve the discarded hard answer")
 	}
-	if string(got.flight.contentDown) != got.client {
-		t.Errorf("downstream recording must equal the actual synthetic bytes\nrecorded: %s\nactual:   %s", got.flight.contentDown, got.client)
+	if string(got.flight.ContentDown) != got.client {
+		t.Errorf("downstream recording must equal the actual synthetic bytes\nrecorded: %s\nactual:   %s", got.flight.ContentDown, got.client)
 	}
-	if got.flight.bytes != int64(len(got.client)) {
-		t.Errorf("flight bytes = %d, want actual downstream size %d", got.flight.bytes, len(got.client))
+	if got.flight.Bytes != int64(len(got.client)) {
+		t.Errorf("flight bytes = %d, want actual downstream size %d", got.flight.Bytes, len(got.client))
 	}
-	if got.flight.inTokens != 100 || got.flight.cacheRead != 20 || got.flight.cacheCreation != 5 || got.flight.outTokens != 321 {
-		t.Errorf("flight usage = in %d cr %d cc %d out %d, want 100/20/5/321", got.flight.inTokens, got.flight.cacheRead, got.flight.cacheCreation, got.flight.outTokens)
+	if got.flight.InTokens != 100 || got.flight.CacheRead != 20 || got.flight.CacheCreation != 5 || got.flight.OutTokens != 321 {
+		t.Errorf("flight usage = in %d cr %d cc %d out %d, want 100/20/5/321", got.flight.InTokens, got.flight.CacheRead, got.flight.CacheCreation, got.flight.OutTokens)
 	}
-	stats.mu.Lock()
-	in, cr, cc, out := stats.inputTokens, stats.cacheRead, stats.cacheCreation, stats.outputTokens
-	stats.mu.Unlock()
+	recorder.Stats.Mu.Lock()
+	in, cr, cc, out := recorder.Stats.InputTokens, recorder.Stats.CacheRead, recorder.Stats.CacheCreation, recorder.Stats.OutputTokens
+	recorder.Stats.Mu.Unlock()
 	if in != 100 || cr != 20 || cc != 5 || out != 321 {
 		t.Errorf("global usage = in %d cr %d cc %d out %d, want exactly once 100/20/5/321", in, cr, cc, out)
 	}
@@ -289,7 +290,7 @@ func TestForwardSearchGuardSkipsNon200AndResponsesOrigin(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetStats()
-			f := &flight{id: 1, start: time.Now(), origModel: "claude-opus-4-8", searchGuardArmed: true, translated: tc.translated}
+			f := &recorder.Flight{ID: 1, Start: time.Now(), OrigModel: "claude-opus-4-8", SearchGuardArmed: true, Translated: tc.translated}
 			resp := &http.Response{StatusCode: tc.status, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(upstream))}
 			rec := httptest.NewRecorder()
 			forward(rec, resp, nil, bufio.NewReader(resp.Body), f, false)
@@ -302,7 +303,7 @@ func TestForwardSearchGuardSkipsNon200AndResponsesOrigin(t *testing.T) {
 
 func TestForwardSearchGuardAfterKeepalive(t *testing.T) {
 	resetStats()
-	f := &flight{id: 9, start: time.Now(), origModel: "claude-opus-4-8", searchGuardArmed: true}
+	f := &recorder.Flight{ID: 9, Start: time.Now(), OrigModel: "claude-opus-4-8", SearchGuardArmed: true}
 	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(searchGuardUpstreamSSE(`[]`, searchGuardFabricatedAnswer)))}
 	rec := httptest.NewRecorder()
 	rec.Header().Set("Content-Type", "text/event-stream")
