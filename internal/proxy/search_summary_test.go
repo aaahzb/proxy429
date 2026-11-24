@@ -18,8 +18,10 @@ import (
 
 // ---- Marker detection ----
 
-// TestHasSearchSubagentMarker locks the standalone-search marker detection: the Claude Code search sub-agent
-// request carries "Perform a web search for the query" in a user message (string or block-array content form).
+// TestHasSearchSubagentMarker locks the standalone-search marker detection: the marker only counts when it
+// opens the request's final user message (string or block-array content form). A conversation that quotes the
+// marker anywhere else (pasted source, an earlier turn, a tool result, the system prompt) never matches —
+// the production false positive this rule exists for flagged every later request of such a conversation.
 func TestHasSearchSubagentMarker(t *testing.T) {
 	cases := []struct {
 		name string
@@ -28,8 +30,13 @@ func TestHasSearchSubagentMarker(t *testing.T) {
 	}{
 		{"string content form", `{"messages":[{"role":"user","content":"Perform a web search for the query: 广州天气"}]}`, true},
 		{"block content form", `{"messages":[{"role":"user","content":[{"type":"text","text":"Perform a web search for the query: X"}]}]}`, true},
+		{"leading blank block then marker block", `{"messages":[{"role":"user","content":[{"type":"text","text":""},{"type":"text","text":"Perform a web search for the query: X"}]}]}`, true},
 		{"plain search talk without marker", `{"messages":[{"role":"user","content":"搜一下"}]}`, false},
 		{"web_search tool but no marker", `{"tools":[{"type":"web_search_20250305"}],"messages":[{"role":"user","content":"搜一下"}]}`, false},
+		{"marker quoted in pasted source", `{"messages":[{"role":"user","content":"package proxy\n\nconst searchSubagentMarker = \"Perform a web search for the query\""}]}`, false},
+		{"marker in an earlier turn", `{"messages":[{"role":"user","content":"Perform a web search for the query: X"},{"role":"assistant","content":"done"},{"role":"user","content":"继续"}]}`, false},
+		{"marker inside tool_result", `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"Perform a web search for the query: X"}]}]}]}`, false},
+		{"marker in system only", `{"system":[{"type":"text","text":"Perform a web search for the query: X"}],"messages":[{"role":"user","content":"你好"}]}`, false},
 	}
 	for _, tc := range cases {
 		if got := hasSearchSubagentMarker([]byte(tc.body)); got != tc.want {
@@ -51,6 +58,8 @@ func TestSearchMarkerQuery(t *testing.T) {
 		{"escaped chars decoded", `{"messages":[{"role":"user","content":"Perform a web search for the query: 北京\"晴\"转多云"}]}`, `北京"晴"转多云`},
 		{"empty after marker", `{"messages":[{"role":"user","content":"Perform a web search for the query"}]}`, ""},
 		{"no marker", `{"messages":[{"role":"user","content":"搜一下"}]}`, ""},
+		{"history quote ignored, final message wins", `{"messages":[{"role":"user","content":"看看 \"Perform a web search for the query: 旧查询\" 这行源码"},{"role":"assistant","content":"ok"},{"role":"user","content":"Perform a web search for the query: 新查询"}]}`, "新查询"},
+		{"only a history quote", `{"messages":[{"role":"user","content":"源码里写着 \"Perform a web search for the query: 旧查询\""}]}`, ""},
 	}
 	for _, tc := range cases {
 		if got := searchMarkerQuery([]byte(tc.body)); got != tc.want {
@@ -117,6 +126,28 @@ func TestInjectAfterMarkerNoMarker(t *testing.T) {
 	}
 	if !bytes.Equal(out, []byte(in)) {
 		t.Errorf("无标记时 body 不应变化: %s", out)
+	}
+}
+
+// TestInjectAfterMarkerSkipsHistoryQuote locks the anchoring: with a quoted marker in an earlier turn and a
+// genuine marker opening the final user message, the instruction lands in the final user message and the
+// history quote stays byte-identical.
+func TestInjectAfterMarkerSkipsHistoryQuote(t *testing.T) {
+	in := `{"messages":[{"role":"user","content":"看这行：\"Perform a web search for the query: 旧查询\""},{"role":"assistant","content":"ok"},{"role":"user","content":"Perform a web search for the query: 新查询"}]}`
+	out, ok := injectAfterMarker([]byte(in), "INSTR")
+	if !ok {
+		t.Fatal("injectAfterMarker 应成功")
+	}
+	s := string(out)
+	if !strings.Contains(s, `"Perform a web search for the query: 新查询\n\nINSTR"`) {
+		t.Errorf("指令应注入最后一条 user 消息: %s", s)
+	}
+	if !strings.Contains(s, `看这行：\"Perform a web search for the query: 旧查询\"`) {
+		t.Errorf("历史里的引用被改动: %s", s)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("注入后不是合法 JSON: %v", err)
 	}
 }
 
@@ -453,6 +484,33 @@ func TestSearchFallbackNoMarkerNoInjection(t *testing.T) {
 	}
 	if strings.Contains(string(bodies[0]), "After performing the web search") {
 		t.Errorf("无标记请求不应注入摘要指令: %s", bodies[0])
+	}
+}
+
+// TestSearchFallbackHistoryQuoteNoMarker locks the production false positive fixed in v2026.11.24.5: a
+// conversation that quotes the marker (a pasted source file) keeps its web_search tool and still reroutes to
+// search_fallback, but the quote must not count as a standalone search — no instruction is injected, the
+// upstream body keeps every byte except the model rewrite, and the status row carries no search badge.
+func TestSearchFallbackHistoryQuoteNoMarker(t *testing.T) {
+	const body = `{"model":"claude-opus-4-8","stream":true,"max_tokens":32000,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"package proxy\n\nconst searchSubagentMarker = \"Perform a web search for the query\""},{"role":"assistant","content":"ok"},{"role":"user","content":"继续改这个检测"}]}`
+	_, bodies, routeCalled, recent := runSearchE2EFull(t,
+		config.RouteRule{Pattern: "claude-opus*", API: "sk-route-xxx", Model: "ark-opus", NoSearch: true},
+		&config.SearchRoute{API: "sk-sf", Model: "kimi-for-coding", SummaryMode: true, SummaryLevel: "mid"},
+		false, body)
+	if routeCalled {
+		t.Error("带搜索工具的请求仍应分流到 search_fallback，而不是原路由")
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("上游应只收到 1 个 POST，实收 %d", len(bodies))
+	}
+	want := strings.Replace(body, `"model":"claude-opus-4-8"`, `"model":"kimi-for-coding"`, 1)
+	if !bytes.Equal(bodies[0], []byte(want)) {
+		t.Errorf("历史引用不应触发注入，请求体应仅替换 model:\n got: %s\nwant: %s", bodies[0], want)
+	}
+	for _, sub := range []string{`"searchMarker":false`, `"searchPrompt":""`} {
+		if !strings.Contains(recent, sub) {
+			t.Errorf("recentflights 不应带搜索徽标（缺 %q）: %s", sub, recent)
+		}
 	}
 }
 

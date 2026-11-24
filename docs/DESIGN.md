@@ -384,7 +384,7 @@ What applies to a standalone search sub-agent request rerouted to `search_fallba
 - **Summary injection**: governed by `claudeSearchSummary` (`forceLow`/`forceMid`/`forceHigh` = inject at that level; `noForce` = never inject, even with `summary_mode: true`), falling back to the legacy `summary_mode` + `summary_level` when unset (`summary_mode: true` injects at `summary_level`, default `low`; `max` is reachable only via the legacy field).
 - **Thinking rewrite**: governed by `claudeSearchThinking` (`off` = force disabled; `low`/`mid`/`high`/`max` = always `adaptive`+`output_config.effort` at that level, whatever shape the request carried), falling back to legacy `summary_thinking: true` (= low) when unset. Turning thinking on drops `temperature`/`top_p`; a client that never asked for thinking gets the returning thinking blocks stripped (the convertOff2Low machinery).
 - **Per-route override**: every `routes` entry may carry its own `claudeSearchSummary`/`claudeSearchThinking`. A search-capable route applies its own values (set fields beat its legacy `enhance_search` fields; a route can use the new fields without `enhance_search` at all). When the request falls back to `search_fallback`, the hit route's set fields override `search_fallback`'s per field; unset fields fall back to `search_fallback`'s own settings.
-- Requests carrying a search tool but **without** the marker are rerouted as usual but never injected or rewritten.
+- Requests carrying a search tool whose final user message does **not** open with the marker are rerouted as usual but never injected or rewritten.
 
 Hits log `[route] #N search-fallback ...` and `[searchsum] #N standalone search sub-agent request: ...`; the injected instruction is visible on the status page (hover the model cell); the row also carries a teal [Search] badge in the model column (upgraded to [SearchSummary-<level>] when a summary instruction was injected) and, when thinking was rewritten, a teal [from->to] badge in the API column (an empty from renders as auto).
 
@@ -409,7 +409,7 @@ The option is a boolean on `routes[]` and `search_fallback`, unset/`false` = off
 - The default upstream, classifier route, fast route, and requests with no route match do not implicitly inherit `search_fallback`.
 - Pattern-array desugaring copies the field to every expanded route just like the other route fields.
 
-Only a native Anthropic-port request containing the standalone-search marker `Perform a web search for the query:` is armed. The proxy appends this instruction after the marker, in addition to any configured summary instruction:
+Only a native Anthropic-port request whose final user message opens with the standalone-search marker `Perform a web search for the query:` is armed. The proxy appends this instruction after the marker, in addition to any configured summary instruction:
 
 > If the web search returns no results, state only that no results were found for this query. Do not answer from your own knowledge, and do not suggest alternative keywords.
 

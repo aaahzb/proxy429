@@ -685,10 +685,13 @@ func summaryLevelConfig(level, query string) string {
 // the request's only job is "Perform a web search for the query: ...", with a server-side web_search tool attached.
 const searchSubagentMarker = "Perform a web search for the query"
 
-// hasSearchSubagentMarker reports whether the request is a standalone search sub-agent request.
-// body: the request body. Returns whether the marker is present.
+// hasSearchSubagentMarker reports whether the request is a standalone search sub-agent request: its final
+// user message opens with the marker. The marker is plain prose, so a raw body scan would also hit every
+// later request of a conversation that quotes it once (a source dump, a transcript, a pasted request body).
+// body: the request body. Returns whether the final user message opens with the marker.
 func hasSearchSubagentMarker(body []byte) bool {
-	return bytes.Contains(body, []byte(searchSubagentMarker))
+	_, _, ok := searchMarkerSpan(body)
+	return ok
 }
 
 // compactionMarkers are the openings of the known client context-compaction prompts: Claude Code's current
@@ -719,33 +722,38 @@ type chatMessage struct {
 	Content json.RawMessage `json:"content"`
 }
 
-// lastUserMessageText returns the text of the last user-role message: the Anthropic messages array first,
-// then the Responses input (a plain string input is a user turn by itself). Non-text blocks contribute nothing.
+// lastUserMessageText returns the text of the last user-role message, flattened by messageText.
 func lastUserMessageText(body []byte) string {
+	return messageText(finalUserMessageContent(body))
+}
+
+// finalUserMessageContent returns the raw content value of the last user-role message: the Anthropic messages
+// array first, then the Responses input (a plain string input is a user turn by itself). Non-text blocks
+// contribute nothing to the flattened text. Nil when no user message exists or the body is not JSON.
+func finalUserMessageContent(body []byte) json.RawMessage {
 	var req struct {
 		Messages []chatMessage   `json:"messages"`
 		Input    json.RawMessage `json:"input"`
 	}
 	if json.Unmarshal(body, &req) != nil {
-		return ""
+		return nil
 	}
 	items := req.Messages
 	if len(items) == 0 && len(req.Input) > 0 {
 		var s string
 		if json.Unmarshal(req.Input, &s) == nil {
-			return s
+			return req.Input
 		}
 		if json.Unmarshal(req.Input, &items) != nil {
-			return ""
+			return nil
 		}
 	}
 	for i := len(items) - 1; i >= 0; i-- {
-		if items[i].Role != "user" {
-			continue
+		if items[i].Role == "user" {
+			return items[i].Content
 		}
-		return messageText(items[i].Content)
 	}
-	return ""
+	return nil
 }
 
 // messageText flattens a message content: a plain string, or an array of blocks whose "text" fields are joined.
@@ -770,34 +778,79 @@ func messageText(raw json.RawMessage) string {
 	return strings.Join(parts, "\n")
 }
 
-// searchStringEnd locates the closing quote of the JSON string containing position `from`
-// (scanning forward, backslash-escape aware). Returns -1 when the string never terminates.
-func searchStringEnd(body []byte, from int) int {
-	for i := from; i < len(body); i++ {
-		if body[i] == '\\' {
-			i++
+// searchMarkerSpan locates the marker that opens the request's final user message: the marker's absolute
+// offset in body and the offset of the closing quote of the JSON string holding it.
+// body: the request body. Returns (markerAt, strEnd, ok); ok=false means no standalone-search marker.
+func searchMarkerSpan(body []byte) (markerAt, strEnd int, ok bool) {
+	strRaw, at, end, ok := markerInContent(finalUserMessageContent(body))
+	if !ok {
+		return 0, 0, false
+	}
+	// The final user message serializes last in the messages array, so its content literal's last occurrence
+	// in the body is the one to read and edit.
+	base := bytes.LastIndex(body, strRaw)
+	if base < 0 {
+		return 0, 0, false
+	}
+	return base + at, base + end, true
+}
+
+// markerInContent locates the marker in one message content value: a plain JSON string, or a block array
+// whose first non-blank text block opens with it (that block opens the messageText-flattened text too).
+// Returns the raw JSON string literal holding the marker and the marker/closing-quote offsets relative to it.
+func markerInContent(content json.RawMessage) (strRaw json.RawMessage, markerAt, strEnd int, ok bool) {
+	if len(content) == 0 {
+		return nil, 0, 0, false
+	}
+	if content[0] == '"' {
+		return markerInString(content)
+	}
+	var blocks []struct {
+		Text json.RawMessage `json:"text"`
+	}
+	if json.Unmarshal(content, &blocks) != nil {
+		return nil, 0, 0, false
+	}
+	for _, b := range blocks {
+		var s string
+		if len(b.Text) == 0 || json.Unmarshal(b.Text, &s) != nil {
 			continue
 		}
-		if body[i] == '"' {
-			return i
+		if strings.TrimSpace(s) == "" {
+			continue // Blank blocks contribute nothing to the flattened text
 		}
+		return markerInString(b.Text)
 	}
-	return -1
+	return nil, 0, 0, false
+}
+
+// markerInString reports whether a JSON string literal opens with the marker (leading whitespace allowed),
+// returning the literal and the marker/closing-quote offsets relative to it. A client that escapes the
+// marker's letters reads as no marker: conservative, nothing gets injected.
+func markerInString(raw json.RawMessage) (strRaw json.RawMessage, markerAt, strEnd int, ok bool) {
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return nil, 0, 0, false
+	}
+	var s string
+	if json.Unmarshal(raw, &s) != nil || !strings.HasPrefix(strings.TrimSpace(s), searchSubagentMarker) {
+		return nil, 0, 0, false
+	}
+	at := bytes.Index(raw[1:len(raw)-1], []byte(searchSubagentMarker))
+	if at < 0 {
+		return nil, 0, 0, false
+	}
+	return raw, 1 + at, len(raw) - 1, true
 }
 
 // searchMarkerQuery extracts the search intent: the text after the marker inside the same JSON string
 // (a leading colon is stripped, JSON escapes decoded). Returns "" when no marker is present or decoding fails.
 // body: the request body. Returns the query text (may be empty).
 func searchMarkerQuery(body []byte) string {
-	idx := bytes.Index(body, []byte(searchSubagentMarker))
-	if idx < 0 {
+	at, end, ok := searchMarkerSpan(body)
+	if !ok {
 		return ""
 	}
-	end := searchStringEnd(body, idx+len(searchSubagentMarker))
-	if end < 0 {
-		return ""
-	}
-	raw := body[idx+len(searchSubagentMarker) : end]
+	raw := body[at+len(searchSubagentMarker) : end]
 	// raw contains no unescaped quote by construction, so wrapping it in quotes and unmarshalling decodes the escapes.
 	var q string
 	if err := json.Unmarshal([]byte(`"`+string(raw)+`"`), &q); err != nil {
@@ -809,16 +862,12 @@ func searchMarkerQuery(body []byte) string {
 }
 
 // injectAfterMarker appends the instruction to the JSON string holding the search sub-agent marker (pure byte
-// surgery: the string's closing quote is located escape-aware, the JSON-escaped instruction inserted before it;
-// every other byte is preserved; content in string or block-array form alike).
+// surgery: the JSON-escaped instruction lands before the string's closing quote; every other byte is
+// preserved; content in string or block-array form alike).
 // body: the request body; instruction: the summary instruction to append. Returns (newBody, ok).
 func injectAfterMarker(body []byte, instruction string) ([]byte, bool) {
-	idx := bytes.Index(body, []byte(searchSubagentMarker))
-	if idx < 0 {
-		return body, false
-	}
-	end := searchStringEnd(body, idx+len(searchSubagentMarker))
-	if end < 0 {
+	_, end, ok := searchMarkerSpan(body)
+	if !ok {
 		return body, false
 	}
 	esc, err := json.Marshal("\n\n" + instruction) // A JSON string literal; the insertion lands inside the existing string, so the quotes are stripped.
