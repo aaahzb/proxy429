@@ -391,6 +391,14 @@ func classifierThinkingShape(body []byte, spans []jsonutil.FieldSpan) string {
 	return ""
 }
 
+// wireEffort normalizes a route effort enum to the upstream vocabulary (mid is written upstream as medium).
+func wireEffort(effort string) string {
+	if effort == "mid" {
+		return "medium"
+	}
+	return effort
+}
+
 // forceAdaptiveEffort rewrites the top-level output_config of an adaptive-thinking request body to exactly
 // {"effort":"<level>"} whatever effort the body carried. mid normalizes to medium. Returns the new body and the
 // wire level; changed=false means body is returned untouched (thinking not adaptive, malformed body, unknown
@@ -399,9 +407,7 @@ func forceAdaptiveEffort(body []byte, effort string) (out []byte, level string, 
 	if effort == "" {
 		return body, "", false
 	}
-	if effort == "mid" {
-		effort = "medium"
-	}
+	effort = wireEffort(effort)
 	switch effort {
 	case "low", "medium", "high", "max":
 	default:

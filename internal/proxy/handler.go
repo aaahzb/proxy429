@@ -314,7 +314,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.ID, origModel, rr.URL, origModel, rr.Model)
 				f.RouteReason.Store(recorder.RoutePattern)
 				convFlag = config.EffectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.Presence.Written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
-				routeEffort = rr.Effort // Captured only here: fallback/classifier/fast/Responses-raw lanes are served otherwise and never inherit it (the pin site itself exempts the quiet off->low upgrade)
+				routeEffort = rr.Effort          // Captured only here: fallback/classifier/fast/Responses-raw lanes are served otherwise and never inherit it (the pin site itself exempts the quiet off->low upgrade)
+				f.Effort = wireEffort(rr.Effort) // Display-only: the model column shows the configured pin even when the body-side rewrite doesn't apply
 				searchGuardEnabled = config.EffectiveSearchGuard(c, rr, nil)
 				// Enhance search / route-level claudeSearch*: when the route effectively supports search (no_search:false),
 				// a standalone search sub-agent request gets the summary instruction injected into the request itself
@@ -616,7 +617,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Case B: status 200, but an error may hide in the response body (SSE stream).
+		// Case B: a status not retried by code (usually 200), but an error may hide in the response body (SSE stream).
 		br := bufio.NewReader(resp.Body)
 		head := peekHead(br, 8192)
 		tFirstByte := time.Now() // The moment the first body data byte arrives ("first token out")
@@ -682,7 +683,24 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			log.Printf("[error] status 200 but response body contains an error: %s", firstLine(head))
+			// A deterministic 4xx (e.g. a 400 invalid_request_error: bad JSON, unsigned thinking history, a
+			// rejected key) is a verdict the same bytes will get again — retrying cannot change it. Pass the
+			// upstream's error through immediately instead of falling into the in-body retry path below,
+			// which froze the client behind the whole retry budget (minutes of keepalive pings) before the
+			// same error surfaced. Transient statuses keep the old behavior: 408/425/429 and every 5xx
+			// (overloads such as Anthropic's 529 included) are still retried here or in Case A even when
+			// absent from retry_status_codes.
+			if deterministic4xx(resp.StatusCode) {
+				log.Printf("[passthrough] #%d upstream status %d is a deterministic 4xx; passing the error through", f.ID, resp.StatusCode)
+				if headersSent {
+					resp.Body.Close()
+					writeSSEUpstreamError(w, flusher, fmt.Sprintf("upstream status %d: %s", resp.StatusCode, firstLine(head)), f, resp.StatusCode)
+					return
+				}
+				forward(w, resp, head, br, f, false)
+				return
+			}
+			log.Printf("[error] status %d but response body contains an error: %s", resp.StatusCode, firstLine(head))
 			if attempt < c.MaxRetries && time.Now().Before(deadline) {
 				wait := computeBackoff(resp, attempt)
 				if !time.Now().Add(wait).After(deadline) {

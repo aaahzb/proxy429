@@ -119,6 +119,61 @@ func TestNone2LowFallbackRetry(t *testing.T) {
 	}
 }
 
+// TestNone2LowFallbackOn400 pins the order between the semantic fallbacks and the deterministic-4xx fast-fail:
+// the same thinking rejection arrives as an HTTP 400 JSON error body here (not a 200 SSE error); the n2l fallback
+// must still get its one shot — thinking flipped off and resent — before the 400 is passed downstream.
+func TestNone2LowFallbackOn400(t *testing.T) {
+	resetStats()
+	calls := 0
+	var secondBody map[string]interface{}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var m map[string]interface{}
+		_ = json.Unmarshal(b, &m)
+		calls++
+		if calls == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"thinking is not allowed without signed history"}}`)
+			return
+		}
+		secondBody = m
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		io.WriteString(w, testSSEAllBlocks())
+	}))
+	defer mock.Close()
+
+	config.Store(&config.Config{
+		Upstream:       mock.URL,
+		MaxRetries:     0,
+		TotalBudgetSec: 10,
+		Routes:         []config.RouteRule{{Pattern: "gpt-5*", URL: mock.URL, Model: "deepseek-v4-flash", ConvertOff2Low: "translate"}},
+	})
+	defer config.Store(&config.Config{})
+
+	proxy := httptest.NewServer(http.HandlerFunc(translate.ResponsesHandler(handler)))
+	defer proxy.Close()
+
+	resp, err := http.Post(proxy.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"gpt-5-codex","input":"hi","reasoning":{"effort":"none"}}`))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if calls != 2 {
+		t.Fatalf("上游请求数=%d, want 2（400 也必须先走一次兜底，不能被快停吞掉）", calls)
+	}
+	if jsonutil.ObjStr(jsonutil.AsObj(secondBody["thinking"]), "type") != "disabled" {
+		t.Errorf("兜底重发 thinking=%v, want disabled", secondBody["thinking"])
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("客户端状态=%d, want 200: %s", resp.StatusCode, body)
+	}
+}
+
 // TestNone2LowTryOnNoStrip end-to-end locks the #11/#12 fix: tool continuation + effort max (downstream didn't disable
 // thinking) + toggle on → the upstream receives enabled/16000 at the requested level, and the return side does NOT strip thinking blocks — the downstream asked for
 // thinking, so blocks ride the return carrying signatures to self-heal next turn's history (unlike implicit-upgrade streams whose downstream wants thinking off).

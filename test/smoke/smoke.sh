@@ -331,6 +331,12 @@ eflog=$(grep -o 'adaptive thinking effort forced' "$OUT/data.json" | wc -l | tr 
 # thinkFrom=high counts e1 plus the earlier s2 search rewrite (its client carried adaptive+high); adaptive is e3's "from".
 echo "effort badges: thinkTo=max x$eto, thinkFrom=high x$efrom, thinkFrom=adaptive x$efromad, log lines x$eflog (want 2/2/1/2)"
 [ "$eto" = "2" ] && [ "$efrom" = "2" ] && [ "$efromad" = "1" ] && [ "$eflog" = "2" ] || { echo "EFFORT BADGE/LOG COUNTS WRONG"; efok=0; }
+# Model column: every smoke-effort flight carries the configured [max] (even e2, whose budget body the pin left
+# alone — the tag is the configured pin, the badge is the actual rewrite); smoke-noeff carries no tag.
+emodel=$(grep -o '"model":"smoke-effort \[max\]' "$OUT/recent.json" | wc -l | tr -d ' ')
+enoeff=$(grep -o '"model":"smoke-noeff"' "$OUT/recent.json" | wc -l | tr -d ' ')
+echo "effort model column: smoke-effort [max] x$emodel, smoke-noeff plain x$enoeff (want 3/1)"
+[ "$emodel" = "3" ] && [ "$enoeff" = "1" ] || { echo "EFFORT MODEL COLUMN WRONG"; efok=0; }
 [ "$efok" = 1 ] && echo "EFFORT SMOKE PASS" || { echo "EFFORT SMOKE FAIL"; exit 1; }
 
 echo "page classifier(codex) log lines: $(grep -c 'classifier(codex)' "$OUT/data.json")"

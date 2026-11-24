@@ -113,10 +113,7 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 
 	// In-flight stream list: sorted by ID (snapshot is already sorted), showing model and forwarding progress.
 	for _, f := range recorder.Flights.Snapshot() {
-		model := f.OrigModel
-		if f.TargetModel != "" && f.TargetModel != f.OrigModel {
-			model = f.OrigModel + " -> " + f.TargetModel
-		}
+		model := f.ModelDisplay()
 		d.Flights = append(d.Flights, flightInfo{
 			ID:           f.ID,
 			Model:        model,

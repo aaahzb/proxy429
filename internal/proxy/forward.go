@@ -32,6 +32,16 @@ func shouldRetry(code int) bool {
 	return false
 }
 
+// deterministic4xx reports whether code is a client-error status whose verdict is fixed by the request
+// itself: resending the same bytes gets the same rejection. Transient client-side statuses (408 request
+// timeout, 425 too early, 429 too many requests) and anything listed in retry_status_codes are excluded.
+// Every 5xx is transient by nature and never deterministic, whatever retry_status_codes says.
+func deterministic4xx(code int) bool {
+	return code >= 400 && code < 500 &&
+		code != http.StatusRequestTimeout && code != http.StatusTooEarly && code != http.StatusTooManyRequests &&
+		!shouldRetry(code)
+}
+
 // computeBackoff computes the wait before this retry:
 // prefer the upstream's Retry-After header (seconds), otherwise exponential backoff + jitter.
 func computeBackoff(resp *http.Response, attempt int) time.Duration {
@@ -136,11 +146,30 @@ func writeSSEPing(w http.ResponseWriter, flusher http.Flusher, f *recorder.Fligh
 	}
 }
 
-// writeSSEError is the upstream-failure fallback after a 200 header has been sent: it writes an Anthropic SSE error event and flushes.
+// writeSSEError writes the upstream-failure fallback after a 200 header has been sent: an Anthropic SSE error event, flushed.
 // Once the 200 header is sent, the status code can no longer pass a 429 through; an SSE error is the only way for the client to recognize the failure (used when retries run out).
-// Responses passthrough streams get a response.failed event instead (native Responses clients recognize that shape).
+// The flight is flagged GaveUp, so the finished-streams status column shows [重试尽] rather than a bare status 0.
 // w: response writer; flusher: flush after write when non-nil; msg: error description; f: this flight (a copy is teed for web review).
 func writeSSEError(w http.ResponseWriter, flusher http.Flusher, msg string, f *recorder.Flight) {
+	writeSSEErrorBody(w, flusher, msg, f)
+	if f != nil {
+		f.GaveUp = true // The finished-streams status column shows [重试尽] from this flag (distinguishing it from other status=0 shapes)
+	}
+}
+
+// writeSSEUpstreamError reports a real upstream verdict (e.g. a deterministic 4xx) that arrived after the
+// keepalive stream had already opened: the client still gets the error event, but the flight records the
+// upstream status instead of claiming the retry budget ran out.
+func writeSSEUpstreamError(w http.ResponseWriter, flusher http.Flusher, msg string, f *recorder.Flight, status int) {
+	writeSSEErrorBody(w, flusher, msg, f)
+	if f != nil {
+		f.Status = status
+	}
+}
+
+// writeSSEErrorBody writes the error event itself (Anthropic shape, or response.failed for native Responses
+// passthrough streams, which those clients recognize), flushes, and tees a copy into the flight for web review.
+func writeSSEErrorBody(w http.ResponseWriter, flusher http.Flusher, msg string, f *recorder.Flight) {
 	var buf bytes.Buffer
 	b, _ := json.Marshal(msg) // JSON-encode the message so special characters don't break the SSE
 	if f != nil && f.ResponsesRaw() {
@@ -158,8 +187,7 @@ func writeSSEError(w http.ResponseWriter, flusher http.Flusher, msg string, f *r
 		flusher.Flush()
 	}
 	if f != nil {
-		f.GaveUp = true       // The finished-streams status column shows [重试尽] from this flag (distinguishing it from other status=0 shapes)
-		f.AppendContent(data) // Tee a copy for web review (the retries-exhausted error is recorded too)
+		f.AppendContent(data) // Tee a copy for web review (the error event is recorded too)
 	}
 }
 
@@ -700,7 +728,7 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 // Three retry cases:
 //
 //	A. the upstream's HTTP status code itself is 429/5xx;
-//	B. status 200, but the error hides in the SSE response body (event:error / rate_limit etc.);
+//	B. a status not retried by code (usually 200), but the error hides in the response body (event:error / rate_limit etc.);
 //	C. normal response, passed straight through.
 //
 // countTokensPath is Anthropic's token-counting endpoint: Claude Code calls it periodically for context-length estimation;

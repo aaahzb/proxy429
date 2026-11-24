@@ -237,7 +237,7 @@ func runEffortE2E(t *testing.T, build func(routeURL, fbURL string) *config.Confi
 		req.RemoteAddr = "127.0.0.1:1"
 		logview.RecentFlightsHandler(rec, req)
 		recent = rec.Body.String()
-		if strings.Contains(recent, `"model":"claude-opus-4-8"`) {
+		if strings.Contains(recent, `"model":"claude-opus-4-8`) {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -399,7 +399,7 @@ func TestRouteEffortSkipsStealthUpgradeE2E(t *testing.T) {
 		r.RemoteAddr = "127.0.0.1:1"
 		logview.RecentFlightsHandler(rec, r)
 		recent = rec.Body.String()
-		if strings.Contains(recent, `"model":"claude-opus-4-8"`) {
+		if strings.Contains(recent, `"model":"claude-opus-4-8`) {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -414,4 +414,77 @@ func TestRouteEffortSkipsStealthUpgradeE2E(t *testing.T) {
 		t.Errorf("the stealth off->low upgrade owns its level; the route pin must not override it: %s", up)
 	}
 	assertNoThinkRewriteBadge(t, recent)
+}
+
+// TestRouteEffortShownInModelColumnE2E locks the model-column display: a route with effort shows [level] before
+// the target model (appended when the model is not rewritten), whether or not the body-side rewrite applied, and
+// the level is the wire form (mid shows as medium). The API column's [from->to] badge stays rewrite-only.
+func TestRouteEffortShownInModelColumnE2E(t *testing.T) {
+	t.Run("rewritten model carries the level before the target", func(t *testing.T) {
+		_, _, _, recent := runEffortE2E(t, func(routeURL, fbURL string) *config.Config {
+			c := effortBaseConfig(routeURL)
+			c.Routes[0].Model = "deepseek-test"
+			c.Routes[0].Effort = "mid"
+			return c
+		}, effortAdaptiveHigh)
+		models := recentModels(t, recent)
+		if !hasModel(models, "claude-opus-4-8 -> [medium] deepseek-test") {
+			t.Errorf("model column should read %q, got %v", "claude-opus-4-8 -> [medium] deepseek-test", models)
+		}
+		for _, sub := range []string{`"thinkFrom":"high"`, `"thinkTo":"medium"`} {
+			if !strings.Contains(recent, sub) {
+				t.Errorf("recent flight should carry %q: %s", sub, recent)
+			}
+		}
+	})
+	t.Run("model kept but pin configured still shows the level", func(t *testing.T) {
+		_, _, _, recent := runEffortE2E(t, func(routeURL, fbURL string) *config.Config {
+			return effortBaseConfig(routeURL) // no model rewrite, effort max
+		}, effortBudgetBody) // non-adaptive: the pin rewrites nothing
+		models := recentModels(t, recent)
+		if !hasModel(models, "claude-opus-4-8 [max]") {
+			t.Errorf("model column should append [max] when no model rewrite happened, got %v", models)
+		}
+		assertNoThinkRewriteBadge(t, recent)
+	})
+}
+
+// recentModels decodes the recent-flights JSON and collects every "model" string. Parsing compares the value the
+// page actually renders; the raw body carries encoding/json's > escape for the display arrow.
+func recentModels(t *testing.T, recent string) []string {
+	t.Helper()
+	var v any
+	if err := json.Unmarshal([]byte(recent), &v); err != nil {
+		t.Fatalf("recent flights is not JSON: %v", err)
+	}
+	var models []string
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case map[string]any:
+			if m, ok := t["model"].(string); ok {
+				models = append(models, m)
+			}
+			for _, v := range t {
+				walk(v)
+			}
+		case []any:
+			for _, v := range t {
+				walk(v)
+			}
+		}
+	}
+	walk(v)
+	return models
+}
+
+// hasModel reports whether any decoded model string starts with the given prefix (the upstream-model third
+// segment may follow the display prefix).
+func hasModel(models []string, prefix string) bool {
+	for _, m := range models {
+		if strings.HasPrefix(m, prefix) {
+			return true
+		}
+	}
+	return false
 }

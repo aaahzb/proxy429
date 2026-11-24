@@ -64,6 +64,7 @@ type Flight struct {
 	SearchLevel      string                     // Summary level actually injected into the marker request (empty = none); upgrades the badge to [SearchSummary-<level>]
 	ThinkFrom        string                     // Thinking value before the last body-side thinking rewrite (route effort pin / search rewrite; empty = no thinking field, shown as auto)
 	ThinkTo          string                     // Level a body-side rewrite wrote upstream (empty = no rewrite); the API column shows [from->to]
+	Effort           string                     // Route-configured effort level in wire form (mid→medium); empty = the route sets no effort. The model column shows [level] before the target model (appended when the model itself is not rewritten)
 	SearchGuardArmed bool                       // Marker request whose effective route enabled noBullshitOnEmptyClaudeSearch; only native Anthropic 200 SSE responses are buffered
 	SearchGuard      bool                       // The upstream response was discarded and replaced with the fixed empty-search stream; the web status column shows [空搜]
 	Translated       string                     // Translation-port origin tag ("responses"=translated stream, "responses-raw"=native passthrough via a route with url_response_api); the web API column shows [translate]/[Response]
@@ -107,6 +108,24 @@ func (f *Flight) RealModel() string {
 		return f.TargetModel
 	}
 	return f.OrigModel
+}
+
+// ModelDisplay composes the web model-column string: "orig", or "orig -> target" when routing rewrote the model.
+// The route's configured [effort] pin sits before the target (appended when the model itself is not rewritten),
+// so the pin is visible even on requests the body-side rewrite left alone (e.g. non-adaptive bodies); whether a
+// rewrite actually happened is the API column's [from->to] badge, not this tag.
+func (f *Flight) ModelDisplay() string {
+	model := f.OrigModel
+	if f.TargetModel != "" && f.TargetModel != f.OrigModel {
+		model = f.OrigModel + " -> "
+		if f.Effort != "" {
+			model += "[" + f.Effort + "] "
+		}
+		model += f.TargetModel
+	} else if f.Effort != "" {
+		model += " [" + f.Effort + "]"
+	}
+	return model
 }
 
 // responsesRaw reports whether this stream is a Responses native passthrough (the matched route has url_response_api):
@@ -472,7 +491,7 @@ func (f *Flight) HasFullContent() bool {
 // Archived only when the flight ends with non-empty content (there was streamed output); content is a snapshotContent copy.
 type FinishedFlight struct {
 	ID            uint64
-	Model         string // origModel -> targetModel (-> upstreamModel if the upstream returned one and it differs)
+	Model         string // ModelDisplay form: origModel, origModel [effort], or origModel -> [effort] targetModel, plus -> upstreamModel if the upstream returned one and it differs
 	upstreamModel string // Model name actually returned in the upstream response (empty = not returned / same as targetModel)
 	RouteReason   int32  // Route reason (route*); the web model column shows it as a [tag] prefix
 	Status        int    // HTTP status code
@@ -579,10 +598,7 @@ func (f *Flight) RefreshArchivedDown() { refreshArchivedDown(f) }
 
 func AddFinished(f *Flight) {
 	content := f.SnapshotContent()
-	model := f.OrigModel
-	if f.TargetModel != "" && f.TargetModel != f.OrigModel {
-		model = f.OrigModel + " -> " + f.TargetModel
-	}
+	model := f.ModelDisplay()
 	// When the model actually returned by the upstream differs from the route target, append a third segment so the user sees the real landing spot.
 	if f.UpstreamModel != "" && f.UpstreamModel != f.TargetModel && f.UpstreamModel != f.OrigModel {
 		model = model + " -> " + f.UpstreamModel

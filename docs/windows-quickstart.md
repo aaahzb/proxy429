@@ -28,7 +28,7 @@ Quick reference for common fields:
 | `log_file` | log file path; set `"proxy.log"` first for easier troubleshooting |
 | `ping_interval_s` | 429-retry SSE ping interval, default `5` |
 | `max_retries` | maximum retries, default `5` |
-| `retry_status_codes` | status codes that trigger a retry, default `[429, 500, 502, 503, 504]` |
+| `retry_status_codes` | status codes that trigger a retry; the example config lists `[429, 500, 502, 503, 504]`; when omitted, nothing is retried by status code alone |
 
 The config can also be edited live on the web console's 「配置」 (Config) tab after startup.
 
