@@ -1,4 +1,4 @@
-package main
+package logview
 
 import (
 	"encoding/json"
@@ -33,11 +33,11 @@ func configGetHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// configPostHandler saves the edited config and reloads it.
+// ConfigPostHandler saves the edited config and reloads it.
 // It first probes the content with config.ParseConfig — the same validation config.LoadConfig uses (JSON syntax, removed keys with
 // migration hints, enum values) — writing to disk only on success. A rejected config never reaches the file, so it
 // cannot brick the next startup. reloadConfig applies it after the write.
-func configPostHandler(w http.ResponseWriter, r *http.Request) {
+func ConfigPostHandler(w http.ResponseWriter, r *http.Request) {
 	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
@@ -66,14 +66,14 @@ func configPostHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to write file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := reloadConfig(); err != nil {
+	if err := deps.ReloadConfig(); err != nil {
 		// File saved but reload failed (very rare, since it was validated above): the old config is still running; tell the user.
 		http.Error(w, "saved but reload failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if os.IsNotExist(statErr) {
 		// The current config file didn't exist before (e.g. deleted externally) and this save created it: notify the tray to rebuild the submenu
-		notifyTrayCfgChanged()
+		deps.TrayCfgChanged()
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -85,7 +85,7 @@ func reloadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
-	if err := reloadConfig(); err != nil {
+	if err := deps.ReloadConfig(); err != nil {
 		http.Error(w, "reload failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -135,7 +135,7 @@ func switchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	full := filepath.Join(filepath.Dir(config.CurrentConfigPath()), name)
-	if err := switchConfig(full); err != nil {
+	if err := deps.SwitchConfig(full); err != nil {
 		http.Error(w, "switch failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -196,7 +196,7 @@ func newConfigHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "write failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := switchConfig(full); err != nil {
+	if err := deps.SwitchConfig(full); err != nil {
 		http.Error(w, "created but switch failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -205,9 +205,9 @@ func newConfigHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "current": name})
 }
 
-// renameConfigHandler renames a config file. If the renamed file is the config currently in use, configFilePath is updated in sync,
+// RenameConfigHandler renames a config file. If the renamed file is the config currently in use, configFilePath is updated in sync,
 // so subsequent saves/reloads point at the new file. Refuses if the target name already exists. Localhost only.
-func renameConfigHandler(w http.ResponseWriter, r *http.Request) {
+func RenameConfigHandler(w http.ResponseWriter, r *http.Request) {
 	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
@@ -256,14 +256,14 @@ func renameConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[config] renamed %s -> %s", oldName, newName)
 	// The file list changed (if the renamed one is the current config, the tray checkmark follows the new name): notify the tray to rebuild the submenu
-	notifyTrayCfgChanged()
+	deps.TrayCfgChanged()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "current": filepath.Base(config.CurrentConfigPath())})
 }
 
-// delConfigHandler deletes a config file. Deleting the config currently in use is refused (switch away first).
+// DelConfigHandler deletes a config file. Deleting the config currently in use is refused (switch away first).
 // Localhost only. The frontend double-confirms against accidents.
-func delConfigHandler(w http.ResponseWriter, r *http.Request) {
+func DelConfigHandler(w http.ResponseWriter, r *http.Request) {
 	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
@@ -299,7 +299,7 @@ func delConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[config] deleted %s", full)
 	// Notify the tray to rebuild the 「切换配置」 submenu without the deleted entry (same notification as switchConfig's success path)
-	notifyTrayCfgChanged()
+	deps.TrayCfgChanged()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }

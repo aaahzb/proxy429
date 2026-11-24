@@ -1,4 +1,4 @@
-package main
+package logview
 
 import (
 	"encoding/json"
@@ -87,7 +87,7 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
-	d := logData{Lines: recorder.LogBuf.Window(0, recorder.MaxLogBuf), Version: Version, CurrentCfg: filepath.Base(config.CurrentConfigPath()), FinishedCap: recorder.FinishedCap.Load(), FullStore: recorder.FullStore.Load(), HijackRisk: platform.ProxyHijackRisk()}
+	d := logData{Lines: recorder.LogBuf.Window(0, recorder.MaxLogBuf), Version: deps.Version, CurrentCfg: filepath.Base(config.CurrentConfigPath()), FinishedCap: recorder.FinishedCap.Load(), FullStore: recorder.FullStore.Load(), HijackRisk: platform.ProxyHijackRisk()}
 	recorder.Stats.Mu.Lock()
 	d.Active = recorder.Stats.Active
 	d.Waiting = recorder.Stats.Waiting
@@ -166,7 +166,7 @@ func resetStatsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	clearStats(config.Current())
+	deps.ClearStats()
 	log.Printf("[stats] cleared")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -187,7 +187,7 @@ func clearLogsHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
-// flightHandler returns the given in-flight stream's recent pass-through content (raw SSE), for the web's click-to-view.
+// FlightHandler returns the given in-flight stream's recent pass-through content (raw SSE), for the web's click-to-view.
 // 404 when the stream doesn't exist (already ended). Localhost only.
 // pickFlightSide picks the record per the viewer's requested link side (side=up|down): in dual-link recording the downstream side
 // is stored only when it differs from the upstream side (translation streams always store), a missing side falls back to the other;
@@ -205,7 +205,7 @@ func pickFlightSide(side string, up, down []byte) ([]byte, string) {
 	return down, "down"
 }
 
-func flightHandler(w http.ResponseWriter, r *http.Request) {
+func FlightHandler(w http.ResponseWriter, r *http.Request) {
 	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
@@ -281,9 +281,9 @@ func flightHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(content)
 }
 
-// flightReqHandler returns the given stream's downstream request body verbatim, so the web can show "which request caused this stream".
+// FlightReqHandler returns the given stream's downstream request body verbatim, so the web can show "which request caused this stream".
 // Both in-flight and finished are queried; 404 when the stream doesn't exist or wasn't recorded (search sub-streams, body-read failure). Localhost only.
-func flightReqHandler(w http.ResponseWriter, r *http.Request) {
+func FlightReqHandler(w http.ResponseWriter, r *http.Request) {
 	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
@@ -324,11 +324,11 @@ func flightReqHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-// recentFlightsHandler returns the recently finished streams list (summary, no content), newest first. Localhost only.
+// RecentFlightsHandler returns the recently finished streams list (summary, no content), newest first. Localhost only.
 // The cacheAge column's semantics: each anchor key's (session+route) newest row shows the cache age (time since the cache was created, counting up);
 // older rows superseded by a newer same-key row and rows without a session identifier (count_tokens/bare API) show "-";
 // while a same-key in-flight stream is streaming, the display freezes as [m:ss] (the old anchor's age at the in-flight stream's start; the number doesn't change).
-func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
+func RecentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
@@ -446,10 +446,10 @@ func finishedCapHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "n": b.N})
 }
 
-// fullStoreHandler toggles 「储存完整结构体」: when on, newly started requests record full request bodies and output
+// FullStoreHandler toggles 「储存完整结构体」: when on, newly started requests record full request bodies and output
 // (no 256KB cap, for download); switching off immediately drops the full copies of in-flight/archived streams (reqBody cut back to cap),
 // and the web download button disappears accordingly. Localhost only.
-func fullStoreHandler(w http.ResponseWriter, r *http.Request) {
+func FullStoreHandler(w http.ResponseWriter, r *http.Request) {
 	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return

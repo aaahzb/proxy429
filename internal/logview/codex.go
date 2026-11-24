@@ -1,7 +1,8 @@
-package main
+package logview
 
 import (
 	"bytes"
+	_ "embed"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -9,6 +10,17 @@ import (
 
 	"proxy429/internal/platform"
 )
+
+// codexSetupPS1 / codexSetupSH are the embedded Codex one-click setup script templates (Windows / macOS·Linux),
+// served via /__codexsetup.ps1 and /__codexsetup.sh: the server bakes their BAKED anchors per query params
+// (model/base/catalog) before sending; the web console only hands the user a one-line fetch command (same format as DeepSeek's docs).
+// The scripts are also published standalone under internal/logview/scripts/ for users running them directly.
+//
+//go:embed scripts/codex-setup.ps1
+var codexSetupPS1 []byte
+
+//go:embed scripts/codex-setup.sh
+var codexSetupSH []byte
 
 // Bake anchors: character-for-character identical to how they're written in the template files (codex_setup_test.go locks each to appear exactly once).
 // Values are only substituted into the single-quoted empty-string positions after whitelist validation, so quote escape is impossible.

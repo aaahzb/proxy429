@@ -2,6 +2,7 @@ package main
 
 import (
 	"proxy429/internal/config"
+	"proxy429/internal/logview"
 	"proxy429/internal/platform"
 	"proxy429/internal/recorder"
 
@@ -130,7 +131,7 @@ func TestDelConfigNotifiesTray(t *testing.T) {
 		req := httptest.NewRequest("POST", "/__delconfig", strings.NewReader(`{"name":`+strconv.Quote(name)+`}`))
 		req.RemoteAddr = "127.0.0.1:1" // isLocalRequest requires localhost
 		rec := httptest.NewRecorder()
-		delConfigHandler(rec, req)
+		logview.DelConfigHandler(rec, req)
 		return rec.Code
 	}
 
@@ -178,7 +179,7 @@ func TestRenameConfigNotifiesTray(t *testing.T) {
 	req := httptest.NewRequest("POST", "/__renameconfig", strings.NewReader(`{"old":"a.json","new":"b.json"}`))
 	req.RemoteAddr = "127.0.0.1:1" // isLocalRequest requires localhost
 	rec := httptest.NewRecorder()
-	renameConfigHandler(rec, req)
+	logview.RenameConfigHandler(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("重命名应 200，实际 %d: %s", rec.Code, rec.Body.String())
 	}
@@ -213,7 +214,7 @@ func TestSaveConfigCreateNotifiesTray(t *testing.T) {
 		req := httptest.NewRequest("POST", "/__config", strings.NewReader(`{"upstream":"http://127.0.0.1:1"}`))
 		req.RemoteAddr = "127.0.0.1:1" // isLocalRequest requires localhost
 		rec := httptest.NewRecorder()
-		configPostHandler(rec, req)
+		logview.ConfigPostHandler(rec, req)
 		return rec.Code
 	}
 
@@ -255,7 +256,7 @@ func TestConfigPostRemovedKeysRejected(t *testing.T) {
 	req := httptest.NewRequest("POST", "/__config", strings.NewReader(`{"upstream":"http://127.0.0.1:1","translateNone2Low":true}`))
 	req.RemoteAddr = "127.0.0.1:1" // isLocalRequest requires localhost
 	rec := httptest.NewRecorder()
-	configPostHandler(rec, req)
+	logview.ConfigPostHandler(rec, req)
 	if rec.Code != 400 {
 		t.Fatalf("含已删除键的保存应 400，实际 %d", rec.Code)
 	}

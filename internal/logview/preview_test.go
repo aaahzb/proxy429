@@ -1,4 +1,4 @@
-package main
+package logview
 
 import (
 	"encoding/json"
@@ -17,7 +17,7 @@ func TestLazyApplyPreviewHandler(t *testing.T) {
 		req := httptest.NewRequest(method, lazyPreviewPath, strings.NewReader(body))
 		req.RemoteAddr = remote
 		rec := httptest.NewRecorder()
-		LazyApplyPreviewHandler(rec, req)
+		lazyApplyPreviewHandler(rec, req)
 		return rec
 	}
 

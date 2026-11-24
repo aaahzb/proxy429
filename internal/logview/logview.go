@@ -1,4 +1,8 @@
-package main
+// Package logview serves the localhost web console: the console page and its
+// status/log/config endpoints, config-file management, the Codex one-click setup
+// scripts, and the UI-language switch. The proxy-core operations it triggers are
+// injected via Deps, so the package stays independent of the proxy pipeline.
+package logview
 
 import (
 	"encoding/json"
@@ -13,7 +17,7 @@ import (
 // Web console mount path (same port as the proxy, localhost only).
 // The /__ prefix is chosen because the Anthropic API uses /v1/... — no conflict; Go's DefaultServeMux prefers exact matches over the / wildcard.
 const (
-	logViewerPath     = "/__logs"
+	ViewerPath        = "/__logs"
 	logDataPath       = "/__logs/data"
 	configPath        = "/__config"         // GET returns the config content, POST saves and reloads
 	reloadPath        = "/__reload"         // POST only reloads (the file is not modified)
@@ -29,11 +33,86 @@ const (
 	clearLogsPath     = "/__clearlogs"      // POST clears the in-memory log buffer
 	flightPath        = "/__flight"         // GET an in-flight stream's pass-through content (?id=N; finished streams query this too)
 	flightReqPath     = "/__flightreq"      // GET a stream's downstream request body verbatim (?id=N; in-flight and finished both queryable)
-	recentFlightsPath = "/__recentflights"  // GET the recently finished streams list (summary)
+	RecentFlightsPath = "/__recentflights"  // GET the recently finished streams list (summary)
 	finishedCapPath   = "/__finishedcap"    // POST sets how many finished streams to keep, N
 	fullStorePath     = "/__fullstore"      // POST toggles 储存完整结构体 (record full request bodies/output for download)
 	uiLangPath        = "/__uilang"         // GET the current UI language / POST switches the language (writes program-settings.txt, effective hot)
 )
+
+// Deps are the proxy-core operations the console invokes.
+type Deps struct {
+	// Version is the build stamp shown in the page header and the status JSON ("dev" for bare go builds).
+	Version string
+	// ReloadConfig re-reads the active config file and applies it (stats are kept).
+	ReloadConfig func() error
+	// SwitchConfig switches to the given config file path with immediate effect (stats are kept).
+	SwitchConfig func(string) error
+	// ClearStats clears cumulative stats and the recently finished streams list.
+	ClearStats func()
+	// TrayCfgChanged tells the tray to rebuild its config-file submenu.
+	TrayCfgChanged func()
+}
+
+var (
+	noopReload = func() error { return nil }
+	noopSwitch = func(string) error { return nil }
+	noopVoid   = func() {}
+)
+
+var deps = Deps{
+	ReloadConfig:   noopReload,
+	SwitchConfig:   noopSwitch,
+	ClearStats:     noopVoid,
+	TrayCfgChanged: noopVoid,
+}
+
+// Configure wires the console to the proxy core; call once at startup, before serving.
+// Nil callbacks keep their no-op defaults, so isolated tests never panic.
+func Configure(d Deps) {
+	if d.ReloadConfig == nil {
+		d.ReloadConfig = noopReload
+	}
+	if d.SwitchConfig == nil {
+		d.SwitchConfig = noopSwitch
+	}
+	if d.ClearStats == nil {
+		d.ClearStats = noopVoid
+	}
+	if d.TrayCfgChanged == nil {
+		d.TrayCfgChanged = noopVoid
+	}
+	deps = d
+}
+
+// RegisterHandlers mounts every console endpoint on the default mux (all endpoints are localhost-only).
+func RegisterHandlers() {
+	http.HandleFunc(ViewerPath, logViewerHandler)
+	http.HandleFunc(logDataPath, logDataHandler)
+	http.HandleFunc(configPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			ConfigPostHandler(w, r)
+		} else {
+			configGetHandler(w, r)
+		}
+	})
+	http.HandleFunc(reloadPath, reloadHandler)
+	http.HandleFunc(lazyPreviewPath, lazyApplyPreviewHandler)
+	http.HandleFunc(configsPath, configsHandler)
+	http.HandleFunc(switchPath, switchHandler)
+	http.HandleFunc(newConfigPath, newConfigHandler)
+	http.HandleFunc(codexSetupPS1Path, codexScriptHandler(codexSetupPS1, codexPS1Anchors, false))
+	http.HandleFunc(codexSetupSHPath, codexScriptHandler(codexSetupSH, codexSHAnchors, true))
+	http.HandleFunc(renameConfigPath, RenameConfigHandler)
+	http.HandleFunc(delConfigPath, DelConfigHandler)
+	http.HandleFunc(resetStatsPath, resetStatsHandler)
+	http.HandleFunc(clearLogsPath, clearLogsHandler)
+	http.HandleFunc(flightPath, FlightHandler)
+	http.HandleFunc(flightReqPath, FlightReqHandler)
+	http.HandleFunc(RecentFlightsPath, RecentFlightsHandler)
+	http.HandleFunc(finishedCapPath, finishedCapHandler)
+	http.HandleFunc(fullStorePath, FullStoreHandler)
+	http.HandleFunc(uiLangPath, uiLangHandler)
+}
 
 // logViewerHandler returns the console HTML page (status/logs/config tabs).
 func logViewerHandler(w http.ResponseWriter, r *http.Request) {
@@ -49,7 +128,7 @@ func logViewerHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// The version badge sits next to the language switch. The stamp is build-controlled ASCII
 	// ("beta <hash>-<HHMM>" or "release vX.Y.Z.N"), safe to inline unescaped in either language.
-	page = strings.Replace(page, "__VERSION__", Version, 1)
+	page = strings.Replace(page, "__VERSION__", deps.Version, 1)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write([]byte(page))

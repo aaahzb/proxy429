@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"proxy429/internal/logview"
 	"proxy429/internal/recorder"
 	"strconv"
 	"strings"
@@ -51,7 +52,7 @@ func serveFlightReq(t *testing.T, id uint64) (int, []byte) {
 	r := httptest.NewRequest(http.MethodGet, "/__flightreq?id="+strconv.FormatUint(id, 10), nil)
 	r.RemoteAddr = "127.0.0.1:43210" // httptest defaults to 192.0.2.1, which isLocalRequest rejects
 	rec := httptest.NewRecorder()
-	flightReqHandler(rec, r)
+	logview.FlightReqHandler(rec, r)
 	res := rec.Result()
 	defer res.Body.Close()
 	body, err := io.ReadAll(res.Body)
@@ -120,7 +121,7 @@ func postFullStore(t *testing.T, enabled bool) int {
 	r := httptest.NewRequest(http.MethodPost, "/__fullstore", body)
 	r.RemoteAddr = "127.0.0.1:43210" // httptest defaults to 192.0.2.1, which isLocalRequest rejects
 	rec := httptest.NewRecorder()
-	fullStoreHandler(rec, r)
+	logview.FullStoreHandler(rec, r)
 	return rec.Result().StatusCode
 }
 
@@ -131,7 +132,7 @@ func serveFlightFull(t *testing.T, id uint64) (int, []byte) {
 	r := httptest.NewRequest(http.MethodGet, "/__flight?id="+strconv.FormatUint(id, 10)+"&full=1", nil)
 	r.RemoteAddr = "127.0.0.1:43210" // httptest defaults to 192.0.2.1, which isLocalRequest rejects
 	rec := httptest.NewRecorder()
-	flightHandler(rec, r)
+	logview.FlightHandler(rec, r)
 	res := rec.Result()
 	defer res.Body.Close()
 	body, err := io.ReadAll(res.Body)

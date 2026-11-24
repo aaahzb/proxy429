@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/logview"
 	"proxy429/internal/recorder"
 	"proxy429/internal/translate"
 	"strings"
@@ -121,9 +122,9 @@ func runSearchGuardE2E(t *testing.T, rr config.RouteRule, sf *config.SearchRoute
 	mu.Unlock()
 	for i := 0; i < 100; i++ {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, recentFlightsPath, nil)
+		req := httptest.NewRequest(http.MethodGet, logview.RecentFlightsPath, nil)
 		req.RemoteAddr = "127.0.0.1:1"
-		recentFlightsHandler(rec, req)
+		logview.RecentFlightsHandler(rec, req)
 		result.recent = rec.Body.String()
 		recorder.FinishedMu.Lock()
 		if len(recorder.Finished) == 1 {
@@ -183,19 +184,6 @@ func TestSearchGuardReplacesEmptyResponse(t *testing.T) {
 	}
 	if !strings.Contains(got.recent, `"searchGuard":true`) {
 		t.Errorf("recentFlights should expose the triggered guard for the status badge: %s", got.recent)
-	}
-}
-
-func TestSearchGuardConsoleBadge(t *testing.T) {
-	if !strings.Contains(logViewerHTML, `[空搜]`) || !strings.Contains(logViewerHTML, `f.searchGuard`) {
-		t.Error("Chinese finished-status cell should contain the red [空搜] badge driven by f.searchGuard")
-	}
-	en := renderLogViewerEN(logViewerHTML)
-	if !strings.Contains(en, `[empty-search]`) {
-		t.Error("English console should translate the badge to [empty-search]")
-	}
-	if strings.Contains(en, `[空搜]`) {
-		t.Error("Chinese empty-search badge leaked into the English console")
 	}
 }
 

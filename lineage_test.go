@@ -8,7 +8,6 @@ package main
 // that split is what makes sub-agent branches and rewinds visible instead of faking one sticky timeline.
 
 import (
-	"encoding/json"
 	"proxy429/internal/recorder"
 	"strings"
 	"testing"
@@ -171,28 +170,6 @@ func TestLineageDegenerateBodies(t *testing.T) {
 	f2 := regLineageFlight(t, 2, "s", []byte(`{"model":"m"}`))
 	if len(f2.MsgHashes) != 0 || f2.LastFlight != 0 {
 		t.Errorf("无 messages/input 不应产生血缘：hashes=%d last=%d", len(f2.MsgHashes), f2.LastFlight)
-	}
-}
-
-func TestFlightInfoLastJSON(t *testing.T) {
-	b, _ := json.Marshal(flightInfo{ID: 80, Last: 73})
-	if !strings.Contains(string(b), `"last":73`) {
-		t.Errorf("flightInfo 应携带 last 字段：%s", b)
-	}
-	b2, _ := json.Marshal(flightInfo{ID: 80})
-	if strings.Contains(string(b2), "last") {
-		t.Errorf("无父流应省略 last 字段：%s", b2)
-	}
-}
-
-func TestLogViewerLineageLastTag(t *testing.T) {
-	// The web # column renders the parent tag compactly as #N<-M (HTML-escaped as &lt;- in innerHTML
-	// contexts) and the JS reads the last field from both flight lists.
-	if !strings.Contains(logViewerHTML, "&lt;-") {
-		t.Error("页面缺少 <- 父流标记渲染")
-	}
-	if !strings.Contains(logViewerHTML, "f.last") {
-		t.Error("页面 JS 未读取 last 字段")
 	}
 }
 

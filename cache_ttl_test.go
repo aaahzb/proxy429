@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"proxy429/internal/logview"
 	"proxy429/internal/recorder"
 	"strings"
 	"testing"
@@ -128,7 +129,7 @@ func TestRecentFlightsCacheRefreshed(t *testing.T) {
 		req := httptest.NewRequest("GET", "/__recentflights", nil)
 		req.RemoteAddr = "127.0.0.1:1" // isLocalRequest requires localhost
 		rec := httptest.NewRecorder()
-		recentFlightsHandler(rec, req)
+		logview.RecentFlightsHandler(rec, req)
 		var d struct {
 			List []struct {
 				CacheAge string `json:"cacheAge"`
@@ -193,7 +194,7 @@ func TestRecentFlightsCacheAgeNoNegative(t *testing.T) {
 	req := httptest.NewRequest("GET", "/__recentflights", nil)
 	req.RemoteAddr = "127.0.0.1:1"
 	rec := httptest.NewRecorder()
-	recentFlightsHandler(rec, req)
+	logview.RecentFlightsHandler(rec, req)
 	var d struct {
 		List []struct {
 			CacheAge string `json:"cacheAge"`

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/logview"
 	"proxy429/internal/recorder"
 	"strings"
 	"sync"
@@ -533,9 +534,9 @@ func runSearchE2EFull(t *testing.T, rr config.RouteRule, sf *config.SearchRoute,
 	// for status-page badge assertions.
 	for i := 0; i < 100; i++ {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, recentFlightsPath, nil)
+		req := httptest.NewRequest(http.MethodGet, logview.RecentFlightsPath, nil)
 		req.RemoteAddr = "127.0.0.1:1" // The console handlers gate on a local peer
-		recentFlightsHandler(rec, req)
+		logview.RecentFlightsHandler(rec, req)
 		recent = rec.Body.String()
 		if strings.Contains(recent, `"searchPrompt"`) {
 			break

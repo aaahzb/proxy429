@@ -721,39 +721,6 @@ func TestClearStatsHeat(t *testing.T) {
 	}
 }
 
-// TestLogDataHeat pins the console contract: /__logs/data carries heatBase (the absolute slot number of
-// heat[0]) and a 192-entry heat array ordered oldest-first, each entry
-// [requests, output tokens, input tokens, bytes up, bytes down].
-func TestLogDataHeat(t *testing.T) {
-	recorder.HeatMu.Lock()
-	recorder.Heat = [recorder.HeatSlots]recorder.HeatSlot{}
-	recorder.HeatMu.Unlock()
-	now := time.Now()
-	recorder.HeatAdd(now, 3, 30, 300, 3000, 30000)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/__logs/data", nil)
-	req.RemoteAddr = "127.0.0.1:1234" // isLocalRequest gate
-	logDataHandler(rec, req)
-	var d struct {
-		HeatBase int64      `json:"heatBase"`
-		Heat     [][5]int64 `json:"heat"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
-		t.Fatalf("logData JSON: %v", err)
-	}
-	cur := now.Unix() / 900
-	if d.HeatBase != cur-recorder.HeatSlots+1 {
-		t.Errorf("heatBase=%d, want %d", d.HeatBase, cur-recorder.HeatSlots+1)
-	}
-	if len(d.Heat) != recorder.HeatSlots {
-		t.Fatalf("heat 长度=%d, want %d", len(d.Heat), recorder.HeatSlots)
-	}
-	if got := d.Heat[recorder.HeatSlots-1]; got != [5]int64{3, 30, 300, 3000, 30000} {
-		t.Errorf("最新槽=%v, want [3 30 300 3000 30000]", got)
-	}
-}
-
 // TestMarkClientGone499 verifies archived status codes follow upstream bookkeeping: 499 only asks "did the upstream finish sending"
 // (delivered), consistent with the upstream provider's backend view; local errors and non-200 statuses are unaffected.
 func TestMarkClientGone499(t *testing.T) {
@@ -1239,39 +1206,6 @@ func TestClassifierHitCounting(t *testing.T) {
 	check(6, 4, 3, 2, 3, 2, "ordinary request")
 }
 
-// TestLogDataClassifierSplit verifies /__logs/data exposes the per-source classifier counters
-// (the status card's hover tooltip / click modal read them for the per-source breakdown).
-func TestLogDataClassifierSplit(t *testing.T) {
-	resetStats()
-	recorder.Stats.ClassifierHits.Store(5)
-	recorder.Stats.ClassifierRewrites.Store(3)
-	recorder.Stats.ClassifierHitsCC.Store(3)
-	recorder.Stats.ClassifierRewritesCC.Store(1)
-	recorder.Stats.ClassifierHitsCodex.Store(2)
-	recorder.Stats.ClassifierRewritesCodex.Store(2)
-
-	req := httptest.NewRequest("GET", "/__logs/data", nil)
-	req.RemoteAddr = "127.0.0.1:1234" // isLocalRequest gate
-	rec := httptest.NewRecorder()
-	logDataHandler(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("status=%d, want 200", rec.Code)
-	}
-	var d map[string]interface{}
-	if err := json.NewDecoder(rec.Body).Decode(&d); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	for k, want := range map[string]float64{
-		"classifiers": 5, "classifierNoThink": 3,
-		"classifiersCC": 3, "classifierRewritesCC": 1,
-		"classifiersCodex": 2, "classifierRewritesCodex": 2,
-	} {
-		if got, ok := d[k].(float64); !ok || got != want {
-			t.Errorf("%s=%v, want %v", k, d[k], want)
-		}
-	}
-}
-
 // topLevelKeys extracts the key order of a JSON top-level object.
 func topLevelKeys(t *testing.T, b []byte) []string {
 	t.Helper()
@@ -1533,69 +1467,6 @@ func TestForwardNoStopBadge(t *testing.T) {
 	}
 	if f := run(sseHead, "text/event-stream", true); f.NoStop {
 		t.Error("下游取消导致的断流（499 场景）不应置 noStop")
-	}
-}
-
-// TestRecentFlightsNoStopField verifies the finished-streams JSON carries the noStop flag for the web badge.
-func TestRecentFlightsNoStopField(t *testing.T) {
-	resetStats()
-	oldFinished := recorder.Finished
-	defer func() { recorder.Finished = oldFinished }()
-	recorder.Finished = []recorder.FinishedFlight{{ID: 1, NoStop: true}}
-
-	req := httptest.NewRequest("GET", "/__recentflights", nil)
-	req.RemoteAddr = "127.0.0.1:1"
-	rec := httptest.NewRecorder()
-	recentFlightsHandler(rec, req)
-	var d struct {
-		List []struct {
-			NoStop bool `json:"noStop"`
-		} `json:"list"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
-		t.Fatalf("响应非 JSON: %v", err)
-	}
-	if len(d.List) != 1 || !d.List[0].NoStop {
-		t.Errorf("recentFlights 应带 noStop:true，实际 %s", rec.Body.String())
-	}
-}
-
-// TestCodexSetupDropsPreferredAuthMethod: newer Codex removed preferred_auth_method (unrecognized-key startup
-// warning), and the desktop app still honors it by forcing OpenAI API-key auth — users without any OpenAI account
-// get a false not-logged-in wall. So the setup scripts must STOP writing it (no TARGET_KEYS entry, no value arm, no
-// summary line) and instead actively DELETE it from an existing config (DEL_A), while forced_login_method stays.
-func TestCodexSetupDropsPreferredAuthMethod(t *testing.T) {
-	ps1, sh := string(codexSetupPS1), string(codexSetupSH)
-	if strings.Contains(ps1, `'preferred_auth_method'`) && strings.Contains(ps1, `@('model','model_provider','preferred_auth_method'`) {
-		t.Error("ps1: TARGET_KEYS still manages preferred_auth_method")
-	}
-	if !strings.Contains(ps1, `@('model','model_provider','forced_login_method',`) {
-		t.Error("ps1: TARGET_KEYS should start model, model_provider, forced_login_method")
-	}
-	if !strings.Contains(sh, `TARGET_KEYS='model model_provider forced_login_method model_reasoning_effort model_catalog_json'`) {
-		t.Error("sh: TARGET_KEYS should drop preferred_auth_method and keep forced_login_method")
-	}
-	for name, src := range map[string]string{"ps1": ps1, "sh": sh} {
-		if strings.Contains(src, `preferred_auth_method  = "apikey"`) {
-			t.Errorf("%s: summary block still prints preferred_auth_method", name)
-		}
-		if strings.Contains(src, `'preferred_auth_method'  { return`) || strings.Contains(src, `preferred_auth_method)   printf`) {
-			t.Errorf("%s: value arm still writes preferred_auth_method", name)
-		}
-	}
-	if !strings.Contains(ps1, `'preferred_auth_method' = '`) {
-		t.Error("ps1: DEL_A should carry preferred_auth_method with a deletion reason")
-	}
-	if !strings.Contains(sh, `DEL_A='oss_provider openai_base_url preferred_auth_method'`) {
-		t.Error("sh: DEL_A should carry preferred_auth_method")
-	}
-	if !strings.Contains(sh, `preferred_auth_method)             printf`) {
-		t.Error("sh: del_why should carry a preferred_auth_method reason")
-	}
-	for name, src := range map[string]string{"ps1": ps1, "sh": sh} {
-		if !strings.Contains(src, `forced_login_method`) {
-			t.Errorf("%s: forced_login_method must stay", name)
-		}
 	}
 }
 

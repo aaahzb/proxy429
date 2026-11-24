@@ -64,16 +64,16 @@ The script is **baked and served live by this proxy** from the page's selected d
 
 The model dropdown lists **one representative name per `routes` pattern** (when `route.model` itself matches the pattern, the real name is used; otherwise the pattern with `*` stripped — this proxy's `*` can match zero characters, so that name always hits; a pure `*` catch-all route is fixed as `Fallback` — it catches any model name, and showing a real model name in the menu would mislead; hence `Fallback` is a reserved name: no other route's `pattern` may be literally `Fallback` (a colliding route neither takes effect nor enters the menu, and the web page warns in red; wildcards like `Fall*` are unaffected). Also, with `fast_route` configured and carrying a `model`, the menu gains a literal `fast_route` entry that takes the fast lane when selected (equivalent to sending `speed:"fast"`); `fast_route` is likewise a reserved name — `pattern` may not be literally `fast_route`. The script writes **all** these names into Codex's `/model` menu (`model_catalog_json` points at `~/.codex/proxy429-models.json`); the dropdown selection becomes the default `model` in `config.toml`; afterwards `/model` inside Codex switches anytime, taking the route of the corresponding pattern.
 
-**Repo scripts (interactive)**: `codex-setup.ps1` (Windows) and `codex-setup.sh` (macOS/Linux) at the repo root are the interactive versions (menus for model/address/restore; the script UI is all-English, avoiding some systems' Chinese encoding issues) with the same effect (structure modeled on DeepSeek's official Codex install script: backup first, surgical TOML rewrites, atomic write after validation):
+**Repo scripts (interactive)**: `codex-setup.ps1` (Windows) and `codex-setup.sh` (macOS/Linux) under `internal/logview/scripts/` in the repo are the interactive versions (menus for model/address/restore; the script UI is all-English, avoiding some systems' Chinese encoding issues) with the same effect (structure modeled on DeepSeek's official Codex install script: backup first, surgical TOML rewrites, atomic write after validation):
 
 ```powershell
 # Windows PowerShell
-powershell -ExecutionPolicy Bypass -File .\codex-setup.ps1
+powershell -ExecutionPolicy Bypass -File .\internal\logview\scripts\codex-setup.ps1
 ```
 
 ```bash
 # macOS / Linux
-bash ./codex-setup.sh
+bash ./internal/logview/scripts/codex-setup.sh
 ```
 
 Pick a model from the menu (`gpt-5-codex` / `claude-fable-5` / custom model name); option 9 restores. What the script does:

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/logview"
 	"proxy429/internal/recorder"
 	"proxy429/internal/translate"
 	"strconv"
@@ -37,7 +38,7 @@ func serveFlightSide(t *testing.T, id uint64, side string, full bool) (int, stri
 	r := httptest.NewRequest(http.MethodGet, url, nil)
 	r.RemoteAddr = "127.0.0.1:43210" // httptest defaults to 192.0.2.1, which isLocalRequest rejects
 	rec := httptest.NewRecorder()
-	flightHandler(rec, r)
+	logview.FlightHandler(rec, r)
 	res := rec.Result()
 	defer res.Body.Close()
 	body, err := io.ReadAll(res.Body)
@@ -57,7 +58,7 @@ func serveFlightReqSide(t *testing.T, id uint64, side string) (int, string, []by
 	r := httptest.NewRequest(http.MethodGet, url, nil)
 	r.RemoteAddr = "127.0.0.1:43210"
 	rec := httptest.NewRecorder()
-	flightReqHandler(rec, r)
+	logview.FlightReqHandler(rec, r)
 	res := rec.Result()
 	defer res.Body.Close()
 	body, err := io.ReadAll(res.Body)

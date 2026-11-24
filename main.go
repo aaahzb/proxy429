@@ -1,7 +1,6 @@
 package main
 
 import (
-	_ "embed"
 	"encoding/json"
 	"flag"
 	"io"
@@ -16,6 +15,7 @@ import (
 
 	"proxy429/internal/config"
 	"proxy429/internal/jsonutil"
+	"proxy429/internal/logview"
 	"proxy429/internal/platform"
 	"proxy429/internal/recorder"
 	"proxy429/internal/translate"
@@ -24,16 +24,6 @@ import (
 // Version is the build stamp, injected by build.sh via -ldflags "-X main.Version=...": "release vX.Y.Z.N" when
 // HEAD is exactly a version tag (CD tag builds), otherwise "beta <git-short>-<HHMM>"; bare go builds show "dev".
 var Version = "dev"
-
-// codexSetupPS1 / codexSetupSH are the embedded Codex one-click setup script templates (Windows / macOS·Linux),
-// served via /__codexsetup.ps1 and /__codexsetup.sh: the server bakes their BAKED anchors per query params
-// (model/base/catalog) before sending; the web console only hands the user a one-line fetch command (same format as DeepSeek's docs).
-//
-//go:embed codex-setup.ps1
-var codexSetupPS1 []byte
-
-//go:embed codex-setup.sh
-var codexSetupSH []byte
 
 // resolveProgramUILang determines the web console UI language at startup: program-settings.txt's ui-lang
 // wins; otherwise a one-time migration moves any legacy ui_lang left in config files into program-settings.txt
@@ -133,6 +123,17 @@ func switchConfig(newPath string) error {
 	return nil
 }
 
+// configureConsole wires the web console's callbacks into the proxy core; must run before the server serves.
+func configureConsole() {
+	logview.Configure(logview.Deps{
+		Version:        Version,
+		ReloadConfig:   reloadConfig,
+		SwitchConfig:   switchConfig,
+		ClearStats:     func() { clearStats(config.Current()) },
+		TrayCfgChanged: notifyTrayCfgChanged,
+	})
+}
+
 // noTrayFlag selects headless mode: no system tray (CI runners and smoke rigs have no tray to click).
 // The HTTP server and web console still run; the process stops on Ctrl+C / SIGTERM like a bare server.
 var noTrayFlag = flag.Bool("no-tray", false, "run without the system tray (headless/CI); stop with Ctrl+C")
@@ -189,6 +190,8 @@ func main() {
 	log.Printf("proxy started %s: listening http://%s -> forwarding to %s (max retries %d, classifier thinking: cc=%q codex=%q)",
 		Version, c.Listen, c.Upstream, c.MaxRetries, config.ClassifierThinkingModeFor(c, config.ClassifierCC), config.ClassifierThinkingModeFor(c, config.ClassifierCodex))
 
+	// Wire the web console to the proxy core before the server starts serving.
+	configureConsole()
 	// The HTTP server runs in a goroutine: the tray event loop (systray.Run) must occupy the main thread (macOS requires UI on the main thread),
 	// so the main thread's blocking spot belongs to the tray and HTTP runs in the background.
 	go runServer(c)
@@ -223,33 +226,7 @@ func main() {
 // runServer registers the handlers and listens; a listen failure (e.g. port in use) log.Fatals the whole process.
 func runServer(c *config.Config) {
 	// The web console hangs on the same port under /__* (localhost only); Claude Code uses /v1/... — no conflict.
-	// Must be registered before "/": Go's DefaultServeMux prefers exact matches over the / wildcard.
-	http.HandleFunc(logViewerPath, logViewerHandler)
-	http.HandleFunc(logDataPath, logDataHandler)
-	http.HandleFunc(configPath, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			configPostHandler(w, r)
-		} else {
-			configGetHandler(w, r)
-		}
-	})
-	http.HandleFunc(reloadPath, reloadHandler)
-	http.HandleFunc(lazyPreviewPath, LazyApplyPreviewHandler)
-	http.HandleFunc(configsPath, configsHandler)
-	http.HandleFunc(switchPath, switchHandler)
-	http.HandleFunc(newConfigPath, newConfigHandler)
-	http.HandleFunc(codexSetupPS1Path, codexScriptHandler(codexSetupPS1, codexPS1Anchors, false))
-	http.HandleFunc(codexSetupSHPath, codexScriptHandler(codexSetupSH, codexSHAnchors, true))
-	http.HandleFunc(renameConfigPath, renameConfigHandler)
-	http.HandleFunc(delConfigPath, delConfigHandler)
-	http.HandleFunc(resetStatsPath, resetStatsHandler)
-	http.HandleFunc(clearLogsPath, clearLogsHandler)
-	http.HandleFunc(flightPath, flightHandler)
-	http.HandleFunc(flightReqPath, flightReqHandler)
-	http.HandleFunc(recentFlightsPath, recentFlightsHandler)
-	http.HandleFunc(finishedCapPath, finishedCapHandler)
-	http.HandleFunc(fullStorePath, fullStoreHandler)
-	http.HandleFunc(uiLangPath, uiLangHandler)
+	logview.RegisterHandlers()
 	http.HandleFunc("/", handler)
 	// 活跃度热图：装载 48h 窗口内的持久化数据（缺失/损坏文件即从空开始），并启动每分钟脏落盘。
 	recorder.HeatLoad()

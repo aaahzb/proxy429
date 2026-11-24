@@ -1,4 +1,4 @@
-package main
+package logview
 
 import (
 	"io"
@@ -8,11 +8,11 @@ import (
 	"proxy429/internal/platform"
 )
 
-// LazyApplyPreviewHandler renders the edited config with lazyApply materialized, for the console's
+// lazyApplyPreviewHandler renders the edited config with lazyApply materialized, for the console's
 // "preview lazyApply" button. It never writes the file and never publishes a config: the body is the
 // editor's current text, and only the insertion-edited JSON is returned. Localhost only, like every
 // /__* route.
-func LazyApplyPreviewHandler(w http.ResponseWriter, r *http.Request) {
+func lazyApplyPreviewHandler(w http.ResponseWriter, r *http.Request) {
 	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return

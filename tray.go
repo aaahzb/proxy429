@@ -2,6 +2,7 @@ package main
 
 import (
 	"proxy429/internal/config"
+	"proxy429/internal/logview"
 	"proxy429/internal/platform"
 	"proxy429/internal/recorder"
 
@@ -167,7 +168,7 @@ func openLogViewer() {
 	if c == nil {
 		return
 	}
-	openURL("http://" + c.Listen + logViewerPath)
+	openURL("http://" + c.Listen + logview.ViewerPath)
 }
 
 // openURL opens a URL or file with the system default handler: macOS=open, Windows=cmd start, Linux=xdg-open.

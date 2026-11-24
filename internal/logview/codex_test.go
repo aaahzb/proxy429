@@ -1,4 +1,4 @@
-package main
+package logview
 
 // codex-setup.ps1 / codex-setup.sh are published both as standalone scripts and embedded (codexSetupPS1/codexSetupSH),
 // served via /__codexsetup.ps1 and /__codexsetup.sh: the server bakes BAKED anchors per the query parameters (model/base/catalog)
@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -199,5 +200,44 @@ func TestCodexScriptHandlerLocalOnly(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/__codexsetup.ps1", nil))
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("非本机访问状态码 = %d（应为 403）", rec.Code)
+	}
+}
+
+// TestCodexSetupDropsPreferredAuthMethod: newer Codex removed preferred_auth_method (unrecognized-key startup
+// warning), and the desktop app still honors it by forcing OpenAI API-key auth — users without any OpenAI account
+// get a false not-logged-in wall. So the setup scripts must STOP writing it (no TARGET_KEYS entry, no value arm, no
+// summary line) and instead actively DELETE it from an existing config (DEL_A), while forced_login_method stays.
+func TestCodexSetupDropsPreferredAuthMethod(t *testing.T) {
+	ps1, sh := string(codexSetupPS1), string(codexSetupSH)
+	if strings.Contains(ps1, `'preferred_auth_method'`) && strings.Contains(ps1, `@('model','model_provider','preferred_auth_method'`) {
+		t.Error("ps1: TARGET_KEYS still manages preferred_auth_method")
+	}
+	if !strings.Contains(ps1, `@('model','model_provider','forced_login_method',`) {
+		t.Error("ps1: TARGET_KEYS should start model, model_provider, forced_login_method")
+	}
+	if !strings.Contains(sh, `TARGET_KEYS='model model_provider forced_login_method model_reasoning_effort model_catalog_json'`) {
+		t.Error("sh: TARGET_KEYS should drop preferred_auth_method and keep forced_login_method")
+	}
+	for name, src := range map[string]string{"ps1": ps1, "sh": sh} {
+		if strings.Contains(src, `preferred_auth_method  = "apikey"`) {
+			t.Errorf("%s: summary block still prints preferred_auth_method", name)
+		}
+		if strings.Contains(src, `'preferred_auth_method'  { return`) || strings.Contains(src, `preferred_auth_method)   printf`) {
+			t.Errorf("%s: value arm still writes preferred_auth_method", name)
+		}
+	}
+	if !strings.Contains(ps1, `'preferred_auth_method' = '`) {
+		t.Error("ps1: DEL_A should carry preferred_auth_method with a deletion reason")
+	}
+	if !strings.Contains(sh, `DEL_A='oss_provider openai_base_url preferred_auth_method'`) {
+		t.Error("sh: DEL_A should carry preferred_auth_method")
+	}
+	if !strings.Contains(sh, `preferred_auth_method)             printf`) {
+		t.Error("sh: del_why should carry a preferred_auth_method reason")
+	}
+	for name, src := range map[string]string{"ps1": ps1, "sh": sh} {
+		if !strings.Contains(src, `forced_login_method`) {
+			t.Errorf("%s: forced_login_method must stay", name)
+		}
 	}
 }
