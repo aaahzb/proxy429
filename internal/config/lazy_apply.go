@@ -156,6 +156,51 @@ func EffectiveFallbackSearchSettings(c *Config, rr *RouteRule, sf *SearchRoute) 
 	return &eff
 }
 
+// applyLazyApplyConnections materializes lazyApply's connection defaults (url / api / model) into every
+// route-like object that leaves the key unwritten, so routes may carry only pattern/effort and inherit
+// the upstream from one place. Key presence decides: a written key wins even when empty — an explicit
+// "" is simply not inherited and keeps the object's empty-value behavior ("api": "" passes the client's
+// token through, "model": "" keeps the client's model, "url": "" means no reroute: a matched routes[]
+// entry forwards to the default upstream and the dedicated-route lanes stay disengaged) — and a
+// noLazyApply:true object inherits nothing. Runs once at parse time; the proxy keeps reading plain
+// object fields.
+func applyLazyApplyConnections(c *Config) {
+	la := c.LazyApply
+	if la == nil {
+		return
+	}
+	fill := func(p ConfigPresence, optOut bool, url, api, model *string) {
+		if optOut {
+			return
+		}
+		if !p.Written("url", *url != "") {
+			*url = la.URL
+		}
+		if !p.Written("api", *api != "") {
+			*api = la.API
+		}
+		if !p.Written("model", *model != "") {
+			*model = la.Model
+		}
+	}
+	for i := range c.Routes {
+		rr := &c.Routes[i]
+		fill(rr.Presence, rr.NoLazyApply, &rr.URL, &rr.API, &rr.Model)
+	}
+	if cr := c.ClassifierRoute; cr != nil {
+		fill(cr.Presence, cr.NoLazyApply, &cr.URL, &cr.API, &cr.Model)
+	}
+	if fr := c.FastRoute; fr != nil {
+		fill(fr.Presence, fr.NoLazyApply, &fr.URL, &fr.API, &fr.Model)
+	}
+	if mf := c.MultimodalFallback; mf != nil {
+		fill(mf.Presence, mf.NoLazyApply, &mf.URL, &mf.API, &mf.Model)
+	}
+	if sf := c.SearchFallback; sf != nil {
+		fill(sf.Presence, sf.NoLazyApply, &sf.URL, &sf.API, &sf.Model)
+	}
+}
+
 // EffectiveFallbackThinking resolves search_fallback.thinking for a request the fallback will serve:
 // explicit local > lazyApply > "". The hit route's thinking describes the route's own target model and
 // never participates once the request is diverted; the fallback's target is the model actually called.

@@ -235,7 +235,7 @@ func isVarName(s string) bool {
 // expansion, so $VAR references inside pattern arrays are already resolved. Single-string, missing, and null patterns
 // pass through untouched; an empty array or a non-string member is an error naming the route (1-based).
 func expandRoutePatterns(top map[string]json.RawMessage) error {
-	raw, ok := top["routes"]
+	key, raw, ok := findTopKey(top, "routes")
 	if !ok {
 		return nil
 	}
@@ -296,8 +296,23 @@ func expandRoutePatterns(top map[string]json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	top["routes"] = b
+	top[key] = b
 	return nil
+}
+
+// findTopKey returns the actual key and raw value for a top-level config key, matching case-insensitively
+// like encoding/json's field matching so "Routes" / "Fast_Route" resolve like their canonical spellings.
+// An exact match wins over a case variant.
+func findTopKey(top map[string]json.RawMessage, key string) (string, json.RawMessage, bool) {
+	if raw, ok := top[key]; ok {
+		return key, raw, true
+	}
+	for k, raw := range top {
+		if strings.EqualFold(k, key) {
+			return k, raw, true
+		}
+	}
+	return "", nil, false
 }
 
 // removedConfigKeys lists top-level config keys removed in this version, each with its migration hint. A config
@@ -347,7 +362,7 @@ func ParseConfig(data []byte) (*Config, []string, error) {
 	// silently disable a global default. Decode it separately so the error names the exact path.
 	var lazyApply *LazyApplyConfig
 	var lazyApplyPresence ConfigPresence
-	if raw, ok := top["lazyApply"]; ok {
+	if _, raw, ok := findTopKey(top, "lazyApply"); ok {
 		var err error
 		lazyApply, lazyApplyPresence, err = decodeLazyApply(raw)
 		if err != nil {
@@ -367,6 +382,7 @@ func ParseConfig(data []byte) (*Config, []string, error) {
 	}
 	c.LazyApply = lazyApply
 	attachConfigPresence(top, &c)
+	applyLazyApplyConnections(&c)
 	if err := ValidateConfigEnums(&c); err != nil {
 		return nil, nil, err
 	}
@@ -401,8 +417,9 @@ func keysPresence(m map[string]json.RawMessage) ConfigPresence {
 }
 
 // decodeLazyApply strictly decodes the top-level lazyApply object and its nested enhance_search object.
-// Unknown fields (including connection fields such as url/api/model/pattern/url_response_api) are rejected
-// with a path-specific error; the rest of the configuration keeps its existing tolerant decoding.
+// Unknown fields are rejected with a path-specific error; the rest of the configuration keeps its existing
+// tolerant decoding. url/api/model are accepted as connection defaults; pattern and url_response_api stay
+// rejected (a global pattern is meaningless, and a Responses-passthrough URL per route stays per route).
 func decodeLazyApply(raw json.RawMessage) (*LazyApplyConfig, ConfigPresence, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -436,7 +453,7 @@ func decodeLazyApply(raw json.RawMessage) (*LazyApplyConfig, ConfigPresence, err
 // receives the same Presence as its source object.
 func attachConfigPresence(top map[string]json.RawMessage, c *Config) {
 	attach := func(key string, dst *ConfigPresence) {
-		raw, ok := top[key]
+		_, raw, ok := findTopKey(top, key)
 		if !ok {
 			return
 		}
@@ -446,7 +463,7 @@ func attachConfigPresence(top map[string]json.RawMessage, c *Config) {
 		}
 		*dst = keysPresence(m)
 	}
-	if raw, ok := top["routes"]; ok {
+	if _, raw, ok := findTopKey(top, "routes"); ok {
 		var entries []json.RawMessage
 		if json.Unmarshal(raw, &entries) == nil {
 			for i := range c.Routes {

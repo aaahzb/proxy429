@@ -197,6 +197,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// 1.6 Route matching.
 	// Priority: classifier route > fast route > model route (by routes wildcard).
 	// On no match: upstream=c.Upstream, authToken="" (pass through the client's token, the original logic).
+	// A route-like object whose (post-lazyApply) url is empty means "no reroute": dedicated lanes stay
+	// disengaged and a matched routes[] entry keeps the default upstream.
 	f.SetStage(recorder.StageRoute)
 	upstream := c.Upstream
 	authToken := ""
@@ -211,7 +213,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	searchGuardEnabled := false // Effective route's noBullshitOnEmptyClaudeSearch; armed below only after the request marker is confirmed
 	if clsKind != config.ClassifierNone && c.ClassifierRoute != nil && c.ClassifierRoute.URL != "" {
 		// Classifier route: shunt safety-check requests to the designated upstream, saving main-model quota.
-		// (url empty = no reroute: a bare {"classifier_thinking":"off"} configures the thinking rewrite only.)
+		// (A url that is still empty after lazyApply materialization = no reroute: a bare
+		// {"classifier_thinking":"off"} configures the thinking rewrite only.)
 		cr := c.ClassifierRoute
 		upstream = cr.URL
 		authToken = cr.API
@@ -222,8 +225,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[route] #%d classifier%s %s -> %s (model %s -> %s)", f.ID, classifierTag(clsKind), origModel, cr.URL, origModel, cr.Model)
 		f.RouteReason.Store(recorder.RouteClassifier)
 		f.ConvAnchor = "classifier"
-	} else if c.FastRoute != nil && isFastRequest(body, r) {
+	} else if c.FastRoute != nil && c.FastRoute.URL != "" && isFastRequest(body, r) {
 		// Fast route: non-classifier requests detected with "speed":"fast" are shunted to the designated upstream.
+		// (A url that is still empty after lazyApply materialization = the lane stays disengaged: the request
+		// follows normal routing with the speed field untouched, as if no fast_route were configured.)
 		fr := c.FastRoute
 		upstream = fr.URL
 		authToken = fr.API
@@ -287,8 +292,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					mf := c.MultimodalFallback
 					// Search: hand the whole request to search_fallback, images or not (no evidence multimodal+search ever co-occur).
 					//    The standalone search sub-agent behavior (summary injection / thinking rewrite, single-request mode)
-					//    is resolved here and applied to the request body after the routing block.
-					if needSearch && sf != nil {
+					//    is resolved here and applied to the request body after the routing block. An empty (post-lazyApply)
+					//    url means the fallback is not engaged, so the request degrades to the route as if sf were absent.
+					if needSearch && sf != nil && sf.URL != "" {
 						applyFB(sf.URL, sf.API, sf.Model, "search-fallback", recorder.RouteSearch)
 						// Per field: route claudeSearch* > search_fallback > lazyApply > built-in.
 						effFB := config.EffectiveFallbackSearchSettings(c, rr, sf)
@@ -297,21 +303,25 @@ func handler(w http.ResponseWriter, r *http.Request) {
 						searchGuardEnabled = config.EffectiveSearchGuard(c, rr, sf)
 						break
 					}
-					// Pure images (no search): use multimodal_fallback when configured; search requests never land on mf (degrade to passthrough when there's no sf).
-					if needImage && mf != nil && !needSearch {
+					// Pure images (no search): use multimodal_fallback when configured and engaged (a url-less mf degrades like an absent one); search requests never land on mf (degrade to passthrough when there's no sf).
+					if needImage && mf != nil && mf.URL != "" && !needSearch {
 						applyFB(mf.URL, mf.API, mf.Model, "image-fallback", recorder.RouteMultimodal)
 						convFlag = config.EffectiveConvertOff2Low(c, mf.ConvertOff2Low, mf.Presence.Written("convertOff2Low", mf.ConvertOff2Low != ""), mf.NoLazyApply)
 						break
 					}
-					// Degrade: search without sf, or pure images without mf — pass through to the original route (the upstream handles it, possibly with an error).
+					// Degrade: search without a usable sf, or pure images without a usable mf — pass through to the original route (the upstream handles it, possibly with an error).
 				}
-				upstream = rr.URL
+				// An empty url means "no reroute": the matched entry still applies its API/model/behavior
+				// fields, but the request forwards to the default upstream.
+				if rr.URL != "" {
+					upstream = rr.URL
+				}
 				authToken = rr.API
 				if rr.Model != "" && rr.Model != origModel {
 					body = replaceModelValue(body, rr.Model)
 					targetModel = rr.Model
 				}
-				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.ID, origModel, rr.URL, origModel, rr.Model)
+				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.ID, origModel, upstream, origModel, rr.Model)
 				f.RouteReason.Store(recorder.RoutePattern)
 				convFlag = config.EffectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.Presence.Written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
 				routeEffort = rr.Effort          // Captured only here: fallback/classifier/fast/Responses-raw lanes are served otherwise and never inherit it (the pin site itself exempts the quiet off->low upgrade)
@@ -326,7 +336,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					synth := config.EffectiveDirectSearchSettings(c, rr)
 					searchInjectLevel, searchThinkLevel = config.ResolveSearchBehavior(synth)
 					if searchInjectLevel != "" || searchThinkLevel != "" {
-						log.Printf("[route] #%d enhanced search %s -> %s (model %s)", f.ID, origModel, rr.URL, rr.Model)
+						log.Printf("[route] #%d enhanced search %s -> %s (model %s)", f.ID, origModel, upstream, rr.Model)
 					}
 				}
 				break // Ordered: stop at the first hit
@@ -733,9 +743,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 		// Case C: normal response, passed through. First-byte latency / streaming duration / output_tokens enter the sliding window.
 		log.Printf("[response] passed through normally (%d attempts)", attempt+1)
-		// With fast_route configured, inject fake fast rate-limit headers into every normal response,
-		// so Claude Code's /fast pre-check believes fast mode is available.
-		if c.FastRoute != nil {
+		// With an engaged fast_route (non-empty url), inject fake fast rate-limit headers into every normal
+		// response, so Claude Code's /fast pre-check believes fast mode is available. A url-less fast_route
+		// is not engaged, so it must not advertise the availability either.
+		if c.FastRoute != nil && c.FastRoute.URL != "" {
 			now := time.Now().Format(time.RFC3339)
 			resp.Header.Set("anthropic-fast-output-tokens-remaining", "999999")
 			resp.Header.Set("anthropic-fast-input-tokens-remaining", "999999")

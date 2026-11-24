@@ -16,7 +16,7 @@ func mustParseLazy(t *testing.T, body string) *Config {
 }
 
 // TestLazyApplyStrictDecodeAndValidation locks the parser contract: lazyApply is strictly decoded (a typo
-// must not silently disable a global default), connection fields are rejected by name, nested
+// must not silently disable a global default), unsupported connection fields are rejected by name, nested
 // enhance_search is strict too, enums are validated, and null/absent mean "no defaults".
 func TestLazyApplyStrictDecodeAndValidation(t *testing.T) {
 	t.Run("all supported fields", func(t *testing.T) {
@@ -51,8 +51,16 @@ func TestLazyApplyStrictDecodeAndValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("connection and unknown fields rejected", func(t *testing.T) {
-		for _, key := range []string{"url", "api", "model", "pattern", "url_response_api", "bogus"} {
+	t.Run("connection fields accepted", func(t *testing.T) {
+		c := mustParseLazy(t, `{"upstream":"http://u","lazyApply":{"url":"http://d","api":"sk-d","model":"m-d"}}`)
+		la := c.LazyApply
+		if la == nil || la.URL != "http://d" || la.API != "sk-d" || la.Model != "m-d" {
+			t.Fatalf("connection defaults decoded wrong: %+v", la)
+		}
+	})
+
+	t.Run("unsupported connection and unknown fields rejected", func(t *testing.T) {
+		for _, key := range []string{"pattern", "url_response_api", "bogus"} {
 			body := `{"upstream":"http://u","lazyApply":{"` + key + `":"x"}}`
 			_, _, err := ParseConfig([]byte(body))
 			if err == nil || !strings.Contains(err.Error(), "lazyApply") {

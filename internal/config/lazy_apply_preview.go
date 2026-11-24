@@ -8,7 +8,8 @@ import (
 )
 
 // lazyApplyRouteKeys lists the fields a routes[] entry may inherit from lazyApply. Only fields the route
-// object already accepts are listed; connection fields (url/api/model/pattern/url_response_api) never inherit.
+// object already accepts are listed; the connection trio url/api/model inherits, while pattern and
+// url_response_api never do.
 var lazyApplyRouteKeys = []string{
 	"text_only",
 	"no_search",
@@ -18,6 +19,9 @@ var lazyApplyRouteKeys = []string{
 	"claudeSearchThinking",
 	"claudeSearchSummary",
 	"noBullshitOnEmptyClaudeSearch",
+	"url",
+	"api",
+	"model",
 }
 
 // lazyApplySearchFallbackKeys lists the fields search_fallback may inherit. A nested enhance_search never
@@ -31,6 +35,9 @@ var lazyApplySearchFallbackKeys = []string{
 	"claudeSearchThinking",
 	"claudeSearchSummary",
 	"noBullshitOnEmptyClaudeSearch",
+	"url",
+	"api",
+	"model",
 }
 
 // lazyApplyClassifierKeys lists the fields classifier_route may inherit.
@@ -38,10 +45,14 @@ var lazyApplyClassifierKeys = []string{
 	"classifier_thinking",
 	"classifier_thinking_cc",
 	"classifier_thinking_codex",
+	"url",
+	"api",
+	"model",
 }
 
-// lazyApplyConvertOnlyKeys is shared by fast_route and multimodal_fallback.
-var lazyApplyConvertOnlyKeys = []string{"convertOff2Low"}
+// lazyApplyFastImageKeys is shared by fast_route and multimodal_fallback: they accept the connection trio
+// and convertOff2Low, nothing else.
+var lazyApplyFastImageKeys = []string{"convertOff2Low", "url", "api", "model"}
 
 // jsonSpan is the half-open byte range [start,end) of one JSON value in the raw config text.
 type jsonSpan struct {
@@ -62,12 +73,35 @@ type jsonEdit struct {
 	text []byte
 }
 
+// winnerMember returns the member the config loader resolves for one logical top-level key: an exact
+// canonical spelling wins when written, otherwise the last case-insensitive match does (matching is
+// case-insensitive like encoding/json's field matching; duplicates follow last-wins). This mirrors
+// findTopKey's exact-first rule, so the preview annotates the same object the runtime read.
+func winnerMember(members []jsonMember, key string) *jsonMember {
+	var exact, folded *jsonMember
+	for i := range members {
+		m := &members[i]
+		switch {
+		case m.key == key:
+			exact = m
+		case strings.EqualFold(m.key, key):
+			folded = m
+		}
+	}
+	if exact != nil {
+		return exact
+	}
+	return folded
+}
+
 // MaterializeLazyApply proves what lazyApply does to the edited JSON and returns it with the inherited
 // keys appended in place. It validates the whole config first (ParseConfig), then works on the raw text
 // as a text edit: existing bytes keep their order and formatting, $VAR references stay unexpanded, and
 // the lazyApply object itself is kept, so copying the preview back into the editor is behavior-preserving.
 // Every route-like object receives the lazyApply keys it supports and does not already write;
-// noLazyApply:true skips an object entirely, and optional routes are never created.
+// noLazyApply:true skips an object entirely, and optional routes are never created. Top-level keys
+// resolve exactly like the loader's (exact spelling first, then case-insensitive), so a
+// "LazyApply" / "Routes" config proves the same values the runtime uses.
 func MaterializeLazyApply(data []byte) ([]byte, error) {
 	if _, _, err := ParseConfig(data); err != nil {
 		return nil, err
@@ -76,13 +110,7 @@ func MaterializeLazyApply(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var lazy *jsonMember
-	for i := range rootMembers {
-		if rootMembers[i].key == "lazyApply" {
-			lazy = &rootMembers[i]
-			break
-		}
-	}
+	lazy := winnerMember(rootMembers, "lazyApply")
 	if lazy == nil || isJSONNull(data[lazy.value.start:lazy.value.end]) {
 		return data, nil
 	}
@@ -93,13 +121,15 @@ func MaterializeLazyApply(data []byte) ([]byte, error) {
 	if len(lazyMembers) == 0 {
 		return data, nil
 	}
+	// Values are keyed case-insensitively (last wins), mirroring the tolerant decoder: lazyApply "URL"
+	// decodes into URL, so the preview must insert it as the canonical "url" too.
 	lazyValues := make(map[string][]byte, len(lazyMembers))
 	for _, m := range lazyMembers {
 		compact, err := compactJSON(data[m.value.start:m.value.end])
 		if err != nil {
 			return nil, err
 		}
-		lazyValues[m.key] = compact
+		lazyValues[strings.ToLower(m.key)] = compact
 	}
 	var edits []jsonEdit
 	fill := func(span jsonSpan, keys []string) error {
@@ -112,25 +142,34 @@ func MaterializeLazyApply(data []byte) ([]byte, error) {
 		}
 		return nil
 	}
-	for _, m := range rootMembers {
-		switch m.key {
-		case "search_fallback":
-			if err := fill(m.value, lazyApplySearchFallbackKeys); err != nil {
+	// Only the member the runtime resolves for each logical key receives insertions: with duplicate or
+	// case-variant spellings the typed decoder keeps the canonical spelling (map-key byte order leaves it
+	// last) and otherwise the last match. Rewriting a member the runtime ignores would prove a falsehood.
+	targets := make(map[*jsonMember][]string, 5)
+	for _, w := range []struct {
+		key  string
+		keys []string
+	}{
+		{"search_fallback", lazyApplySearchFallbackKeys},
+		{"fast_route", lazyApplyFastImageKeys},
+		{"multimodal_fallback", lazyApplyFastImageKeys},
+		{"classifier_route", lazyApplyClassifierKeys},
+	} {
+		if m := winnerMember(rootMembers, w.key); m != nil {
+			targets[m] = w.keys
+		}
+	}
+	routes := winnerMember(rootMembers, "routes")
+	// Iterate in document order so the collected edits stay ascending (applyJSONEdits requires it).
+	for i := range rootMembers {
+		m := &rootMembers[i]
+		if keys, ok := targets[m]; ok {
+			if err := fill(m.value, keys); err != nil {
 				return nil, err
 			}
-		case "fast_route":
-			if err := fill(m.value, lazyApplyConvertOnlyKeys); err != nil {
-				return nil, err
-			}
-		case "multimodal_fallback":
-			if err := fill(m.value, lazyApplyConvertOnlyKeys); err != nil {
-				return nil, err
-			}
-		case "classifier_route":
-			if err := fill(m.value, lazyApplyClassifierKeys); err != nil {
-				return nil, err
-			}
-		case "routes":
+			continue
+		}
+		if m == routes {
 			elems, err := arrayElements(data, m.value)
 			if err != nil {
 				return nil, err
@@ -157,19 +196,25 @@ func buildLazyInsertion(data []byte, span jsonSpan, keys []string, lazy map[stri
 	if err != nil {
 		return jsonEdit{}, false, err
 	}
+	// Keys compare case-insensitively, like encoding/json's field matching, so a non-canonical "URL"
+	// already-written key is never duplicated. A duplicate noLazyApply follows last-wins decoding.
 	present := make(map[string]bool, len(members))
+	optOut := false
 	for _, m := range members {
-		present[m.key] = true
-		if m.key == "noLazyApply" && jsonBoolTrue(bytes.TrimSpace(data[m.value.start:m.value.end])) {
-			return jsonEdit{}, false, nil
+		present[strings.ToLower(m.key)] = true
+		if strings.EqualFold(m.key, "noLazyApply") {
+			optOut = jsonBoolTrue(bytes.TrimSpace(data[m.value.start:m.value.end]))
 		}
+	}
+	if optOut {
+		return jsonEdit{}, false, nil
 	}
 	var entries []string
 	for _, key := range keys {
-		if present[key] {
+		if present[strings.ToLower(key)] {
 			continue
 		}
-		value, ok := lazy[key]
+		value, ok := lazy[strings.ToLower(key)]
 		if !ok {
 			continue
 		}

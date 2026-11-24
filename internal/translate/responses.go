@@ -151,7 +151,14 @@ func predictSearchTriple(c *config.Config, r *http.Request, model string) *Searc
 		if m == "" {
 			m = model
 		}
-		return NewSearchTriple(rr.URL, m, effectiveKey(rr.API, r))
+		url := rr.URL
+		if url == "" {
+			url = c.Upstream // A url-less entry keeps the default upstream (model/API still apply)
+		}
+		if url == "" {
+			return nil
+		}
+		return NewSearchTriple(url, m, effectiveKey(rr.API, r))
 	}
 	if c.Upstream == "" {
 		return nil
@@ -296,7 +303,9 @@ func serveResponses(next http.HandlerFunc, w http.ResponseWriter, r *http.Reques
 		// search_fallback is a route too: when this request will be diverted there (effective no_search +
 		// a server-side web_search tool), the thinking shape must describe the fallback's target model.
 		// The main handler makes the same decision after translation; predict it here with the same inputs.
-		if sf := c.SearchFallback; sf != nil && config.EffectiveRouteNoSearch(c, rr) && responsesHasWebSearch(body) && !responsesFastRouteTakes(c, origModel) {
+		// A url-less search_fallback is not engaged (the main handler degrades to the route), so it must
+		// not predict the fallback's thinking shape either.
+		if sf := c.SearchFallback; sf != nil && sf.URL != "" && config.EffectiveRouteNoSearch(c, rr) && responsesHasWebSearch(body) && !responsesFastRouteTakes(c, origModel) {
 			thinkStyle = config.EffectiveFallbackThinking(c, sf)
 		}
 	}

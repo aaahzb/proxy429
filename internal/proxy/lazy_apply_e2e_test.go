@@ -545,3 +545,172 @@ func TestLazyApplyResponsesFallbackThinkingE2E(t *testing.T) {
 		})
 	}
 }
+
+// TestLazyApplyEmptyConnectionURLE2E locks the unified empty-url contract through the real JSON parser: an
+// explicit "url":"" opts one object out of lazyApply.url while api/model still inherit. A matched routes[]
+// entry then forwards to the default upstream (200, not 502); the classifier/fast lanes and the
+// search/image fallbacks stay disengaged and the request follows normal routing; a url-less fast_route
+// also stops the fake fast rate-limit headers.
+func TestLazyApplyEmptyConnectionURLE2E(t *testing.T) {
+	resetStats()
+	var mu sync.Mutex
+	var defAuths, defModels []string
+	defMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var body map[string]interface{}
+		_ = json.Unmarshal(b, &body)
+		m, _ := body["model"].(string)
+		mu.Lock()
+		defAuths = append(defAuths, r.Header.Get("Authorization"))
+		defModels = append(defModels, m)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		io.WriteString(w, testSSEAllBlocks())
+	}))
+	defer defMock.Close()
+	lazyHits := 0
+	lazyMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		lazyHits++
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer lazyMock.Close()
+
+	cfg := fmt.Sprintf(`{
+		"upstream": %q,
+		"max_retries": 0,
+		"total_budget_s": 10,
+		"lazyApply": {"url": %q, "api": "sk-lazy", "model": "deepseek-flash"},
+		"routes": [{"pattern": "claude-*", "url": "", "no_search": true, "text_only": true}],
+		"classifier_route": {"url": "", "classifier_thinking_cc": "off"},
+		"fast_route": {"url": ""},
+		"search_fallback": {"url": ""},
+		"multimodal_fallback": {"url": ""}
+	}`, defMock.URL, lazyMock.URL)
+	c, _, err := config.ParseConfig([]byte(cfg))
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	config.Store(c)
+	defer config.Store(&config.Config{})
+	proxy := httptest.NewServer(http.HandlerFunc(handler))
+	defer proxy.Close()
+
+	post := func(body string) *http.Response {
+		t.Helper()
+		resp, err := http.Post(proxy.URL+"/v1/messages", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("status = %d, want 200 (an empty url after lazyApply means no reroute, not a missing upstream)", resp.StatusCode)
+		}
+		return resp
+	}
+	resp := post(`{"model":"claude-opus-4-8","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if got := resp.Header.Get("anthropic-fast-output-tokens-remaining"); got != "" {
+		t.Errorf("url-less fast_route must not advertise fast availability, got header %q", got)
+	}
+	post(`{"model":"claude-sonnet-5","max_tokens":64,"stream":true,"system":"You are a security monitor. Check this.","messages":[{"role":"user","content":"hi"}]}`)
+	post(`{"model":"claude-opus-4-8","max_tokens":64,"stream":true,"speed":"fast","messages":[{"role":"user","content":"hi"}]}`)
+	post(searchSubagentReq)
+	post(`{"model":"claude-opus-4-8","stream":true,"max_tokens":64,"messages":[{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}]}]}`)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if lazyHits != 0 {
+		t.Errorf("explicit empty urls must never reach the lazyApply upstream, got %d hits", lazyHits)
+	}
+	if len(defAuths) != 5 {
+		t.Fatalf("default upstream hits = %d, want 5 (plain route, classifier, fast, search, image all degrade to the route)", len(defAuths))
+	}
+	for i, a := range defAuths {
+		if a != "Bearer sk-lazy" {
+			t.Errorf("hit %d Authorization = %q, want the inherited api", i, a)
+		}
+	}
+	for i, m := range defModels {
+		if m != "deepseek-flash" {
+			t.Errorf("hit %d model = %q, want the inherited model rewrite", i, m)
+		}
+	}
+}
+
+// TestLazyApplyConnectionE2E locks the connection-default shortcut through the real JSON parser: with
+// url/api/model written once inside lazyApply, a routes[] entry may carry only pattern/effort, a
+// classifier_route and an empty fast_route inherit the same upstream, and the inherited api reaches the
+// upstream as the Bearer token. $VAR references work inside the lazyApply connection fields.
+func TestLazyApplyConnectionE2E(t *testing.T) {
+	resetStats()
+	var mu sync.Mutex
+	var auths, models []string
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var body map[string]interface{}
+		_ = json.Unmarshal(b, &body)
+		mu.Lock()
+		auths = append(auths, r.Header.Get("Authorization"))
+		m, _ := body["model"].(string)
+		models = append(models, m)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		io.WriteString(w, testSSEAllBlocks())
+	}))
+	defer mock.Close()
+
+	cfg := fmt.Sprintf(`{
+		"upstream": "http://no-default.example.com",
+		"vars": {"U": %q, "K": "sk-lazy", "M": "deepseek-flash"},
+		"max_retries": 0,
+		"total_budget_s": 10,
+		"lazyApply": {"url": "$U", "api": "$K", "model": "$M"},
+		"routes": [{"pattern": "claude-opus*", "effort": "max"}],
+		"classifier_route": {"classifier_thinking_cc": "off"},
+		"fast_route": {}
+	}`, mock.URL)
+	c, _, err := config.ParseConfig([]byte(cfg))
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	config.Store(c)
+	defer config.Store(&config.Config{})
+	proxy := httptest.NewServer(http.HandlerFunc(handler))
+	defer proxy.Close()
+
+	post := func(body string) {
+		t.Helper()
+		resp, err := http.Post(proxy.URL+"/v1/messages", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("status = %d, want 200 (body: %s)", resp.StatusCode, body)
+		}
+	}
+	post(`{"model":"claude-opus-4-8","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	post(`{"model":"claude-sonnet-5","max_tokens":64,"stream":true,"system":"You are a security monitor. Check this.","messages":[{"role":"user","content":"hi"}]}`)
+	post(`{"model":"claude-opus-4-8","max_tokens":64,"stream":true,"speed":"fast","messages":[{"role":"user","content":"hi"}]}`)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(auths) != 3 {
+		t.Fatalf("upstream hits = %d, want 3 (route + classifier + fast all inherit the lazyApply url)", len(auths))
+	}
+	for i, a := range auths {
+		if a != "Bearer sk-lazy" {
+			t.Errorf("hit %d Authorization = %q, want the inherited api", i, a)
+		}
+	}
+	for i, m := range models {
+		if m != "deepseek-flash" {
+			t.Errorf("hit %d model = %q, want the inherited model rewrite", i, m)
+		}
+	}
+}

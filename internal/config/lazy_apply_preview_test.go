@@ -37,6 +37,20 @@ func lazyPreviewObject(t *testing.T, top map[string]json.RawMessage, key string)
 	return obj
 }
 
+// behaviorInheritedKeys drops the connection trio from an inheritance list: this test's lazyApply block
+// writes no connection defaults, so url/api/model must never appear in its preview.
+func behaviorInheritedKeys(list []string) []string {
+	out := make([]string, 0, len(list))
+	for _, k := range list {
+		switch k {
+		case "url", "api", "model":
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
 // TestMaterializeLazyApply locks the mechanical preview: supported keys are inserted into every
 // route-like object that does not already write them, noLazyApply skips an object entirely, explicit
 // false / "" / null survive, optional routes are never created, and $VAR references stay unexpanded.
@@ -79,10 +93,18 @@ func TestMaterializeLazyApply(t *testing.T) {
 		t.Fatalf("preview routes = %d, want 3", len(routes))
 	}
 
-	// Route a: every supported lazy key is inserted.
-	for _, key := range lazyApplyRouteKeys {
+	// Route a: every supported lazy key is inserted, but connection keys the block never set are not.
+	for _, key := range behaviorInheritedKeys(lazyApplyRouteKeys) {
 		if _, ok := routes[0][key]; !ok {
 			t.Errorf("route a is missing inherited key %q: %v", key, routes[0])
+		}
+	}
+	if got := string(routes[0]["url"]); got != `"http://a"` {
+		t.Errorf("route a url = %s, want its own value kept", got)
+	}
+	for _, key := range []string{"api", "model"} {
+		if _, ok := routes[0][key]; ok {
+			t.Errorf("route a must not gain connection key %q the lazyApply block did not set", key)
 		}
 	}
 	if string(routes[0]["text_only"]) != "true" || string(routes[0]["claudeSearchThinking"]) != `"$TH"` {
@@ -110,7 +132,7 @@ func TestMaterializeLazyApply(t *testing.T) {
 
 	// search_fallback receives its supported fields; fast_route opted out; no multimodal route is created.
 	sf := lazyPreviewObject(t, top, "search_fallback")
-	for _, key := range lazyApplySearchFallbackKeys {
+	for _, key := range behaviorInheritedKeys(lazyApplySearchFallbackKeys) {
 		if _, ok := sf[key]; !ok {
 			t.Errorf("search_fallback is missing inherited key %q: %v", key, sf)
 		}
@@ -123,7 +145,7 @@ func TestMaterializeLazyApply(t *testing.T) {
 		t.Error("lazyApply must not create a missing optional route")
 	}
 	cr := lazyPreviewObject(t, top, "classifier_route")
-	for _, key := range lazyApplyClassifierKeys {
+	for _, key := range behaviorInheritedKeys(lazyApplyClassifierKeys) {
 		if _, ok := cr[key]; !ok {
 			t.Errorf("classifier_route is missing inherited key %q: %v", key, cr)
 		}
@@ -141,8 +163,9 @@ func lazyApplySnapshot(c *Config) string {
 	for i := range c.Routes {
 		rr := &c.Routes[i]
 		inject, think := ResolveSearchBehavior(EffectiveDirectSearchSettings(c, rr))
-		fmt.Fprintf(&b, "route%d text=%v no_search=%v thinking=%q conv=%q direct=(%q,%q) guardDirect=%v guardFallback=%v\n",
-			i, EffectiveRouteTextOnly(c, rr), EffectiveRouteNoSearch(c, rr), EffectiveRouteThinking(c, rr),
+		fmt.Fprintf(&b, "route%d conn=(%q,%q,%q) text=%v no_search=%v thinking=%q conv=%q direct=(%q,%q) guardDirect=%v guardFallback=%v\n",
+			i, rr.URL, rr.API, rr.Model,
+			EffectiveRouteTextOnly(c, rr), EffectiveRouteNoSearch(c, rr), EffectiveRouteThinking(c, rr),
 			conv(rr.ConvertOff2Low, rr.Presence.Written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply),
 			inject, think, EffectiveSearchGuard(c, rr, nil), EffectiveSearchGuard(c, rr, c.SearchFallback))
 		if c.SearchFallback != nil {
@@ -154,17 +177,24 @@ func lazyApplySnapshot(c *Config) string {
 	if sf := c.SearchFallback; sf != nil {
 		eff := EffectiveFallbackSearchSettings(c, nil, sf)
 		inject, think := ResolveSearchBehavior(eff)
-		fmt.Fprintf(&b, "fallback-only conv=%q search=(%q,%q) guard=%v thinking=%q\n",
+		fmt.Fprintf(&b, "fallback-only conn=(%q,%q,%q) conv=%q search=(%q,%q) guard=%v thinking=%q\n",
+			sf.URL, sf.API, sf.Model,
 			conv(sf.ConvertOff2Low, sf.Presence.Written("convertOff2Low", sf.ConvertOff2Low != ""), sf.NoLazyApply),
 			inject, think, EffectiveSearchGuard(c, nil, sf), EffectiveFallbackThinking(c, sf))
 	}
-	fmt.Fprintf(&b, "classifier cc=%q codex=%q\n",
-		ClassifierThinkingModeFor(c, ClassifierCC), ClassifierThinkingModeFor(c, ClassifierCodex))
+	cr := ""
+	if c.ClassifierRoute != nil {
+		cr = fmt.Sprintf(" conn=(%q,%q,%q)", c.ClassifierRoute.URL, c.ClassifierRoute.API, c.ClassifierRoute.Model)
+	}
+	fmt.Fprintf(&b, "classifier cc=%q codex=%q%s\n",
+		ClassifierThinkingModeFor(c, ClassifierCC), ClassifierThinkingModeFor(c, ClassifierCodex), cr)
 	if fr := c.FastRoute; fr != nil {
-		fmt.Fprintf(&b, "fast conv=%q\n", conv(fr.ConvertOff2Low, fr.Presence.Written("convertOff2Low", fr.ConvertOff2Low != ""), fr.NoLazyApply))
+		fmt.Fprintf(&b, "fast conn=(%q,%q,%q) conv=%q\n", fr.URL, fr.API, fr.Model,
+			conv(fr.ConvertOff2Low, fr.Presence.Written("convertOff2Low", fr.ConvertOff2Low != ""), fr.NoLazyApply))
 	}
 	if mf := c.MultimodalFallback; mf != nil {
-		fmt.Fprintf(&b, "multimodal conv=%q\n", conv(mf.ConvertOff2Low, mf.Presence.Written("convertOff2Low", mf.ConvertOff2Low != ""), mf.NoLazyApply))
+		fmt.Fprintf(&b, "multimodal conn=(%q,%q,%q) conv=%q\n", mf.URL, mf.API, mf.Model,
+			conv(mf.ConvertOff2Low, mf.Presence.Written("convertOff2Low", mf.ConvertOff2Low != ""), mf.NoLazyApply))
 	}
 	return b.String()
 }
@@ -203,6 +233,12 @@ func TestMaterializeLazyApplyBehaviorEquivalence(t *testing.T) {
 			"routes":[{"pattern":["a*","b*"],"url":"http://a"}],
 			"search_fallback":{"url":"http://s"}}`,
 		`{"upstream":"http://u","lazyApply":{"text_only":true,"no_search":true,"classifier_thinking":"off"}}`,
+		`{"upstream":"http://u",
+			"lazyApply":{"url":"http://d","api":"sk-d","model":"m-d","convertOff2Low":"translate"},
+			"routes":[{"pattern":"a"},{"pattern":"b","url":"http://b"},{"pattern":"c","noLazyApply":true,"url":"http://c"}],
+			"search_fallback":{},
+			"fast_route":{},
+			"classifier_route":{"classifier_thinking_cc":"off"}}`,
 	}
 	for i, body := range bodies {
 		before := mustParseLazy(t, body)
@@ -328,9 +364,164 @@ func TestMaterializeLazyApplyTemplate(t *testing.T) {
 	}
 }
 
+// TestMaterializeLazyApplyConnections locks the connection trio's preview insertion: url/api/model are
+// appended to every route-like object that omits them, an empty fast_route {} gains them, a locally
+// written "" is preserved, and noLazyApply objects stay untouched.
+func TestMaterializeLazyApplyConnections(t *testing.T) {
+	raw := `{"upstream":"http://u","lazyApply":{"url":"http://d","api":"sk-d","model":"m-d"},` +
+		`"routes":[{"pattern":"a"},{"pattern":"b","url":""},{"pattern":"c","noLazyApply":true}],` +
+		`"fast_route":{},"classifier_route":{"url":"http://c"}}`
+	out, err := MaterializeLazyApply([]byte(raw))
+	if err != nil {
+		t.Fatalf("MaterializeLazyApply: %v", err)
+	}
+	top, routes := lazyPreviewObjects(t, out)
+	for _, key := range []string{"url", "api", "model"} {
+		if _, ok := routes[0][key]; !ok {
+			t.Errorf("route a is missing inherited connection key %q: %v", key, routes[0])
+		}
+	}
+	if got := string(routes[1]["url"]); got != `""` {
+		t.Errorf("route b explicit empty url = %s, want preserved", got)
+	}
+	for _, key := range []string{"api", "model"} {
+		if _, ok := routes[1][key]; !ok {
+			t.Errorf("route b is missing inherited %q: %v", key, routes[1])
+		}
+	}
+	if len(routes[2]) != 2 {
+		t.Errorf("noLazyApply route should stay untouched, got %v", routes[2])
+	}
+	fr := lazyPreviewObject(t, top, "fast_route")
+	for _, key := range []string{"url", "api", "model"} {
+		if _, ok := fr[key]; !ok {
+			t.Errorf("empty fast_route should gain inherited %q: %v", key, fr)
+		}
+	}
+	cr := lazyPreviewObject(t, top, "classifier_route")
+	if got := string(cr["url"]); got != `"http://c"` {
+		t.Errorf("classifier local url = %s, want kept", got)
+	}
+	for _, key := range []string{"api", "model"} {
+		if _, ok := cr[key]; !ok {
+			t.Errorf("classifier_route is missing inherited %q: %v", key, cr)
+		}
+	}
+}
+
+// TestMaterializeLazyApplyCaseVariants locks preview/load parity for non-canonical keys: encoding/json
+// matches field names case-insensitively, so a "NoLazyApply" opt-out and a locally written "URL" are
+// honored exactly like their canonical spellings, and a case-variant key inside lazyApply fills the
+// canonical slot. Inserting under any other reading would change resolved values on copy-back.
+func TestMaterializeLazyApplyCaseVariants(t *testing.T) {
+	// Case-variant opt-out: the object must stay untouched.
+	raw := `{"upstream":"http://u","lazyApply":{"url":"http://d"},"routes":[{"pattern":"a","NoLazyApply":true}]}`
+	out, err := MaterializeLazyApply([]byte(raw))
+	if err != nil {
+		t.Fatalf("MaterializeLazyApply: %v", err)
+	}
+	if string(out) != raw {
+		t.Errorf("case-variant NoLazyApply must leave the config unchanged\nwant: %s\ngot:  %s", raw, out)
+	}
+
+	// Locally written "URL": no canonical "url" may be appended beside it (last-wins decoding would
+	// flip the value on copy-back).
+	raw = `{"upstream":"http://u","lazyApply":{"url":"http://d","api":"sk-d"},"routes":[{"pattern":"a","URL":"http://own"}]}`
+	out, err = MaterializeLazyApply([]byte(raw))
+	if err != nil {
+		t.Fatalf("MaterializeLazyApply: %v", err)
+	}
+	_, routes := lazyPreviewObjects(t, out)
+	if got := string(routes[0]["url"]); got != "" {
+		t.Errorf("preview must not append a second url beside the written URL key: %v", routes[0])
+	}
+	if got := string(routes[0]["URL"]); got != `"http://own"` {
+		t.Errorf("written URL must be preserved, got %s", got)
+	}
+	if _, ok := routes[0]["api"]; !ok {
+		t.Errorf("missing inherited api: %v", routes[0])
+	}
+
+	// Case-variant connection key inside lazyApply fills the canonical slot.
+	raw = `{"upstream":"http://u","lazyApply":{"URL":"http://d"},"routes":[{"pattern":"a"}]}`
+	out, err = MaterializeLazyApply([]byte(raw))
+	if err != nil {
+		t.Fatalf("MaterializeLazyApply: %v", err)
+	}
+	_, routes = lazyPreviewObjects(t, out)
+	if got := string(routes[0]["url"]); got != `"http://d"` {
+		t.Errorf(`case-variant lazyApply "URL" should fill route url, got %s`, got)
+	}
+
+	// Case-variant top-level spellings: the loader resolves them (exact first, then folded), so the
+	// preview must annotate the same objects instead of returning the config untouched.
+	raw = `{"upstream":"http://u","LazyApply":{"url":"http://d"},"Routes":[{"pattern":"a"}]}`
+	out, err = MaterializeLazyApply([]byte(raw))
+	if err != nil {
+		t.Fatalf("MaterializeLazyApply: %v", err)
+	}
+	var variantTop map[string]json.RawMessage
+	if err := json.Unmarshal(out, &variantTop); err != nil {
+		t.Fatalf("preview is not JSON: %v", err)
+	}
+	var variantRoutes []map[string]json.RawMessage
+	if err := json.Unmarshal(variantTop["Routes"], &variantRoutes); err != nil {
+		t.Fatalf("preview Routes: %v", err)
+	}
+	if got := string(variantRoutes[0]["url"]); got != `"http://d"` {
+		t.Errorf("case-variant top-level LazyApply/Routes should be annotated, got route url %s", got)
+	}
+
+	// An exact canonical spelling outranks a case variant, wherever the variant sits in the document.
+	raw = `{"upstream":"http://u","lazyApply":{"url":"http://exact"},"LazyApply":{"url":"http://variant"},"routes":[{"pattern":"a"}]}`
+	out, err = MaterializeLazyApply([]byte(raw))
+	if err != nil {
+		t.Fatalf("MaterializeLazyApply: %v", err)
+	}
+	_, routes = lazyPreviewObjects(t, out)
+	if got := string(routes[0]["url"]); got != `"http://exact"` {
+		t.Errorf("exact lazyApply spelling should win over a case variant, got route url %s", got)
+	}
+	before, _, err := ParseConfig([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseConfig(original): %v", err)
+	}
+	after, _, err := ParseConfig(out)
+	if err != nil {
+		t.Fatalf("ParseConfig(preview): %v", err)
+	}
+	if want, got := lazyApplySnapshot(before), lazyApplySnapshot(after); want != got {
+		t.Errorf("case-variant preview changes behavior\nbefore:\n%s\nafter:\n%s", want, got)
+	}
+
+	// Duplicate top-level lazyApply: encoding/json keeps the last block, so the preview inserts the last
+	// block's value and reparsing the preview must resolve identically to the original config.
+	raw = `{"upstream":"http://u","lazyApply":{"url":"http://first"},"lazyApply":{"url":"http://last"},"routes":[{"pattern":"a"}]}`
+	out, err = MaterializeLazyApply([]byte(raw))
+	if err != nil {
+		t.Fatalf("MaterializeLazyApply: %v", err)
+	}
+	_, routes = lazyPreviewObjects(t, out)
+	if got := string(routes[0]["url"]); got != `"http://last"` {
+		t.Errorf("duplicate lazyApply should follow last-wins, got route url %s", got)
+	}
+	before, _, err = ParseConfig([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseConfig(original): %v", err)
+	}
+	after, _, err = ParseConfig(out)
+	if err != nil {
+		t.Fatalf("ParseConfig(preview): %v", err)
+	}
+	if want, got := lazyApplySnapshot(before), lazyApplySnapshot(after); want != got {
+		t.Errorf("preview changes behavior\nbefore:\n%s\nafter:\n%s", want, got)
+	}
+}
+
 // TestMaterializeLazyApplyOnlySupportedFields locks the field matrix behind "never add a key the object
 // does not already accept": search_fallback is a route, so it inherits thinking like routes[]; fast_route /
-// multimodal_fallback only inherit convertOff2Low, and classifier_route only its own thinking tiers.
+// multimodal_fallback only inherit convertOff2Low and the connection trio, and classifier_route only its
+// own thinking tiers plus the connection trio.
 func TestMaterializeLazyApplyOnlySupportedFields(t *testing.T) {
 	raw := `{
   "upstream": "http://u",

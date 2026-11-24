@@ -61,7 +61,7 @@ The console answers practical questions. What did the agent send to the model? W
 - **Model remapping.** Route a client-facing model name to a different upstream model, and switch routes from the tray menu.
 - **Search follow-ups.** In the protocol-translation path, carry search results in an encrypted response envelope for reuse by follow-up requests.
 - **Empty-search guard.** Optionally replace all-empty Claude Code standalone-search responses with a fixed no-results stream on selected routes. This stops a fabricated answer from prior knowledge.
-- **Shared route defaults.** A top-level `lazyApply` object fills supported per-route behavior fields (search summary and thinking, empty-search guard, thinking shape, capability flags) into every route-like object that omits them. Explicit local values and per-object `noLazyApply` exceptions still win.
+- **Shared route defaults.** A top-level `lazyApply` object fills supported per-route fields into every route-like object that omits them: behavior fields (search summary and thinking, empty-search guard, thinking shape, capability flags) and the connection trio `url` / `api` / `model`. Write the upstream once and a route can shrink to `{"pattern": "*sonnet*", "effort": "high"}`. Explicit local values and per-object `noLazyApply` exceptions still win.
 - **Thinking behavior.** Configured thinking-mode handling adapts requests and responses for supported upstreams. A route-level `effort` field pins adaptive-thinking requests to a fixed level (low/mid/high/max) whatever the client asked for; the console's model column shows the configured level as `[level]` before the target model.
 - **Cross-platform tray app.** Windows, macOS, and Linux builds, with a bilingual Chinese/English web console.
 
@@ -190,7 +190,7 @@ Agent 工作时打开本地控制台：
 - **模型名映射。** 把客户端使用的模型名路由到指定的上游模型，也可以通过托盘菜单切换路由。
 - **搜索结果复用。** 在协议翻译路径中，把搜索结果放进加密响应信封，供后续请求复用。
 - **空搜索硬保障。** 可按路由把 Claude Code 独立搜索子代理的全空搜索响应替换为固定的无结果流，阻止上游凭空硬答。
-- **共享路由默认值。** 顶层 `lazyApply` 把支持的路由行为字段（搜索摘要与思考、空搜守卫、思考形态、能力开关）填充进每个省略了这些字段的类路由对象。显式本地值和逐对象的 `noLazyApply` 例外仍然优先。
+- **共享路由默认值。** 顶层 `lazyApply` 把支持的字段填充进每个省略了这些字段的类路由对象：既包括行为字段（搜索摘要与思考、空搜守卫、思考形态、能力开关），也包括连接三件套 `url` / `api` / `model`。上游只写一次，路由可以简化成 `{"pattern": "*sonnet*", "effort": "high"}`。显式本地值和逐对象的 `noLazyApply` 例外仍然优先。
 - **思考模式。** 按配置的思考模式处理，对支持的上游改写请求与响应，例如把明确关闭思考的请求映射为上游 low 档并移除返回的思考块。路由级 `effort` 字段可把 adaptive 思考请求钉到固定档位（low/mid/high/max），无视客户端原本的档位；状态页模型列会把配置的档位显示在目标模型前，如 `[high] deepseek-flash`。
 - **跨平台托盘应用。** Windows、macOS、Linux 三平台的构建，以及中英双语的网页控制台。
 

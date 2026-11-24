@@ -132,7 +132,7 @@ claude</pre>
       <p><code>lazyApply</code> 是一个全局默认值包。它只给路由类对象本来就支持的字段补值，效果等同于把该键写进每个没有显式设置它的对象。它不会新增字段，也不会创建未配置的可选路由。</p>
       <ul>
         <li><b>逐字段优先级</b>：局部显式值（包括 <code>false</code> 和空串）&gt; <code>lazyApply</code> &gt; 内置默认。</li>
-        <li><b>不继承连接字段</b>：<code>url</code>、<code>api</code>、<code>model</code>、<code>pattern</code>、<code>url_response_api</code> 永远不会从 lazyApply 继承。</li>
+        <li><b>连接三件套可继承</b>：<code>url</code>、<code>api</code>、<code>model</code> 会从 lazyApply 继承（加载时写进每个省略该键的对象），所以上游只写一次，路由可以简化成 <code>{"pattern": "*sonnet*", "effort": "high"}</code>，<code>fast_route</code> 甚至可以写成 <code>{}</code>。局部写了的连接键仍然优先；写空串即停止继承：<code>"api": ""</code> 透传客户端 token、<code>"model": ""</code> 不改模型，<code>"url": ""</code> 表示不换上游——routes 条目照常生效并转发默认 upstream，classifier_route 只做思考改写，fast_route / multimodal_fallback / search_fallback 不启用、请求走正常路由。<code>pattern</code> 与 <code>url_response_api</code> 不继承，永远逐对象写。</li>
         <li><b>effort 只能逐路由写</b>：<code>routes[]</code> 的 <code>effort</code> 钉住不参与继承，lazyApply 不提供这个字段，避免一个全局默认把所有路由的档位一起钉死。</li>
         <li><b>enhance_search 整体覆盖</b>：局部写了就整块生效，不会和 lazyApply 里的对象合并。</li>
         <li><b>个别对象可以退出</b>：在对象里写 <code>"noLazyApply": true</code>，它就不继承任何默认值，自己显式写的字段照常生效。</li>
@@ -280,7 +280,7 @@ experimental_bearer_token = "proxy429"</pre>
       <div class="docTableWrap"><table>
         <tr><th>键</th><th>类型</th><th>默认</th><th>说明</th></tr>
         <tr><td><code>pattern</code></td><td>string 或 string[]</td><td>必填</td><td>模型名通配，* 匹配任意长度；数组表示或</td></tr>
-        <tr><td><code>url</code></td><td>string</td><td>必填</td><td>上游 base URL</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>空</td><td>上游 base URL；省略时继承 lazyApply.url，仍为空 = 不换上游：该条目其余字段照常生效，请求转发默认 upstream</td></tr>
         <tr><td><code>api</code></td><td>string</td><td>空</td><td>上游 key，以 Authorization: Bearer 发送；空等于透传客户端 token</td></tr>
         <tr><td><code>model</code></td><td>string</td><td>空</td><td>改写后的模型名；空等于不改</td></tr>
         <tr><td><code>text_only</code></td><td>bool</td><td>false</td><td>上游不支持图片，图片请求转 multimodal_fallback</td></tr>
@@ -297,7 +297,7 @@ experimental_bearer_token = "proxy429"</pre>
       <h4>classifier_route</h4>
       <div class="docTableWrap"><table>
         <tr><th>键</th><th>类型</th><th>默认</th><th>说明</th></tr>
-        <tr><td><code>url</code></td><td>string</td><td>必填</td><td>上游 base URL</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>空</td><td>上游 base URL；省略时继承 lazyApply.url，仍为空 = 不换上游，只做思考改写</td></tr>
         <tr><td><code>api</code></td><td>string</td><td>空</td><td>上游 key；空等于透传客户端 token</td></tr>
         <tr><td><code>model</code></td><td>string</td><td>空</td><td>改写后的模型名</td></tr>
         <tr><td><code>classifier_thinking</code></td><td>string</td><td>空</td><td>空、off 或 low；见「专用路由」</td></tr>
@@ -308,7 +308,7 @@ experimental_bearer_token = "proxy429"</pre>
       <h4>fast_route 与 multimodal_fallback</h4>
       <div class="docTableWrap"><table>
         <tr><th>键</th><th>类型</th><th>默认</th><th>说明</th></tr>
-        <tr><td><code>url</code></td><td>string</td><td>必填</td><td>上游 base URL</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>空</td><td>上游 base URL；省略时继承 lazyApply.url，仍为空 = 该路不启用，请求走正常路由</td></tr>
         <tr><td><code>api</code></td><td>string</td><td>空</td><td>上游 key；空等于透传客户端 token</td></tr>
         <tr><td><code>model</code></td><td>string</td><td>空</td><td>改写后的模型名</td></tr>
         <tr><td><code>convertOff2Low</code></td><td>string</td><td>空</td><td>空、translate 或 all</td></tr>
@@ -317,7 +317,7 @@ experimental_bearer_token = "proxy429"</pre>
       <h4>search_fallback</h4>
       <div class="docTableWrap"><table>
         <tr><th>键</th><th>类型</th><th>默认</th><th>说明</th></tr>
-        <tr><td><code>url</code></td><td>string</td><td>必填</td><td>上游 base URL</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>空</td><td>上游 base URL；省略时继承 lazyApply.url，仍为空 = 不启用，需要兜底的请求退回原路由</td></tr>
         <tr><td><code>api</code></td><td>string</td><td>空</td><td>上游 key；空等于透传客户端 token</td></tr>
         <tr><td><code>model</code></td><td>string</td><td>空</td><td>改写后的模型名</td></tr>
         <tr><td><code>thinking</code></td><td>string</td><td>auto</td><td>auto、adaptive 或 budget；只作用于 Responses 翻译口</td></tr>
@@ -347,6 +347,9 @@ experimental_bearer_token = "proxy429"</pre>
         <tr><td><code>classifier_thinking</code></td><td>string</td><td>classifier_route</td></tr>
         <tr><td><code>classifier_thinking_cc</code></td><td>string</td><td>classifier_route</td></tr>
         <tr><td><code>classifier_thinking_codex</code></td><td>string</td><td>classifier_route</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>routes[]、classifier_route、fast_route、multimodal_fallback 与 search_fallback</td></tr>
+        <tr><td><code>api</code></td><td>string</td><td>routes[]、classifier_route、fast_route、multimodal_fallback 与 search_fallback</td></tr>
+        <tr><td><code>model</code></td><td>string</td><td>routes[]、classifier_route、fast_route、multimodal_fallback 与 search_fallback</td></tr>
       </table></div>
     </section>
 
@@ -567,7 +570,7 @@ claude</pre>
       <p><code>lazyApply</code> is a global default bundle. It only fills fields that a route-like object already supports, exactly as if you wrote the key into every object that does not set it explicitly. It never invents fields and never creates unconfigured optional routes.</p>
       <ul>
         <li><b>Per-field precedence</b>: explicit local value (including <code>false</code> and empty strings) &gt; <code>lazyApply</code> &gt; built-in default.</li>
-        <li><b>Connection fields are never inherited</b>: <code>url</code>, <code>api</code>, <code>model</code>, <code>pattern</code> and <code>url_response_api</code> never come from lazyApply.</li>
+        <li><b>Connection trio is inherited</b>: <code>url</code>, <code>api</code> and <code>model</code> come from lazyApply too (written into every object that omits the key, at load time), so the upstream is written once and a route can shrink to <code>{"pattern": "*sonnet*", "effort": "high"}</code>; <code>fast_route</code> may even be <code>{}</code>. A locally written connection key still wins; writing an empty string stops inheritance: <code>"api": ""</code> passes the client's token through, <code>"model": ""</code> keeps the client's model, and <code>"url": ""</code> means no reroute (a routes[] entry still applies its other fields and forwards to the default upstream, classifier_route keeps only its thinking rewrite, and fast_route / multimodal_fallback / search_fallback are not engaged, so the request follows normal routing). <code>pattern</code> and <code>url_response_api</code> are never inherited and stay per object.</li>
         <li><b>effort is written per route only</b>: a route's <code>effort</code> pin is never inherited; lazyApply does not offer the field, so a global default can never pin every route's level at once.</li>
         <li><b>enhance_search replaces whole</b>: a local value replaces the lazyApply object entirely; the two are never merged.</li>
         <li><b>Objects can opt out</b>: <code>"noLazyApply": true</code> inside an object stops all inheritance; its own explicit fields still apply.</li>
@@ -715,7 +718,7 @@ experimental_bearer_token = "proxy429"</pre>
       <div class="docTableWrap"><table>
         <tr><th>Key</th><th>Type</th><th>Default</th><th>Meaning</th></tr>
         <tr><td><code>pattern</code></td><td>string or string[]</td><td>required</td><td>Model-name wildcard, * matches any run; an array means OR</td></tr>
-        <tr><td><code>url</code></td><td>string</td><td>required</td><td>Upstream base URL</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>empty</td><td>Upstream base URL; omitted it inherits lazyApply.url, and still empty = no reroute: the entry's other fields still apply and the request forwards to the default upstream</td></tr>
         <tr><td><code>api</code></td><td>string</td><td>empty</td><td>Upstream key sent as Authorization: Bearer; empty passes the client token through</td></tr>
         <tr><td><code>model</code></td><td>string</td><td>empty</td><td>Rewritten model name; empty leaves it unchanged</td></tr>
         <tr><td><code>text_only</code></td><td>bool</td><td>false</td><td>Upstream cannot take images; image requests divert to multimodal_fallback</td></tr>
@@ -732,7 +735,7 @@ experimental_bearer_token = "proxy429"</pre>
       <h4>classifier_route</h4>
       <div class="docTableWrap"><table>
         <tr><th>Key</th><th>Type</th><th>Default</th><th>Meaning</th></tr>
-        <tr><td><code>url</code></td><td>string</td><td>required</td><td>Upstream base URL</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>empty</td><td>Upstream base URL; omitted it inherits lazyApply.url, and still empty = no reroute (thinking rewrite only)</td></tr>
         <tr><td><code>api</code></td><td>string</td><td>empty</td><td>Upstream key; empty passes the client token through</td></tr>
         <tr><td><code>model</code></td><td>string</td><td>empty</td><td>Rewritten model name</td></tr>
         <tr><td><code>classifier_thinking</code></td><td>string</td><td>empty</td><td>Empty, off or low; see "Dedicated routes"</td></tr>
@@ -743,7 +746,7 @@ experimental_bearer_token = "proxy429"</pre>
       <h4>fast_route and multimodal_fallback</h4>
       <div class="docTableWrap"><table>
         <tr><th>Key</th><th>Type</th><th>Default</th><th>Meaning</th></tr>
-        <tr><td><code>url</code></td><td>string</td><td>required</td><td>Upstream base URL</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>empty</td><td>Upstream base URL; omitted it inherits lazyApply.url, and still empty = the lane stays disengaged and the request follows normal routing</td></tr>
         <tr><td><code>api</code></td><td>string</td><td>empty</td><td>Upstream key; empty passes the client token through</td></tr>
         <tr><td><code>model</code></td><td>string</td><td>empty</td><td>Rewritten model name</td></tr>
         <tr><td><code>convertOff2Low</code></td><td>string</td><td>empty</td><td>Empty, translate or all</td></tr>
@@ -752,7 +755,7 @@ experimental_bearer_token = "proxy429"</pre>
       <h4>search_fallback</h4>
       <div class="docTableWrap"><table>
         <tr><th>Key</th><th>Type</th><th>Default</th><th>Meaning</th></tr>
-        <tr><td><code>url</code></td><td>string</td><td>required</td><td>Upstream base URL</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>empty</td><td>Upstream base URL; omitted it inherits lazyApply.url, and still empty = not engaged, diverted requests fall back to the original route</td></tr>
         <tr><td><code>api</code></td><td>string</td><td>empty</td><td>Upstream key; empty passes the client token through</td></tr>
         <tr><td><code>model</code></td><td>string</td><td>empty</td><td>Rewritten model name</td></tr>
         <tr><td><code>thinking</code></td><td>string</td><td>auto</td><td>auto, adaptive or budget; affects the Responses translation port only</td></tr>
@@ -782,6 +785,9 @@ experimental_bearer_token = "proxy429"</pre>
         <tr><td><code>classifier_thinking</code></td><td>string</td><td>classifier_route</td></tr>
         <tr><td><code>classifier_thinking_cc</code></td><td>string</td><td>classifier_route</td></tr>
         <tr><td><code>classifier_thinking_codex</code></td><td>string</td><td>classifier_route</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>routes[], classifier_route, fast_route, multimodal_fallback and search_fallback</td></tr>
+        <tr><td><code>api</code></td><td>string</td><td>routes[], classifier_route, fast_route, multimodal_fallback and search_fallback</td></tr>
+        <tr><td><code>model</code></td><td>string</td><td>routes[], classifier_route, fast_route, multimodal_fallback and search_fallback</td></tr>
       </table></div>
     </section>
 

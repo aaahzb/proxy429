@@ -1,5 +1,7 @@
 package config
 
+import "strings"
+
 // Config is the proxy's configuration, mirroring config.json.
 type Config struct {
 	Listen                   string            `json:"listen"`
@@ -16,12 +18,12 @@ type Config struct {
 	LogRequestDetail         bool              `json:"log_request_detail"`
 	LogFile                  string            `json:"log_file"`                      // Log file path; when set, logs are also appended to this file so they can be viewed/copied without a console (e.g. RemoteApp)
 	RecentSampleWindow       int               `json:"recent_sample_window"`          // Window size for the status row's "last X" latency/throughput stats; 0 = default 20
-	LazyApply                *LazyApplyConfig  `json:"lazyApply,omitempty"`           // Global defaults for behavior fields shared by route-like objects; a local explicit value wins, noLazyApply opts an object out
+	LazyApply                *LazyApplyConfig  `json:"lazyApply,omitempty"`           // Global defaults for route-like objects (behavior fields plus the connection trio url/api/model); a local explicit value wins, noLazyApply opts an object out
 	Routes                   []RouteRule       `json:"routes"`                        // Model routing rules; empty = no routing, use the default upstream
-	ClassifierRoute          *ClassifierRoute  `json:"classifier_route,omitempty"`    // Dedicated route for classifier requests; classifier hits are routed here regardless of the original model; empty = disabled
-	FastRoute                *FastRoute        `json:"fast_route,omitempty"`          // Dedicated route for fast-mode requests; non-classifier requests carrying "speed":"fast" are routed here; empty = disabled
-	MultimodalFallback       *MultimodalRoute  `json:"multimodal_fallback,omitempty"` // Multimodal fallback route; requests containing images that hit a text_only model are rerouted here; empty = disabled
-	SearchFallback           *SearchRoute      `json:"search_fallback,omitempty"`     // Search fallback route; requests with search tools that hit a no_search upstream are rerouted here; empty = disabled
+	ClassifierRoute          *ClassifierRoute  `json:"classifier_route,omitempty"`    // Dedicated route for classifier requests; classifier hits are routed here regardless of the original model; nil = disabled (a written object stays active even without url — thinking rewrite only — and receives lazyApply connection defaults)
+	FastRoute                *FastRoute        `json:"fast_route,omitempty"`          // Dedicated route for fast-mode requests; non-classifier requests carrying "speed":"fast" are routed here; nil = disabled (a written empty object inherits lazyApply connection defaults; without a url the lane stays disengaged)
+	MultimodalFallback       *MultimodalRoute  `json:"multimodal_fallback,omitempty"` // Multimodal fallback route; requests containing images that hit a text_only model are rerouted here; nil or url-less = not engaged (a written empty object inherits lazyApply connection defaults)
+	SearchFallback           *SearchRoute      `json:"search_fallback,omitempty"`     // Search fallback route; requests with search tools that hit a no_search upstream are rerouted here; nil or url-less = not engaged (a written empty object inherits lazyApply connection defaults)
 	ConvertAllToStream       bool              `json:"convertAlltoStream"`            // Global stream conversion: when on, all non-streaming requests are sent upstream as streams, then rebuilt into a single non-streaming JSON response (transparent to the client; the web console shows live output/first-token/tok/s)
 	ResponsesListen          string            `json:"responses_listen"`              // OpenAI Responses API listener (e.g. 127.0.0.1:8081); empty = disabled. Translates Responses-protocol requests into Anthropic and feeds the main pipeline, for Codex CLI and similar tools. Starts/stops dynamically on save/reload
 
@@ -45,7 +47,7 @@ func AllowNoThinkBlock4Anthropic(c *Config) bool {
 // Pattern wildcards the model name with *; on hit, URL overrides the default upstream, API overrides the client token, Model rewrites the request body's model field.
 type RouteRule struct {
 	Pattern        string               `json:"pattern"`                    // Model-name wildcard, only * supported (matches any characters of any length), e.g. "claude-opus*"
-	URL            string               `json:"url"`                        // Target upstream base URL, e.g. https://api.deepseek.com
+	URL            string               `json:"url"`                        // Target upstream base URL, e.g. https://api.deepseek.com; empty = keep the default upstream (the entry then only remaps model/API or adjusts behavior)
 	API            string               `json:"api"`                        // Target API key, sent as Authorization: Bearer; empty = pass through the client's token
 	Model          string               `json:"model"`                      // Target model name to rewrite to; empty = leave the model field unchanged
 	TextOnly       bool                 `json:"text_only"`                  // Target model is text-only; requests containing images fall back to multimodal_fallback
@@ -137,20 +139,35 @@ type SearchRoute struct {
 // means a real JSON object that contained no recognized keys.
 type ConfigPresence map[string]struct{}
 
-// Written reports whether key was present in the source JSON. Without Presence metadata it falls
-// back to the caller-provided non-zero test, keeping Go-literal configs working.
+// Written reports whether key was present in the source JSON. Matching is case-insensitive, like
+// encoding/json's field-name matching, so a non-canonical "URL" key counts as written. Without
+// Presence metadata it falls back to the caller-provided non-zero test, keeping Go-literal configs
+// working.
 func (p ConfigPresence) Written(key string, nonzero bool) bool {
 	if p == nil {
 		return nonzero
 	}
-	_, ok := p[key]
-	return ok
+	if _, ok := p[key]; ok {
+		return true
+	}
+	for k := range p {
+		if strings.EqualFold(k, key) {
+			return true
+		}
+	}
+	return false
 }
 
-// LazyApplyConfig supplies defaults for behavior fields that route-like objects already accept.
-// Resolution is per field: an explicitly written local value wins over lazyApply, and an omitted
-// local key inherits lazyApply. noLazyApply on a route-like object disables all of its defaults.
+// LazyApplyConfig supplies defaults for fields that route-like objects already accept. Connection
+// fields (url / api / model) are materialized into every object that omits them at parse time;
+// behavior fields are resolved per use. Resolution is per field: an explicitly written local value
+// wins over lazyApply (including "" and false), and an omitted local key inherits lazyApply.
+// noLazyApply on a route-like object disables all of its defaults.
 type LazyApplyConfig struct {
+	URL   string `json:"url,omitempty"`   // Default target upstream base URL for routes[] / classifier_route / fast_route / multimodal_fallback / search_fallback
+	API   string `json:"api,omitempty"`   // Default target API key for the same objects; a locally written "" keeps passing the client's token through
+	Model string `json:"model,omitempty"` // Default model rewrite target for the same objects; a locally written "" keeps the client's model
+
 	TextOnly       bool   `json:"text_only,omitempty"`      // Default for routes[].text_only
 	NoSearch       bool   `json:"no_search,omitempty"`      // Default for routes[].no_search
 	Thinking       string `json:"thinking,omitempty"`       // Default for routes[].thinking (Responses translation pre-match)
