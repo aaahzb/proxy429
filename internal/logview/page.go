@@ -75,13 +75,45 @@ const logViewerHTML = `<!DOCTYPE html>
   .jt-bool { color:#569cd6; }
   .jt-null { color:#808080; }
   .jt-count { color:#808080; }
-  /* 使用文档弹窗 */
+  /* Usage docs browser: full-screen modal, generated nav, live search, copy buttons */
+  #docModal { position:fixed; inset:0; background:rgba(0,0,0,.65); z-index:60; display:none; align-items:center; justify-content:center; }
+  .docFrame { background:#1a1a1a; border:1px solid #555; border-radius:8px; width:min(1180px,96vw); height:92vh; display:flex; flex-direction:column; overflow:hidden; }
+  .docHead { display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid #333; flex:none; }
+  .docTitle { font-size:15px; font-weight:bold; color:#d4d4d4; white-space:nowrap; }
+  .docSearch { flex:1; min-width:0; background:#1e1e1e; color:#d4d4d4; border:1px solid #333; border-radius:4px; padding:6px 10px; font:inherit; }
+  .docSearch:focus { outline:none; border-color:#3a6ea5; }
+  .docSearchInfo { color:#9a9a9a; font-size:12px; min-width:64px; text-align:right; white-space:nowrap; }
+  .docMain { display:flex; flex:1; min-height:0; }
+  .docNav { width:220px; flex:none; overflow:auto; border-right:1px solid #333; padding:8px 8px 24px; }
+  .docNavTitle { color:#777; font-size:11px; letter-spacing:.4px; margin:14px 8px 4px; }
+  .docNavGroup:first-child .docNavTitle { margin-top:4px; }
+  .docNavItem { color:#c0c0c0; font-size:13px; line-height:1.35; padding:4px 8px; border-radius:4px; border-left:2px solid transparent; cursor:pointer; }
+  .docNavItem:hover { background:#252526; color:#e0e0e0; }
+  .docNavItem.active { color:#4ec9b0; background:#1f2a28; border-left-color:#4ec9b0; }
+  .docBody { flex:1; overflow:auto; position:relative; padding:16px 28px 60px; }
+  .docSec { margin-bottom:30px; }
+  .docHide { display:none !important; }
+  .docBody h4 { color:#dcdcaa; margin:14px 0 6px; font-size:12.5px; }
+  .docTableWrap { overflow-x:auto; margin:8px 0; }
+  .docBody table { border-collapse:collapse; font-size:12px; }
+  .docBody th, .docBody td { border:1px solid #333; padding:5px 9px; vertical-align:top; color:#c0c0c0; text-align:left; }
+  .docBody th { background:#252526; color:#d4d4d4; white-space:nowrap; }
+  .docSteps { margin:6px 0 6px 20px; color:#c0c0c0; }
+  .docSteps li { margin:8px 0; }
+  .docPre { position:relative; margin:8px 0; }
+  .docPre pre { margin:0; background:#181818; border:1px solid #333; border-radius:6px; padding:10px 12px; color:#9ecb9e; overflow-x:auto; font:12px/1.5 Consolas,monospace; }
+  .docCopyBtn { position:absolute; top:6px; right:6px; padding:2px 8px; font-size:11px; opacity:.75; }
+  .docCopyBtn:hover { opacity:1; }
+  .docNoResult { color:#9a9a9a; padding:24px 0; display:none; }
   .doc h3 { color:#4ec9b0; margin:14px 0 4px; font-size:13px; }
+  .docSec h3 { margin-top:2px; font-size:14px; }
   .doc p { margin:4px 0; color:#c0c0c0; }
   .doc ul { margin:4px 0 4px 18px; color:#c0c0c0; }
   .doc li { margin:2px 0; }
   .doc code { background:#2a2a2a; padding:1px 5px; border-radius:3px; color:#9cdcfe; }
   .doc b { color:#d4d4d4; }
+  @media (max-width:900px) { .docNav { width:180px; } .docBody { padding:14px 18px 48px; } }
+  @media (max-width:640px) { .docFrame { height:96vh; } .docMain { flex-direction:column; } .docNav { width:auto; max-height:26vh; border-right:0; border-bottom:1px solid #333; } }
   /* 删除配置弹窗 */
   #cfgDelModal { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:100; display:none; align-items:center; justify-content:center; }
   #cfgDelModal .box { background:#252526; border:1px solid #444; border-radius:6px; padding:16px; min-width:320px; }
@@ -97,7 +129,7 @@ const logViewerHTML = `<!DOCTYPE html>
   <div class="tab" data-tab="logs">日志</div>
   <div class="tab" data-tab="config">配置</div>
   <span id="hint">关闭此标签页即隐藏 · 代理继续运行</span>
-  <button id="docBtn" class="ghost" style="align-self:center;margin:0 12px" onclick="document.getElementById('docModal').style.display='flex'">文档</button>
+  <button id="docBtn" class="ghost" style="align-self:center;margin:0 12px" onclick="docOpen()">文档</button>
   <span id="verBox" style="align-self:center;margin-left:auto;padding-right:12px;color:#666;font-size:12px">__VERSION__</span>
   <span id="langBox" style="align-self:center;padding-right:12px;color:#9a9a9a">语言
     <select id="langSel" style="background:#1e1e1e;color:#d4d4d4;border:1px solid #333;border-radius:3px;padding:2px 4px;font:inherit">
@@ -171,13 +203,9 @@ const logViewerHTML = `<!DOCTYPE html>
   </div>
 </div>
 
-<div id="docModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:40;align-items:center;justify-content:center" onclick="if(event.target===this)this.style.display='none'">
-  <div style="background:#1a1a1a;border:1px solid #555;border-radius:8px;padding:20px 24px;max-width:780px;max-height:85vh;overflow:auto;position:relative">
-    <button class="ghost" style="position:absolute;top:10px;right:12px" onclick="document.getElementById('docModal').style.display='none'">关闭</button>
-    <div style="font-size:15px;margin-bottom:14px;color:#d4d4d4;font-weight:bold">使用文档</div>
-    <div class="doc">
-      __DOC_BODY__</div>
-  </div>
+<div id="docModal" onclick="if(event.target===this)docClose()">
+  <div class="docFrame">
+    __DOC_BODY__</div>
 </div>
 
 <div class="pane" id="pane-config">
@@ -292,6 +320,159 @@ window.addEventListener('scroll', () => {
   stick = (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 30);
 });
 
+// ---- Usage docs browser ----
+// The doc body arrives whole via the page's doc placeholder (logViewerDocZH / logViewerDocEN in doc.go). The nav is
+// generated from the section elements, so the two languages never drift. Any UI text in this block comes
+// from the body's data attributes, keeping the shared script language-neutral.
+let docQuery = '';
+// docGo sets this while a programmatic scroll settles; the spy must not override the clicked item (at the bottom of
+// the body the "clamped to the last section" rule would otherwise steal the highlight from the section just picked).
+let docNavLock = 0;
+function docOpen(){
+  document.getElementById('docModal').style.display = 'flex';
+  docInit();
+  const s = document.getElementById('docSearch');
+  if(s && !docQuery) s.focus();
+  docSpy();
+}
+function docClose(){
+  document.getElementById('docModal').style.display = 'none';
+}
+function docInit(){
+  const nav = document.getElementById('docNav');
+  if(nav.dataset.built) return;
+  nav.dataset.built = '1';
+  const body = document.getElementById('docBody');
+  let groupName = null, groupBox = null;
+  body.querySelectorAll('.docSec').forEach(sec => {
+    sec.dataset.search = sec.textContent.toLowerCase(); // cached before the copy buttons join the text
+    const name = sec.dataset.group || '';
+    if(name !== groupName){
+      groupName = name;
+      groupBox = document.createElement('div');
+      groupBox.className = 'docNavGroup';
+      const title = document.createElement('div');
+      title.className = 'docNavTitle';
+      title.textContent = name;
+      groupBox.appendChild(title);
+      nav.appendChild(groupBox);
+    }
+    const item = document.createElement('div');
+    item.className = 'docNavItem';
+    item.dataset.target = sec.id;
+    item.textContent = sec.querySelector('h3').textContent;
+    item.title = item.textContent;
+    item.onclick = () => docGo(sec.id);
+    groupBox.appendChild(item);
+  });
+  body.querySelectorAll('pre[data-copy]').forEach(pre => {
+    const wrap = document.createElement('div');
+    wrap.className = 'docPre';
+    pre.parentNode.insertBefore(wrap, pre);
+    wrap.appendChild(pre);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ghost docCopyBtn';
+    btn.dataset.copy = pre.dataset.copy;
+    btn.dataset.done = pre.dataset.done;
+    btn.textContent = pre.dataset.copy;
+    btn.onclick = () => docCopy(pre, btn);
+    wrap.appendChild(btn);
+  });
+  body.addEventListener('scroll', docSpy, {passive:true});
+  document.addEventListener('keydown', docKey);
+}
+function docGo(id, silent){
+  const sec = document.getElementById(id);
+  const body = document.getElementById('docBody');
+  if(!sec || !body) return;
+  docNavLock = Date.now() + 900;
+  body.scrollTo({top: Math.max(0, sec.offsetTop - 8), behavior: silent ? 'auto' : 'smooth'});
+  docSetActive(id);
+}
+function docSetActive(id){
+  document.querySelectorAll('#docNav .docNavItem').forEach(it => {
+    it.classList.toggle('active', it.dataset.target === id);
+  });
+}
+function docSpy(){
+  if(docQuery || Date.now() < docNavLock) return;
+  const body = document.getElementById('docBody');
+  if(!body) return;
+  const secs = body.querySelectorAll('.docSec');
+  let cur = '';
+  const top = body.scrollTop + 60;
+  secs.forEach(sec => { if(sec.offsetTop <= top) cur = sec.id; });
+  if(body.scrollTop + body.clientHeight >= body.scrollHeight - 4 && secs.length) cur = secs[secs.length-1].id;
+  if(cur) docSetActive(cur);
+}
+function docFilter(q){
+  docQuery = String(q || '').trim().toLowerCase();
+  const body = document.getElementById('docBody');
+  const info = document.getElementById('docSearchInfo');
+  const none = document.getElementById('docNoResult');
+  if(!body) return;
+  let count = 0;
+  body.querySelectorAll('.docSec').forEach(sec => {
+    const hit = !docQuery || sec.dataset.search.includes(docQuery);
+    sec.classList.toggle('docHide', !hit);
+    if(hit) count++;
+  });
+  document.querySelectorAll('#docNav .docNavItem').forEach(it => {
+    const sec = document.getElementById(it.dataset.target);
+    it.classList.toggle('docHide', !!sec && sec.classList.contains('docHide'));
+  });
+  document.querySelectorAll('#docNav .docNavGroup').forEach(g => {
+    const any = Array.from(g.querySelectorAll('.docNavItem')).some(it => !it.classList.contains('docHide'));
+    g.classList.toggle('docHide', !any);
+  });
+  if(info) info.textContent = docQuery ? count + ' ' + info.dataset.label : '';
+  if(none) none.style.display = (docQuery && !count) ? 'block' : 'none';
+  if(docQuery) body.scrollTo({top: 0, behavior: 'auto'});
+  else docSpy();
+}
+function docSearchKey(ev){
+  if(ev.key === 'Escape'){
+    ev.stopPropagation();
+    if(ev.target.value){ ev.target.value = ''; docFilter(''); }
+    else docClose();
+  } else if(ev.key === 'Enter'){
+    const first = document.querySelector('#docBody .docSec:not(.docHide)');
+    if(first) docGo(first.id);
+  }
+}
+function docKey(ev){
+  if(ev.key !== 'Escape') return;
+  const m = document.getElementById('docModal');
+  if(m && m.style.display === 'flex') docClose();
+}
+function docCopy(pre, btn){
+  const flash = txt => {
+    btn.textContent = txt;
+    setTimeout(() => { btn.textContent = btn.dataset.copy; }, 1200);
+  };
+  const done = () => flash(btn.dataset.done);
+  const failed = () => flash('✗');
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = pre.textContent;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; } finally { ta.remove(); }
+    if(ok) done(); else failed();
+  };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(pre.textContent).then(done, fallback);
+  } else fallback();
+}
+function docOpenConfig(){
+  docClose();
+  const tab = document.querySelector('.tab[data-tab="config"]');
+  if(tab) tab.click();
+}
 function lastTag(f){ return (f && f.last) ? '<span title="Last #'+f.last+'">&lt;-'+f.last+'</span>' : ''; }
 function fmtBytes(n){
   if(n<1024) return n+'B';
@@ -1812,311 +1993,6 @@ window.prompt = function(s, d){ return __prompt(t(String(s)), d); };
 </body>
 </html>`
 
-// logViewerDocZH is the Chinese full text of the usage-doc popup (the master page's default language): the Chinese page render
-// replaces the __DOC_BODY__ placeholder with it wholesale. Content identical to the body inlined in logViewerHTML at version 097003d.
-// When adding doc sections, write Chinese here and English in logViewerDocEN — both sides must be updated.
-const logViewerDocZH = `      <h3>全局流式化 convertAlltoStream</h3>
-      <p>顶层配置 <code>convertAlltoStream</code>（默认 false）开启后，所有非流式请求（<code>stream:false</code> 或省略）都被代理悄悄改为流式发给上游：在途流页面实时可见吐字、统计首字与 tok/s。请求方无感知——代理把上游流完整收完后，<b>原样重建</b>非流式 JSON（所有内容块按流里原样拼回，含搜索结果 encrypted_content）一次性返回，调用方拿到的仍是它预期的非流式响应。流中途断开（未见 message_stop）时未向客户端写任何内容，代理整体重试。</p>
-      <p>仅作用于 Anthropic Messages 请求（/v1/messages）；已是流式的请求不受影响。重试等待期间不发 SSE 保活 ping（会污染非流式响应），静默等待。</p>
-      <h3>Responses API 监听口 responses_listen</h3>
-      <p>顶层配置 <code>responses_listen</code>（空 = 不启用；配置模板默认演示 <code>127.0.0.1:8081</code>）设为如 <code>127.0.0.1:8081</code> 后，代理在该地址额外开一个 OpenAI Responses API 端点（<code>/v1/responses</code>）：把 Codex CLI 等只说 Responses 协议的工具接到 Anthropic 上游。请求被翻译成 Anthropic Messages 走主管线（路由/重试/本控制台监控照常生效），响应翻译回 Responses（客户端 stream:true 拿 SSE 事件流，false 拿一次性 JSON）。</p>
-      <p>工具里的 model 名照常参与路由匹配：在 routes 加一条如 <code>gpt-5*</code> 即可指定上游与改写模型。改动保存重载即生效（监听口随配置动态启停）；与主端口一样永远仅本机可连。</p>
-      <p>翻译规则与 cc-switch 3.20.0 一致：<code>reasoning.effort</code> 按模型分类映射——adaptive 模型（fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6）翻成 <code>thinking:adaptive</code> + <code>output_config.effort</code>（fable-5/mythos-5 关不掉 thinking，显式 none 翻成 effort:low）；其余模型翻成 budget_tokens（low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576）。查表用客户端发来的 model 名（路由改写之前），想让表生效就把客户端 model 直接填目标模型名；反过来别名命中上表但路由目标模型能力不一致时（如别名叫 claude-fable-5 实际路由到只支持 budget 的 Kimi），在该路由条目配 <code>thinking:"budget"/"adaptive"</code> 覆盖（见下方参数速查）。工具映射（function/custom/namespace/tool_search/web_search/input_file）与完整映射表见 docs/usage.md「Responses translation mapping」。工具续轮历史缺可回放的签名思考块时由顶层 <code>allowNoThinkBlock4Anthropic</code> 兜底（<b>默认 true</b>：按所请思考档位照发，真被上游 400 拒了才自动关思考重试一次；false = cc-switch 式直接关思考——见「参数速查」）。</p>
-      <p><b>思考/搜索信封</b>：签名 thinking 块与每次搜索的完整结果块（含 encrypted_content 正文）被自封装进 reasoning 项的 encrypted_content 随响应发给客户端，下轮客户端回放历史时还原上行——思考链不丢，追问直接读上次搜索到的正文、不再原关键字重搜。搜索信封带 url+key 哈希归属且整体经 key 派生掩码混淆（客户端历史里不躺明文 url/key 信息）：换了上游或 key 就解不开不还原（省 token），换模型不拦（实测照常解密）；旧对话的搜索块在上游过期（报 tool_call_id）时代理自动剥掉回放块重试一次，无感降级为需要时重新搜。</p>
-      <p><b>Codex CLI 接入</b>：最省事——本控制台「配置」标签下方给出 Windows / macOS·Linux 两行一键命令（DeepSeek 文档同款格式，按编辑框实时生成：地址取 <code>responses_listen</code>；routes 每个 pattern 的代表名全部写进 Codex <code>/model</code> 菜单，下拉选中项为默认模型），复制到对应终端回车即运行，脚本由本代理实时烤制下发。仓库内 <code>internal/logview/scripts/</code> 下另有交互版 <code>codex-setup.ps1</code>（Windows）与 <code>codex-setup.sh</code>（macOS/Linux）：选模型、备份后改写 config.toml、写模型目录、可一键还原。手动：编辑 <code>~/.codex/config.toml</code>——顶层 <code>model_provider = "proxy429"</code>、<code>model = "gpt-5-codex"</code>、<code>forced_login_method = "api"</code>（免官方登录）；脚本不再写入并会顺手删除旧配置里的 <code>preferred_auth_method</code>（新版 Codex 已废弃该键会报 unrecognized 警告，桌面 App 还会因此强制走 OpenAI API-key 认证、对无 OpenAI 账号的用户误报未登录），加 <code>[model_providers.proxy429]</code> 段（<code>base_url = "http://127.0.0.1:8081/v1"</code>、<code>wire_api = "responses"</code>、<code>experimental_bearer_token</code> 填任意占位串）。改完重启 Codex。<b>503 且代理侧零日志</b>：系统代理或终端代理变量会把 127.0.0.1 的请求劫到代理服务器报 503——Windows 一键脚本安装时已自动写用户级 NO_PROXY（含 127.0.0.1）绕过；macOS 脚本自动把 NO_PROXY 写进 launchd 环境（GUI 应用与新终端窗口都生效）并安装登录项持久化（脚本选「还原」可撤销）；Linux 脚本只做体检并提示 <code>export NO_PROXY="localhost,127.0.0.1,::1"</code>；手动配置请自行 <code>setx NO_PROXY "localhost,127.0.0.1,::1"</code>（Windows）后重启 Codex。逐步教程见 docs/usage.md「Getting Codex CLI on the proxy」。</p>
-      <h3>路由与能力兜底</h3>
-      <p>请求按顺序匹配上游：classifier_route（分类器分流）→ fast_route（快速直连）→ routes（按 model pattern 匹配）。命中 route 后，若该上游能力不足（text_only 缺图片 / no_search 缺搜索）按以下处理：</p>
-      <ul>
-      <li>搜索请求（带 web_search）→ 走 search_fallback：整请求转发给 search_fallback 上游，由它自己搜索回答。对独立搜索子代理请求（最后一条 user 消息以 "Perform a web search for the query" 开头），还可按 claudeSearchSummary 把摘要指令注入该请求、按 claudeSearchThinking 改写其思考档位——单请求完成搜索+摘要，响应原样透传（控制台完整可见）。</li>
-      <li>纯图片请求（无搜索）→ 走 multimodal_fallback；没配则透传原 route。</li>
-      <li>搜索没配 search_fallback、或纯图片没配 multimodal_fallback → 降级透传原 route（上游可能报错）。</li>
-      </ul>
-      <h3>参数速查</h3>
-      <table style="width:100%;border-collapse:collapse;font-size:13px;color:#d4d4d4;margin:8px 0">
-      <tr style="border-bottom:1px solid #555">
-      <th style="text-align:left;padding:6px 8px">参数</th>
-      <th style="text-align:left;padding:6px 8px">配在哪儿</th>
-      <th style="text-align:left;padding:6px 8px">作用</th>
-      <th style="text-align:left;padding:6px 8px">搭配 / 互斥</th>
-      </tr>
-      <tr style="border-bottom:1px solid #333">
-      <td style="padding:6px 8px;vertical-align:top"><code>text_only</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] 条目</td>
-      <td style="padding:6px 8px;vertical-align:top">标记上游不支持图片</td>
-      <td style="padding:6px 8px;vertical-align:top">含图请求改走 multimodal_fallback；没配则透传原 route</td>
-      </tr>
-      <tr style="border-bottom:1px solid #333">
-      <td style="padding:6px 8px;vertical-align:top"><code>no_search</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] 条目</td>
-      <td style="padding:6px 8px;vertical-align:top">标记上游不支持搜索</td>
-      <td style="padding:6px 8px;vertical-align:top">搜索请求改走 search_fallback；与 enhance_search 互斥（标了 no_search 则 enhance_search 不生效）</td>
-      </tr>
-      <tr style="border-bottom:1px solid #333">
-      <td style="padding:6px 8px;vertical-align:top"><code>enhance_search</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] 条目</td>
-      <td style="padding:6px 8px;vertical-align:top">支持搜索时对独立搜索子代理请求注入摘要指令（单请求模式）</td>
-      <td style="padding:6px 8px;vertical-align:top">仅该 route 未标 no_search 时生效；与 search_fallback 互斥</td>
-      </tr>
-      <tr style="border-bottom:1px solid #333">
-      <td style="padding:6px 8px;vertical-align:top"><code>claudeSearchSummary</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] 条目 / search_fallback</td>
-      <td style="padding:6px 8px;vertical-align:top">独立搜索子代理请求注入摘要指令：forceLow/forceMid/forceHigh 按档注入、noForce 不注入</td>
-      <td style="padding:6px 8px;vertical-align:top">每条 pattern 独立设置；route 自己服务时压过 enhance_search legacy 字段，落 search_fallback 时逐字段压过 sf 自己的值（没设的字段回落 sf）</td>
-      </tr>
-      <tr style="border-bottom:1px solid #333">
-      <td style="padding:6px 8px;vertical-align:top"><code>claudeSearchThinking</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] 条目 / search_fallback</td>
-      <td style="padding:6px 8px;vertical-align:top">改写独立搜索子代理请求的思考档位：off/low/mid/high/max</td>
-      <td style="padding:6px 8px;vertical-align:top">逐字段优先级同上；不设 = 不动该请求的思考</td>
-      </tr>
-      <tr style="border-bottom:1px solid #333">
-      <td style="padding:6px 8px;vertical-align:top">只影响 Responses 口；Anthropic 口仍走该 route 的 url；配了它该 route 的 text_only/no_search/enhance_search 对透传流不生效</td>
-      </tr>
-      <tr style="border-bottom:1px solid #333">
-      <td style="padding:6px 8px;vertical-align:top"><code>thinking</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] 条目 / search_fallback</td>
-      <td style="padding:6px 8px;vertical-align:top">声明目标模型的思考形态：auto（默认，按客户端 model 名查表）/ adaptive / budget</td>
-      <td style="padding:6px 8px;vertical-align:top">仅 Responses 翻译流生效（透传不翻译、Anthropic 口不改写）；别名命中 adaptive 表但目标是 Kimi 等 budget 上游时配 "budget" 纠正；search_fallback 的值在搜索兜底接管时取代命中 route 的 thinking（显式 &gt; lazyApply &gt; auto）</td>
-      </tr>
-      <tr style="border-bottom:1px solid #333">
-      <td style="padding:6px 8px;vertical-align:top"><code>convertOff2Low</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] 条目 / fast_route / multimodal_fallback / search_fallback</td>
-      <td style="padding:6px 8px;vertical-align:top">显式关思考的请求悄悄升级为 low 思考发上游，回传剥离思考块让下游无感知（usage 如实透传）："translate"=仅 Responses 翻译口（按客户端模型名预匹配该 route；Codex 菜单的 fast_route 名取 fast_route 的值）；"all"=翻译口 + Anthropic 原生口（按最终生效路由取值，图片/搜索兜底交换后用兜底路由的值）。翻译口另有一扇门：工具续轮历史不可回放、下游又没关思考时，代理兜底的自行关思考改为按下游所请档位发（没给/不认识 → low 保底；不剥思考块，带回签名让下轮历史自愈）</td>
-      <td style="padding:6px 8px;vertical-align:top">默认关（不写 = 原样透传）。动机：Kimi 文档「关闭 thinking 后路由到 K2.8 Preview 无思考版」——开着思考避免 K3 被降级路由；budget 类模型 low 放不下（budget≥1024 且 ≤max_tokens/2）时放弃升级保持关；上游拒 thinking 时自动回退关思考重试一次；悄悄升级显双色徽标 [off-&gt;low]，历史兜底如实显示所请档位。注意翻译口在翻译时无法预知图片/搜索兜底交换，故兜底路由上的值只对 Anthropic 原生口生效</td>
-      </tr>
-      <tr style="border-bottom:1px solid #333">
-      <td style="padding:6px 8px;vertical-align:top"><code>allowNoThinkBlock4Anthropic</code></td>
-      <td style="padding:6px 8px;vertical-align:top">顶层</td>
-      <td style="padding:6px 8px;vertical-align:top"><b>工具续轮历史缺可回放的签名思考块时怎么办</b>（仅 Responses 翻译口；真 Anthropic 对开着思考的这种历史报 400）：true = 按所请思考档位照发，真被 400 拒了自动关思考重试一次（思考块不剥离、随回传带签名让下轮历史自愈）；false = cc-switch 式直接关思考</td>
-      <td style="padding:6px 8px;vertical-align:top"><b>不写 = true（先试模式）</b>。false 优先于 convertOff2Low 的历史兜底门；显式关思考的请求不受影响（convertOff2Low 的 low 升级照常）；fable-5/mythos-5 这种关不掉思考的模型仍直接报错；本就没打算思考的请求不空跑兜底</td>
-      </tr>
-            <tr style="border-bottom:1px solid #333">
-      <td style="padding:6px 8px;vertical-align:top"><code>vars</code></td>
-      <td style="padding:6px 8px;vertical-align:top">顶层</td>
-      <td style="padding:6px 8px;vertical-align:top">命名字符串变量：文件里任意字符串值可写 <code>$NAME</code> 或 <code>${NAME}</code> 引用（key、url 都行），换 key 只改 vars 一处</td>
-      <td style="padding:6px 8px;vertical-align:top">加载时解析、文件保留引用原文；引用未定义变量 = 加载/保存报错并指明位置（如 routes[0].api）；值必须是字符串（空串允许）；变量可再引用变量（单层）；$ 后不是合法名字（如 $5）原样保留</td>
-      </tr>
-<tr style="border-bottom:1px solid #333">
-      <td style="padding:6px 8px;vertical-align:top"><code>multimodal_fallback</code></td>
-      <td style="padding:6px 8px;vertical-align:top">顶层</td>
-      <td style="padding:6px 8px;vertical-align:top">图片兜底上游</td>
-      <td style="padding:6px 8px;vertical-align:top">route 标 text_only 且请求含图时走它；纯图片无搜索才落这里</td>
-      </tr>
-      <tr>
-      <td style="padding:6px 8px;vertical-align:top"><code>search_fallback</code></td>
-      <td style="padding:6px 8px;vertical-align:top">顶层</td>
-      <td style="padding:6px 8px;vertical-align:top">搜索兜底上游</td>
-      <td style="padding:6px 8px;vertical-align:top">route 标 no_search 且请求含搜索时走它；整请求转发给上游自己搜索回答。独立搜索子代理请求还可被 claudeSearchSummary 注入摘要指令 / claudeSearchThinking 改写思考（单请求，优先于 legacy 的 summary_mode/summary_thinking；这两个字段也能挂在 routes[] 条目上按 pattern 各自设置，命中 route 设了的字段逐字段压过这里的值）</td>
-      </tr>
-      <tr style="border-bottom:1px solid #333">
-      <td style="padding:6px 8px;vertical-align:top"><code>lazyApply</code></td>
-      <td style="padding:6px 8px;vertical-align:top">顶层</td>
-      <td style="padding:6px 8px;vertical-align:top">全局默认值：给各路由类结构（routes[] / search_fallback / fast_route / multimodal_fallback / classifier_route）原本就支持的字段补默认值，等价于把该键写进每个没显式设置它的对象</td>
-      <td style="padding:6px 8px;vertical-align:top">逐字段优先级：局部显式值（含 false / ""）&gt; lazyApply &gt; 内置默认；url/api/model/pattern/url_response_api 永不继承；不创建未配置的可选路由；enhance_search 整体覆盖不合并；控制台「预览 lazyApply 生效后 JSON」可只读查看展开结果</td>
-      </tr>
-      <tr>
-      <td style="padding:6px 8px;vertical-align:top"><code>noLazyApply</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] 条目 / search_fallback / fast_route / multimodal_fallback / classifier_route</td>
-      <td style="padding:6px 8px;vertical-align:top">true = 该对象整体不继承 lazyApply，自己显式写的字段照常生效</td>
-      <td style="padding:6px 8px;vertical-align:top">用于让个别 route 保留 search_fallback 自己的值：继承来的 claudeSearch* 视同局部写入，会压过 fallback</td>
-      </tr>
-      </table>
-      <h3>pattern 顺序</h3>
-      <p>routes 按数组顺序匹配，第一个命中的生效，无"更具体优先"排序。宽通配会截胡窄通配--<code>*opus*</code> 写在 <code>*opus-4*</code> 前面时，<code>claude-opus-4-8</code> 先命中 <code>*opus*</code>，<code>*opus-4*</code> 永不触发；要让更具体的 pattern 生效，写在前面。另外 <code>pattern</code> 可以写成数组表示"或"：<code>"pattern": ["*fable*", "*opus*"]</code> 等价于把同一条路由复制多份、每份一个 pattern（其余字段共享，位置与数组顺序即匹配顺序）；数组成员里的 <code>*</code> 同样算兜底，保留名只废掉对应那一项；空数组或非字符串成员会在加载/保存时报错。</p>
-      <h3>图片多模态</h3>
-      <p>route 标了 <code>text_only</code> 且请求含图片时触发兜底。route 本身支持图片（未标 text_only）则直接走，不触发。</p>
-      <ul>
-      <li>配了 multimodal_fallback：改走 mf（正常多模态兜底）。</li>
-      <li>没配 multimodal_fallback：透传给原 route 模型（上游不支持图片会报错，代理原样透传）。</li>
-      </ul>
-      <p>搜索请求（带 web_search）一律走 search_fallback，不管请求体是否含图片--没有证据表明会同时出现多模态+搜索。</p>
-      <h3>增强搜索 enhance_search</h3>
-      <p>route 配 <code>enhance_search</code> 后，<b>仅当该 route 支持搜索（未标 <code>no_search</code>）</b>时生效：对独立搜索子代理请求（最后一条 user 消息以 "Perform a web search for the query" 开头），把摘要指令注入该请求的用户消息，仍走本 route 自己的上游，一次请求完成搜索+逐条摘要（Result N: ...），上游响应原样透传给客户端（控制台完整可见）。</p>
-      <p>与 <code>search_fallback</code> 互斥：route 支持搜索（未标 <code>no_search</code>）走 enhance_search；route 标 <code>no_search</code> 缺搜索才走 <code>search_fallback</code>。</p>
-      <p><code>summary_level</code>：low（简短）/ mid（中等）/ high（详尽）/ max（含代码公式逐字复述），控制注入指令的详细度。<code>summary_thinking</code>：是否把该请求的思考改写为 low。另有新字段 <code>claudeSearchSummary</code>（forceLow/forceMid/forceHigh 按档注入 / noForce 不注入）与 <code>claudeSearchThinking</code>（off/low/mid/high/max 改写思考），可挂在 search_fallback 或任意 routes[] 条目上（每条 pattern 独立，不配 enhance_search 也能用），优先于这两个 legacy 字段。</p>
-      <h3>缓存命中</h3>
-      <p>命中率 = cache_read / (input + cache_read + cache_creation)，与 Claude Code 的 cache hit 算法一致：缓存写入不算命中、但计入总输入。高命中率（90%+）主要来自上游模型（DeepSeek/Kimi）的原生 context caching，代理只透传 usage，不做额外缓存优化。点击状态页「缓存命中」卡片可看按真实上游模型分组的明细（含写入量），弹窗底部另有「实测缓存时间」表（按上游 URL+模型归组，规则见「统计字段」的「缓存年龄」条目）。中途断开的流（按 Esc、网络掉线）不计入聚合：它们只有 message_start 的预估 usage（部分上游的 start.input 含 cache_read 且 start.cr=0），计入会污染命中率，日志里标 [中断]。</p>
-      <h3>统计字段</h3>
-      <ul>
-      <li><b>总时间</b>：从代理收到下游请求到把响应全部发回下游的总耗时 = 内部处理（翻译/路由/缓冲）+ 首字等待 + 吐字 + 收尾内部处理。</li>
-      <li><b>首字</b>：从发出请求到收到首个输出字节耗时（ms）。</li>
-      <li><b>tok/s</b>：流式输出速率 = 输出 token 数 / 流式耗时。</li>
-      <li><b>缓存命中</b>：见上。</li>
-      <li><b>分类器</b>（状态卡片）：卡面数字 = 启动至今命中分类器特征的请求数（Claude Code 安全判断与 Codex 审批评估都识别）——无论是否分流到 classifier_route、是否改写思考都计，反映分类器请求量。鼠标移上卡片看明细（命中 / 思考改写，按 Claude Code 与 Codex 分列），点击放大弹窗（含改写占比）；「思考改写」= 实际被改写思考配置的次数（classifier_route 配 "classifier_thinking": "off" 时关掉 thinking；配 "low" 时先同样关思考、再按 convertOff2Low 机制悄悄升级为 low 上游思考并剥掉响应里的 thinking 块——客户端看到关思考回复、API 列显 [off->low]，max_tokens 太小放不下 1024 token 地板时改为上游侧把 max_tokens 抬高 1024（budget 恰为 1024，回答空间原样保留，客户端无感——guardian 请求的 max_tokens 可小到 64）；classifier_thinking_cc / classifier_thinking_codex 可按来源分别覆盖；已是 off 形态的请求（thinking 含 disabled）跳过改写阶段、透传不计数——low 策略下此类请求由升级点完成唯一一次真实改写并在此计数；low 策略下已是 low 形态的请求（adaptive 配 effort low/minimal，或 enabled 且 budget 不超过 low 默认值 2048）同样原样透传、不绕行 off、响应保留 thinking 块。判定只看 Anthropic 原生思考字段，代理强改时自补的 reasoning_effort/reasoning 辅助字段不作评判依据；其余形态照常先归一化再升级）。</li>
-      <li><b>缓存年龄</b>（最近完成流表）：按会话+路由锚定，显示该会话该路由最近一次缓存写入距现在过了多久（m:ss 递增）——上游缓存真实存活期是动态的，这列不再猜倒计时，只告诉你"这份缓存是多久前写的"，还能不能用请对照「缓存命中」弹窗的实测区间判断。同会话同路由最新一条流显示年龄；被更新的同键流刷新后旧行显示 <code>-</code>；无会话标识的流（count_tokens 探针、不带 metadata 的裸调用）恒 <code>-</code>。黄灯（等待首字节）阶段被下游主动断开的 499 流视同未刷新缓存：本行显 <code>-</code>、该键锚停留再上一次同键流；绿灯（流式中）断开的 499 说明上游已在吐字、缓存已写，照常作为新锚。同会话同路由有<b>在途流正在吐字</b>（绿灯转发中）时，缓存实际刚被刷新——该键最新完成行冻结显示 <code>[m:ss]</code>（方括号内为刷新那一刻旧锚的年龄，数字不变），新锚等该在途流完成归档后生效。会话标识来自客户端请求自带字段（Claude Code 的 metadata.user_id 内 session_id / Codex 的 prompt_cache_key），代理只读不改。年龄从流开始时刻起算（缓存写入/刷新发生在上游处理输入时）。<b>保留规则</b>：开始时刻距今 5 分钟内的"会话+路由最新一条"完成流不被「保留完成流 N」挤掉（列表行数可因此超 N）；显示 <code>-</code> 或超窗口的行照常先进先出裁剪。<b>点击「缓存命中」卡片</b>，弹窗底部「实测缓存时间」表列出各上游实测的缓存存活时间：按 URL+模型名归为一类（不看其他参数），同会话相邻两条流后条命中率 ≥95% 记一次区间下界「至少活了间隔那么久」（取最大值），前条命中过而后条命中率 &lt;50% 记一次区间上界「没活过间隔那么久」（取最小值；不看严格归零——系统提示词等公共前缀的残留缓存命中不算活着）；间隔按两条流各自的开始时刻算；输入总量（input+cache_read+cache_creation）不足 1024 token 的流不观测（小请求噪声大）；两侧观测矛盾时（上游缓存时间中途变化、或缓存被提前驱逐）以较新的观测为准、被否的一侧作废重测、观测次数同步归零重计；「≥形成」「&lt;形成」两列 = 各自界数值形成至今的时长（m:ss 递增），该界数值变化（含矛盾作废重测）即重新起算，只新增支撑观测、数值不变时不重置；无该界观测时随界同显 <code>-</code>；实测只作展示，纯内存态（重启/清空统计即清零）。</li>
-      <li><b>model 列工具标签</b>：响应中调用过的工具以 [Read*1][Edit*3] 形式金色跟在 model 后（web_search 等服务端工具也计）；在途流随转发实时增加，完成流保留最终快照；同名 N 次合并显 *N（原始次数），单次调用显 *1，参数结构体为空的单次调用显 *0（如空搜索），顺序按首次出现。<b>剥块红标 [剥N]</b>：该流剥掉的回放搜索块总数（本对话撞过 400 学到水位后，不比水位新的信封直接剥不还原——注册表按龄淘汰，同龄与更老的必死，不设固定存活期上限；还原后仍被上游拒 → 400 兜底剥光重试并学水位）。在途流挂在 model 列工具标签后，完成流改挂「缓存命中」列（如 81%[剥2]），同一标记两处只出现一处；只有发生过剥块的流才显示。拆分（水位剥多少、400 兜底剥多少）看日志 [剥块]/[兜底] 行；被剥后客户端无感（收不到 400），模型失去旧搜索上下文时可能重搜。</li>
-      <li><b>上下文压缩标记 [Compact]</b>：请求的最后一条 user 消息以客户端压缩提示词开头时（Claude Code 的 compact、Codex CLI 的 checkpoint compaction），在途流与完成流的 model 列前置 <code>[Compact]</code>。对话历史里只是引用这些提示词不算。完成流把压缩成效附在模型名后，如 <code>[170k->20k, 88%]</code>：输入侧为 input_tokens + cache_read + cache_creation 的总上下文，输出侧为该次摘要的 output_tokens，百分比是压缩掉的比例。用量未解析时只显示 <code>[Compact]</code>，不显示数字。</li>
-      <li><b>状态灯时长</b>：在途流表格首列状态灯（⚪请求 / 🟡等首字节 / 🟢转发中）旁的秒数 = 当前灯色已持续的时间；只在灯变色时清零——黄灯内部的路由、多次重试不单独清零，保证"黄灯亮了多久"连续真实。黄灯内正在等首字节时，状态灯与总时长之间另有 [尝试N: Xs] = 本次尝试已等待的时长（每次尝试重新起算；重试退避中显示 [退避中]）——黄灯总时长 = 各次尝试 + 退避之和，两者对照即可看出是否已在重试。</li>
-      <li><b>API 列</b>：协议来源 + 思考值合一格。名 = 协议来源：橙 <code>[Anthropic]</code> = Anthropic 口原生流量（Claude Code 等）、紫 <code>[translate]</code> = Responses 口翻译成 Anthropic 走主管线。名后 <code>[值]</code> = <b>实际发给上游</b>的思考配置最短形态（翻译映射、分类器关思考等代理改写生效后的最终口径），<b>其颜色 = 词汇口径</b>（思考是针对上游的：上游收到的都是 Anthropic 格式，所以紫名后跟的是橙值）——橙 = Anthropic thinking。值：<code>关</code> = thinking disabled 或 effort none/off/disabled；<code>开 N</code> = enabled + budget_tokens N；<code>adaptive</code> = 自适应无档；<code>low</code>/<code>high</code>/<code>max</code> 等档位词 = adaptive 的 effort；无 <code>[值]</code> = 请求体未带思考字段。例：<code>[translate][开 16384]</code> = Codex 发 effort high 翻译到 Anthropic 上游；<code>[Anthropic][关]</code> = 命中分类器被代理关思考。</li>
-      <li><b>499</b>：状态码列中非 200 的状态码加方括号显示（如 [499]、[400]），一眼挑出异常流。重试/预算用尽时代理会向下游透传兜底 error 事件（overloaded_error），此类流状态码列显 [重试尽]（点击行可回看该兜底事件）。发生过退避重试的流在状态码后追加金色 <code>[重试N次]</code>（N = 重试次数，如 200[重试2次]；[重试尽] 时同样带，可对照 max_retries 看是否打满）。499 口径与上游提供商后台一致——上游响应没发完连接就结束了记 499（最常见是下游主动取消，取消会传导成上游断连；nginx 惯例 client closed request）；上游完整发完后下游才断开的（Codex 收完 response.completed 即关连接）仍记 200——此时取消不再传导上游：代理会把上游响应读到 EOF 收尾（10 秒兜底防挂死），提供商后台同样记干净的 200 而非幻影 499。另外，上游 200 SSE 流结束但没收到终止事件（message_stop；Responses 口为 response.completed/failed/incomplete）且下游并未断开时，状态码后追加红色 <code>[无stop]</code>——上游提前截断的直接证据（下游主动取消的 499 场景不带此标）。</li>
-      </ul>
-      <h3>流查看</h3>
-      <p>点击在途流/最近完成流的行可看该流内容：「看…」按钮四态循环 请求体 → 输出[渲染] → 输出[流式原始] → 输出[非流式]（默认落 输出[渲染]）。渲染=把 SSE 事件流解析成可读文本；流式原始=逐字原文；非流式=把事件流组装成最终 JSON 结构看整体（Anthropic 流按 message_start 骨架累加，Responses 流取 response.completed；流未完整到达时注明是部分快照），此态下「交互式JSON」直接对组装结果成树；请求体视图回看导致这个流的请求体（JSON 自动美化，非完整 JSON 按原文显示）。请求体与输出都按链路侧记录、点「链路」按钮切换：默认 代理↔上游 侧（请求体是实际发给上游的，输出是上游回来的原始流）；下游↔代理 侧是客户端发出/实际收到的。只有两侧有差异的流才双存——Responses 翻译流恒不同（下游 Responses、上游 Anthropic 各一份）；convertAlltoStream 重建 JSON 的流下游侧输出是重建后的一次性 JSON；原生流只在请求体被改写（分类器关思考/路由改模型等）时才单独存下游侧请求体；路由改模型的流响应两侧也不同（模型名写回客户端原名），响应同样双存，上游侧恒为上游原始字节——切到无记录的一侧会自动回退另一侧并在按钮旁提示。浏览一律只给前 256KB。勾选「储存完整结构体」（默认关，重启复位）后，新开始的请求额外记录完整请求体与输出（不设上限，占内存），查看器出现「下载请求体/下载输出」按钮可下载完整文件（JSON 美化后保存，非 JSON 按原文；按当前链路侧下载，缺侧回退时文件名按实际返回侧命名）；取消勾选立即清空已存的完整副本、下载按钮消失。「交互式JSON」按钮恒可用（不要求勾选储存）：把当前查看内容渲染成可按键折叠展开的 JSON 树（树根第一层默认展开，更深层点键名行懒展开；输出是 SSE 事件流时解析成事件数组再成树，非流式态下则对组装后的最终对象成树；该侧已记录完整副本时优先拉完整版成树，否则对手头浏览的前 256KB 内容成树，截断尾事件按原文挂入），并跟随链路侧切换。数据残缺的流不会静默当成完整版：请求体只剩截断版的「下载请求体」置灰（悬停见原因），无完整输出副本的「下载输出」置灰（均按当前链路侧判定）；交互式JSON 只拒绝拼不回完整 JSON 的截断请求体，输出一律对手头内容成树。</p>
-      <h3>配置管理</h3>
-      <ul>
-      <li>配置页可新建 / 重命名 / 删除 / 切换配置文件。</li>
-      <li>切到配置页后自动每 3 秒刷新文件列表，增删配置文件无需手动按「刷新列表」。</li>
-      <li>当前生效的配置不可删除。</li>
-      </ul>
-      <h3>已删除的配置键</h3>
-      <p>以下旧版顶层键已删除。配置里带着它们<b>不影响启动、程序照常运行</b>，但对应功能不会生效（不模拟旧行为）：托盘图标会变红，「日志」页的启动警告会逐键列明并给出替代写法。请在「配置」页删除这些键；需要原功能就按替代写法改写后再保存（含旧键的保存会被拒绝）。</p>
-      <ul>
-      <li><code>classifier_thinking_disabled</code> → 在 <code>classifier_route</code> 内设置 <code>"classifier_thinking": "off"</code></li>
-      <li><code>classifier_max_tokens</code> → 直接删除（分类器请求的 max_tokens 不再被修改）</li>
-      <li><code>translateNone2Low</code> → 在 routes[] 条目 / fast_route / multimodal_fallback / search_fallback 上设置 <code>"convertOff2Low": "translate"</code> 或 <code>"all"</code>（见「参数速查」）</li>
-      </ul>
-      <h3>访问控制</h3>
-      <p>转发通道与管理端点（/__*）都永远仅本机可连（127.0.0.1/::1）：误把 listen / responses_listen 设成 0.0.0.0 也不会把转发通道暴露给内网。</p>
-`
-
-// logViewerDocEN is the English full text of the usage-doc popup: the English page render replaces the __DOC_BODY__ placeholder
-// with it wholesale (wholesale replacement is sturdier than sentence-by-sentence — long paragraphs can't be missed). When adding doc sections,
-// write Chinese into logViewerDocZH and English here — both sides must be updated.
-const logViewerDocEN = `      <h3>Global stream-ification: convertAlltoStream</h3>
-      <p>With the top-level <code>convertAlltoStream</code> (default false) on, every non-streaming request (<code>stream:false</code> or omitted) is silently sent upstream as streaming: the in-flight view shows token output live, with TTFT and tok/s stats. The caller notices nothing — after collecting the full upstream stream, the proxy <b>rebuilds</b> the non-streaming JSON exactly (all content blocks reassembled as they arrived, including search-result encrypted_content) and returns it in one piece. If the stream breaks midway (no message_stop), nothing has been written to the client and the proxy retries the whole request.</p>
-      <p>Only applies to Anthropic Messages requests (/v1/messages); already-streaming requests are unaffected. No SSE keep-alive pings during retry waits (they would pollute a non-streaming response) — waits are silent.</p>
-      <h3>Responses API listener: responses_listen</h3>
-      <p>Set the top-level <code>responses_listen</code> (empty = off; the config template demonstrates <code>127.0.0.1:8081</code>) and the proxy opens an extra OpenAI Responses API endpoint (<code>/v1/responses</code>) at that address: tools that only speak the Responses protocol (Codex CLI etc.) are bridged to Anthropic upstreams. Requests are translated to Anthropic Messages and run through the main pipeline (routing/retries/this console's monitoring all apply); responses are translated back to Responses (SSE event stream for stream:true, one-shot JSON for false).</p>
-      <p>Model names from the tool still join route matching: add a route like <code>gpt-5*</code> to pick the upstream and rewrite the model. Changes apply on save/reload (the listener starts/stops with config); like the main port, it is only ever reachable from this machine.</p>
-      <p>Translation rules match cc-switch 3.20.0: <code>reasoning.effort</code> maps by model class — adaptive models (fable-5/mythos-5/mythos-preview/sonnet-5/opus-4-8/4-7/4-6/sonnet-4-6) become <code>thinking:adaptive</code> + <code>output_config.effort</code> (fable-5/mythos-5 cannot disable thinking; explicit none becomes effort:low); other models become budget_tokens (low 2048 / medium 8192 / high 16384 / xhigh·max·ultra 24576). The lookup uses the client-sent model name (before route rewriting), so to make the table apply, set the client model directly to the target model name; conversely, when an alias hits the table but the routed target differs in capability (e.g. alias claude-fable-5 actually routed to budget-only Kimi), set <code>thinking:"budget"/"adaptive"</code> on that route entry to override (see the cheat sheet below). Tool mapping (function/custom/namespace/tool_search/web_search/input_file) and the full mapping table: see docs/usage.md, section "Responses translation mapping". When a tool continuation's history has no replayable signed thinking block, the top-level <code>allowNoThinkBlock4Anthropic</code> governs (<b>default true</b>: send the requested thinking mode; one automatic thinking-off retry if the upstream really 400s; false = cc-switch-style preemptive thinking-off — see the cheat sheet).</p>
-      <p><b>Thinking/search envelopes</b>: signed thinking blocks and each search's full result block (with encrypted_content body) are self-enveloped into the reasoning item's encrypted_content and sent to the client with the response; when the client replays history next turn, they are restored upstream — the thinking chain survives, and follow-ups read the previously searched body directly instead of re-searching the same keywords. Search envelopes carry a url+key hash ownership and are wholly masked with a key-derived cipher (no plaintext url/key sits in client history): change upstream or key and they cannot be decrypted or restored (saves tokens); changing models is not blocked (decryption verified to work). When an old conversation's search block has expired upstream (tool_call_id error), the proxy automatically strips the replayed blocks and retries once — a seamless degradation to searching again when needed.</p>
-      <p><b>Codex CLI setup</b>: easiest — the Config tab of this console shows two one-line commands for Windows / macOS·Linux (same format as DeepSeek docs, generated live from the editor: address from <code>responses_listen</code>; every routes pattern's representative name is written into the Codex <code>/model</code> menu, the dropdown selection being the default model). Copy into the matching terminal and press Enter; the script is baked and served by this proxy in real time. The repo also ships interactive versions under <code>internal/logview/scripts/</code>: <code>codex-setup.ps1</code> (Windows) and <code>codex-setup.sh</code> (macOS/Linux): pick a model, back up then rewrite config.toml, write the model catalog, one-command restore. Manual: edit <code>~/.codex/config.toml</code> — top-level <code>model_provider = "proxy429"</code>, <code>model = "gpt-5-codex"</code>, <code>forced_login_method = "api"</code> (no official login); the scripts no longer write <code>preferred_auth_method</code> and actively delete stale lines (newer Codex dropped the key with an unrecognized-key warning, and the desktop app honors it by forcing OpenAI API-key auth — a false not-logged-in wall without an OpenAI account), plus a <code>[model_providers.proxy429]</code> section (<code>base_url = "http://127.0.0.1:8081/v1"</code>, <code>wire_api = "responses"</code>, <code>experimental_bearer_token</code> = any placeholder string). Restart Codex after editing. <b>503 with zero proxy-side logs</b>: a system proxy or terminal proxy variables hijack 127.0.0.1 requests to a proxy server that returns 503 — the Windows one-line installer already writes a user-level NO_PROXY (including 127.0.0.1) to bypass; the macOS script writes NO_PROXY into the launchd environment (applies to GUI apps and new terminals) and installs a login item for persistence (choose "restore" in the script to undo); the Linux script only checks and suggests <code>export NO_PROXY="localhost,127.0.0.1,::1"</code>; for manual setup run <code>setx NO_PROXY "localhost,127.0.0.1,::1"</code> (Windows) then restart Codex. Step-by-step guide: docs/usage.md, section "Getting Codex CLI on the proxy".</p>
-      <h3>Routing & capability fallbacks</h3>
-      <p>Requests match upstreams in order: classifier_route (classifier rerouting) → fast_route (fast direct) → routes (by model pattern). After a route hits, if that upstream lacks a capability (text_only = no images / no_search = no search), the following applies:</p>
-      <li>Search requests (with web_search) → search_fallback: the whole request is forwarded to the search_fallback upstream, which searches and answers by itself. For standalone search sub-agent requests (final user message opens with "Perform a web search for the query"), claudeSearchSummary can inject the summary instruction into that very request and claudeSearchThinking can rewrite its thinking level — search+summary complete in a single request, the response passing through untouched (fully visible in this console).</li>
-      <li>Image-only requests (no search) → multimodal_fallback; if unset, pass through to the original route.</li>
-      <li>Search without search_fallback, or image-only without multimodal_fallback → degrade to passing through the original route (the upstream may error).</li>
-      <h3>Parameter cheat sheet</h3>
-      <table style="width:100%;border-collapse:collapse;font-size:13px;color:#d4d4d4;margin:8px 0">
-      <thead><tr style="color:#9a9a9a;border-bottom:1px solid #333">
-      <th style="text-align:left;padding:6px 8px">Parameter</th>
-      <th style="text-align:left;padding:6px 8px">Where</th>
-      <th style="text-align:left;padding:6px 8px">Effect</th>
-      <th style="text-align:left;padding:6px 8px">Pairs / conflicts</th>
-      </tr></thead>
-      <tbody>
-      <tr style="border-bottom:1px solid #2a2a2a">
-      <td style="padding:6px 8px;vertical-align:top"><code>text_only</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] entry</td>
-      <td style="padding:6px 8px;vertical-align:top">Marks the upstream as image-incapable</td>
-      <td style="padding:6px 8px;vertical-align:top">Image requests go to multimodal_fallback; if unset, pass through the original route</td>
-      </tr>
-      <tr style="border-bottom:1px solid #2a2a2a">
-      <td style="padding:6px 8px;vertical-align:top"><code>no_search</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] entry</td>
-      <td style="padding:6px 8px;vertical-align:top">Marks the upstream as search-incapable</td>
-      <td style="padding:6px 8px;vertical-align:top">Search requests go to search_fallback; mutually exclusive with enhance_search (with no_search marked, enhance_search does not apply)</td>
-      </tr>
-      <tr style="border-bottom:1px solid #2a2a2a">
-      <td style="padding:6px 8px;vertical-align:top"><code>enhance_search</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] entry</td>
-      <td style="padding:6px 8px;vertical-align:top">When search is supported, inject the summary instruction into standalone search sub-agent requests (single-request mode)</td>
-      <td style="padding:6px 8px;vertical-align:top">Only applies when the route is NOT marked no_search; mutually exclusive with search_fallback</td>
-      </tr>
-      <tr style="border-bottom:1px solid #2a2a2a">
-      <td style="padding:6px 8px;vertical-align:top"><code>claudeSearchSummary</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] entry / search_fallback</td>
-      <td style="padding:6px 8px;vertical-align:top">Inject the summary instruction into standalone search sub-agent requests: forceLow/forceMid/forceHigh inject at level, noForce disables</td>
-      <td style="padding:6px 8px;vertical-align:top">Per-pattern independent; beats the route's enhance_search legacy fields when the route serves, and beats search_fallback's own values per field when diverted there (unset fields fall back to sf)</td>
-      </tr>
-      <tr style="border-bottom:1px solid #2a2a2a">
-      <td style="padding:6px 8px;vertical-align:top"><code>claudeSearchThinking</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] entry / search_fallback</td>
-      <td style="padding:6px 8px;vertical-align:top">Rewrite the standalone search sub-agent request's thinking level: off/low/mid/high/max</td>
-      <td style="padding:6px 8px;vertical-align:top">Same per-field precedence; unset = leave the request's thinking untouched</td>
-      </tr>
-      <tr style="border-bottom:1px solid #2a2a2a">
-      <td style="padding:6px 8px;vertical-align:top"><code>thinking</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] entry</td>
-      <td style="padding:6px 8px;vertical-align:top">Declares the target model's thinking shape: auto (default, looked up by client model name) / adaptive / budget</td>
-      <td style="padding:6px 8px;vertical-align:top">Only applies to Responses translated streams (pass-through doesn't translate, Anthropic port isn't rewritten); when an alias hits the adaptive table but the target is a budget upstream like Kimi, set "budget" to correct it</td>
-      </tr>
-      <tr style="border-bottom:1px solid #2a2a2a">
-      <td style="padding:6px 8px;vertical-align:top"><code>convertOff2Low</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] entry / fast_route / multimodal_fallback / search_fallback</td>
-      <td style="padding:6px 8px;vertical-align:top">Silently upgrades an explicit thinking-off request to low thinking upstream, stripping thinking blocks on the way back so the client sees no difference (usage stays truthful): "translate" = Responses translation port only (pre-matched by client model name; the Codex menu's fast_route name takes fast_route's value); "all" = translation port + Anthropic native port (the finally effective route's value; after an image/search fallback swap, the fallback route's). The translation port has a second door: a tool-continuation whose history has no signed thinking block would make the proxy disable thinking itself (same K2.8 routing) — with this set it sends the downstream's requested effort instead (low as floor when none was given) and does NOT strip the returned blocks, so the history heals next turn</td>
-      <td style="padding:6px 8px;vertical-align:top">Default off (unset = requests pass through untouched). Motivation: Kimi's docs state that with thinking off, K3-series requests are routed to the K2.8 Preview (no-thinking) model — keeping thinking on avoids that downgrade. Budget-class models abandon the upgrade (staying off) when low doesn't fit (budget ≥1024 and ≤max_tokens/2). One automatic retry with thinking off if the upstream rejects thinking. The quiet upgrade shows a two-tone [off-&gt;low] badge; the history fallback shows the requested effort as-is. Note the translation port can't foresee an image/search fallback swap at translation time, so fallback-route values only affect the native port</td>
-      </tr>
-      <tr style="border-bottom:1px solid #2a2a2a">
-      <td style="padding:6px 8px;vertical-align:top"><code>allowNoThinkBlock4Anthropic</code></td>
-      <td style="padding:6px 8px;vertical-align:top">Top level</td>
-      <td style="padding:6px 8px;vertical-align:top"><b>What to do when a tool continuation's history has no replayable signed thinking block</b> (Responses translation port only; real Anthropic 400s on such histories with thinking on): true = send the requested thinking mode as-is, one automatic thinking-off retry if really rejected (blocks are NOT stripped — they ride the return carrying signatures, so next-turn history heals); false = cc-switch-style preemptive thinking-off</td>
-      <td style="padding:6px 8px;vertical-align:top"><b>Unset = true (try-first mode)</b>. false wins over convertOff2Low's history door; explicit thinking-off requests are unaffected (convertOff2Low's low upgrade still applies); models that cannot disable thinking (fable-5/mythos-5) still error; requests that wouldn't think anyway don't waste the fallback round trip</td>
-      </tr>
-            <tr style="border-bottom:1px solid #2a2a2a">
-      <td style="padding:6px 8px;vertical-align:top"><code>vars</code></td>
-      <td style="padding:6px 8px;vertical-align:top">Top level</td>
-      <td style="padding:6px 8px;vertical-align:top">Named string variables: any string value in the file can reference them as <code>$NAME</code> / <code>${NAME}</code> (api, url, anything) — rotating a key edits one place instead of N</td>
-      <td style="padding:6px 8px;vertical-align:top">Resolved at load, the file keeps the references; an undefined reference fails load/save with the config path (e.g. routes[0].api); values must be strings (empty allowed); vars may reference vars (one level); a $ not forming a reference (e.g. $5) stays literal</td>
-      </tr>
-<tr style="border-bottom:1px solid #2a2a2a">
-      <td style="padding:6px 8px;vertical-align:top"><code>multimodal_fallback</code></td>
-      <td style="padding:6px 8px;vertical-align:top">Top level</td>
-      <td style="padding:6px 8px;vertical-align:top">Image fallback upstream</td>
-      <td style="padding:6px 8px;vertical-align:top">Used when a route is marked text_only and the request contains images; only image-without-search requests land here</td>
-      </tr>
-      <tr>
-      <td style="padding:6px 8px;vertical-align:top"><code>search_fallback</code></td>
-      <td style="padding:6px 8px;vertical-align:top">Top level</td>
-      <td style="padding:6px 8px;vertical-align:top">Search fallback upstream</td>
-      <td style="padding:6px 8px;vertical-align:top">Used when a route is marked no_search and the request contains search; the whole request is forwarded to the upstream to search and answer. Standalone search sub-agent requests may additionally get an injected summary instruction (claudeSearchSummary) / a thinking rewrite (claudeSearchThinking) — single request, taking precedence over the legacy summary_mode/summary_thinking; both fields also mount on routes[] entries per pattern, and a hit route's set fields override these values per field</td>
-      </tr>
-      <tr style="border-bottom:1px solid #333">
-      <td style="padding:6px 8px;vertical-align:top"><code>lazyApply</code></td>
-      <td style="padding:6px 8px;vertical-align:top">top level</td>
-      <td style="padding:6px 8px;vertical-align:top">Shared defaults: fills a field that every route-like object (routes[] / search_fallback / fast_route / multimodal_fallback / classifier_route) already supports, as if the key were written into every object that does not set it explicitly</td>
-      <td style="padding:6px 8px;vertical-align:top">Per-field priority: explicit local value (including false / "") &gt; lazyApply &gt; built-in default; url/api/model/pattern/url_response_api are never inherited; never creates an unconfigured optional route; enhance_search is replaced whole, never merged; the console's "Preview JSON after lazyApply" shows the expansion read-only</td>
-      </tr>
-      <tr>
-      <td style="padding:6px 8px;vertical-align:top"><code>noLazyApply</code></td>
-      <td style="padding:6px 8px;vertical-align:top">routes[] entry / search_fallback / fast_route / multimodal_fallback / classifier_route</td>
-      <td style="padding:6px 8px;vertical-align:top">true = this object ignores lazyApply entirely; its own explicit fields keep working</td>
-      <td style="padding:6px 8px;vertical-align:top">Use it when one route should keep search_fallback's own values: an inherited claudeSearch* value behaves as locally written and therefore beats the fallback</td>
-      </tr>
-      </tbody>
-      </table>
-      <h3>Pattern order</h3>
-      <p>routes match in array order — the first hit wins; there is no "more specific first" sorting. A wide wildcard can hijack a narrow one: with <code>*opus*</code> before <code>*opus-4*</code>, <code>claude-opus-4-8</code> hits <code>*opus*</code> first and <code>*opus-4*</code> never fires; put more specific patterns earlier. <code>pattern</code> also accepts an array (OR): <code>"pattern": ["*fable*", "*opus*"]</code> is exactly equivalent to duplicating the route once per pattern (other fields shared; the entry position and array order are the match order). A <code>*</code> member counts as a catch-all; a reserved name disables only that member; an empty array or a non-string member fails load/save.</p>
-      <h3>Image multimodality</h3>
-      <p>The fallback triggers when a route is marked <code>text_only</code> and the request contains images. A route that supports images (not marked text_only) is used directly without triggering it.</p>
-      <li>With multimodal_fallback set: go to mf (normal multimodal fallback).</li>
-      <li>Without multimodal_fallback: pass through to the original route's model (the upstream will error if it can't take images; the proxy passes the error through).</li>
-      <p>Search requests (with web_search) always go to search_fallback regardless of whether the body contains images — there is no evidence multimodal+search ever co-occur.</p>
-      <h3>Enhanced search: enhance_search</h3>
-      <p>With <code>enhance_search</code> on a route, it applies <b>only when that route supports search (not marked <code>no_search</code>)</b>: for a standalone search sub-agent request (final user message opens with "Perform a web search for the query"), the summary instruction is injected into that request's user message, which still goes to the route's own upstream — search + per-result summaries (Result N: ...) complete in a single request, the upstream response streaming through untouched (fully visible in this console).</p>
-      <p>Mutually exclusive with <code>search_fallback</code>: a route that supports search (not marked <code>no_search</code>) uses enhance_search; a route marked <code>no_search</code> uses <code>search_fallback</code> when search is missing.</p>
-      <p><code>summary_level</code>: low (brief) / mid / high (detailed) / max (verbatim with code & formulas) — controls the injected instruction's verbosity. <code>summary_thinking</code>: whether to rewrite the request's thinking to low. The newer fields <code>claudeSearchSummary</code> (forceLow/forceMid/forceHigh inject at level / noForce disables) and <code>claudeSearchThinking</code> (off/low/mid/high/max rewrite thinking) mount on search_fallback or on any routes[] entry (per-pattern independent, no enhance_search needed), taking precedence over these legacy fields.</p>
-      <h3>Cache hit</h3>
-      <p>Hit rate = cache_read / (input + cache_read + cache_creation), same as Claude Code's cache-hit algorithm: cache writes don't count as hits but do count into total input. High hit rates (90%+) mainly come from upstream models' (DeepSeek/Kimi) native context caching — the proxy only forwards usage, with no extra cache optimization. Click the Status tab's "Cache hit" card for details grouped by real upstream model (including write volume); the modal's bottom also has a "Measured cache lifetime" table (grouped by upstream URL+model; rules in "Stats fields" → "Cache age"). Streams cut off midway (Esc, network drops) don't count into aggregates: they only have message_start's estimated usage (some upstreams include cache_read in start.input with start.cr=0), which would pollute the hit rate; they're marked [interrupted] in the log.</p>
-      <h3>Stats fields</h3>
-      <li><b>Total</b>: from the proxy receiving the downstream request to finishing sending the whole response downstream = internal processing (translation/routing/buffering) + first-byte wait + token output + closing internal processing.</li>
-      <li><b>TTFT</b>: from sending the request to receiving the first output byte (ms).</li>
-      <li><b>tok/s</b>: streaming output rate = output tokens / streaming duration.</li>
-      <li><b>Cache hit</b>: see above.</li>
-      <li><b>Classifier</b> (status card): the number = requests since startup that hit a classifier signature (both Claude Code's safety check and Codex's guardian approval assessment are recognized) — counted whether or not rerouted to classifier_route and whether or not thinking was rewritten, reflecting classifier request volume. Hover the card for details (hits / thinking rewrites, split by Claude Code vs Codex), click for a modal (with rewrite share); "thinking rewrite" = requests whose thinking config was actually rewritten (with "classifier_thinking": "off" on classifier_route thinking is disabled; with "low" the request is first rewritten to thinking-off, then quietly upgraded to low thinking upstream via the convertOff2Low machinery with thinking blocks stripped from the response — the client sees a thinking-off reply with the [off->low] badge, and when a tiny max_tokens can't fit the 1024-token budget floor (guardian requests can arrive with as little as 64), max_tokens is raised by exactly 1024 upstream-side instead of abandoning — budget exactly 1024, the client's answer room untouched, the raised cap invisible to the client; classifier_thinking_cc / classifier_thinking_codex override per source; an already thinking-off request (thinking containing disabled) skips the rewrite phase, passed through uncounted — under "low" the upgrade point performs and counts the one real rewrite on it; under "low" an already thinking-low request (adaptive at low/minimal effort, or an enabled budget at/below the low default 2048) likewise passes through as-is — no off detour, thinking blocks kept in the response. Judgment reads the Anthropic-native thinking knobs alone; the belt-and-braces fields the proxy adds when forcing a mode (reasoning_effort/reasoning) never factor in; everything else is normalized then upgraded as usual).</li>
-      <li><b>Cache age</b> (finished-streams table): anchored by session+route, showing how long ago this session+route's most recent cache write happened (m:ss counting up) — real upstream cache lifetime is dynamic; this column no longer guesses a countdown, it only tells you "how long ago this cache was written"; for whether it's still usable, compare against the measured ranges in the "Cache hit" modal. The newest stream of the same session+route shows the age; once refreshed by a newer same-key stream, older rows show <code>-</code>; streams without a session id (count_tokens probes, bare calls without metadata) always show <code>-</code>. A 499 stream actively cut by the downstream during the yellow-light (waiting for first byte) phase is treated as not refreshing the cache: the row shows <code>-</code> and the key's anchor stays with the previous same-key stream; a 499 cut during green-light (streaming) means the upstream was already producing output and the cache was written, so it becomes the new anchor as usual. When an in-flight stream of the same session+route is <b>currently producing output</b> (green-light forwarding), the cache was just refreshed — the key's newest finished row freezes as <code>[m:ss]</code> (the bracket holds the old anchor's age at the refresh moment, number frozen); the new anchor takes effect once that in-flight stream finishes and is archived. Session ids come from the client request's own fields (Claude Code's session_id inside metadata.user_id / Codex's prompt_cache_key) — the proxy reads but never modifies them. Age counts from the stream's start moment (cache write/refresh happens while the upstream processes input). <b>Retention rule</b>: a "newest of session+route" finished stream whose start was within the last 5 minutes is not evicted by "keep finished N" (the list may exceed N rows because of this); rows showing <code>-</code> or outside the window are trimmed FIFO as usual. <b>Click the "Cache hit" card</b>: the "Measured cache lifetime" table at the bottom of the modal lists measured cache survival per upstream: grouped by URL+model name (other parameters ignored); for two adjacent same-session streams, if the later one's hit rate ≥95%, record one lower bound "lived at least that long" (take the max); if the earlier one hit and the later one's hit rate &lt;50%, record one upper bound "didn't live that long" (take the min; strict zero not required — residual hits from common prefixes like the system prompt don't count as alive); intervals are measured between the two streams' own start moments; streams with total input (input+cache_read+cache_creation) under 1024 tokens are not observed (small requests are noisy); when the two bounds contradict (upstream cache lifetime changed midway, or the cache was evicted early), the newer observation wins, the refuted side is voided and re-measured, and the sample count resets to zero; the "≥ age" and "&lt; age" columns = how long ago each bound's value was established (m:ss counting up) — re-established whenever the bound's value changes (including void-and-re-measure), not reset when new supporting observations arrive with the value unchanged; shows <code>-</code> when there is no observation for that bound; measurements are display-only, in-memory (cleared on restart or stats reset).</li>
-      <li><b>Tool tags in the model column</b>: tools called in the response appear in gold after the model as [Read*1][Edit*3] (server-side tools like web_search also count); in-flight streams grow them live as forwarding proceeds, finished streams keep the final snapshot; N calls of the same name merge as *N (raw count), a single call shows *1, a single call with an empty parameter struct shows *0 (e.g. an empty search), ordered by first appearance. <b>Red strip tag [strip N]</b>: total replayed search blocks stripped from this stream (after this conversation hit a 400 and learned the watermark, envelopes not newer than the watermark are stripped without restoring — the registry evicts by age, same-age and older always die, no fixed TTL cap; if a restored block is still rejected upstream → 400 fallback strips everything, retries, and learns the watermark). In-flight: attached after the model-column tool tags; finished: attached to the "Cache hit" column (e.g. 81%[strip 2]) — the same tag appears in only one of the two places; only streams that actually stripped show it. The split (watermark-stripped vs 400-fallback-stripped) is in the log's [strip]/[fallback] lines; stripping is invisible to the client (it never sees the 400), and the model may re-search when it loses old search context.</li>
-      <li><b>Context-compaction badge [Compact]</b>: when the request's final user message opens with a client compaction prompt (Claude Code compact, Codex CLI checkpoint compaction), the model column of in-flight and finished streams shows <code>[Compact]</code>. Conversation history that merely quotes these prompts does not count. Finished streams append the result after the model name as <code>[170k->20k, 88%]</code>. The input side is the total context (input_tokens + cache_read + cache_creation), the output side is the summary's output_tokens, and the percentage is the share compressed away. Usage that was not parsed leaves the badge without numbers.</li>
-      <li><b>Status-light duration</b>: the seconds next to the in-flight table's first-column status light (⚪ request / 🟡 waiting first byte / 🟢 forwarding) = how long the current light color has been on; it resets only when the light changes color — routing and multiple retries inside the yellow light don't reset it separately, keeping "how long has the yellow light been on" continuous and truthful. While waiting for the first byte inside yellow, between the light and the total duration there is also [attempt N: Xs] = how long the current attempt has been waiting (restarted per attempt; during retry backoff it shows [backing off]) — the yellow total = sum of all attempts + backoffs, so comparing the two tells you whether retries are already happening.</li>
-      <li><b>API column</b>: protocol origin + thinking value in one cell. Name = protocol origin: orange <code>[Anthropic]</code> = native Anthropic-port traffic (Claude Code etc.), purple <code>[translate]</code> = Responses port translated to Anthropic via the main pipeline. The <code>[value]</code> after the name = the shortest form of the thinking config <b>actually sent upstream</b> (final state after proxy rewrites like translation mapping and classifier thinking-off), <b>its color = the vocabulary</b> (thinking targets the upstream: upstreams always receive Anthropic format, so a purple name is followed by an orange value) — orange = Anthropic thinking. Values: <code>off</code> = thinking disabled or effort none/off/disabled; <code>on N</code> = enabled + budget_tokens N; <code>adaptive</code> = adaptive without level; <code>low</code>/<code>high</code>/<code>max</code> etc = effort of adaptive; no <code>[value]</code> = the request carried no thinking field. Examples: <code>[translate][on 16384]</code> = Codex sent effort high, translated to an Anthropic upstream; <code>[Anthropic][off]</code> = hit the classifier and the proxy disabled thinking.</li>
-      <li><b>499</b>: non-200 status codes in the status column are bracketed (e.g. [499], [400]) to spot abnormal streams at a glance. When retries/budget are exhausted, the proxy forwards a fallback error event (overloaded_error) downstream; such streams show [retries exhausted] in the status column (click the row to replay that fallback event). Streams that went through backoff retries get a gold <code>[retried Nx]</code> after the status code (N = retry count, e.g. 200[retried 2x]; [retries exhausted] carries it too — compare against max_retries to see if it maxed out). The 499 semantics match upstream provider dashboards — the connection ended before the upstream finished sending (most commonly the downstream actively cancelled, and the cancellation propagates into an upstream disconnect; nginx convention: client closed request); when the downstream disconnects only after the upstream finished completely (Codex closes the connection right after response.completed), it's still 200 — and the cancel no longer propagates upstream in that case: the proxy drains the response to EOF (10s grace cap) so the provider records a clean 200 too, not a phantom 499. Additionally, when an upstream 200 SSE stream ends without a terminal event (message_stop; response.completed/failed/incomplete on the Responses port) while the downstream stays connected, a red <code>[no-stop]</code> follows the status code — direct evidence of an upstream-side cutoff (client-cancelled 499 streams do not carry it).</li>
-      <h3>Stream viewer</h3>
-      <p>Click an in-flight or finished stream's row to view its content: the view button cycles four states — Request body → Output [rendered] → Output [raw stream] → Output [non-stream] (default landing: Output [rendered]). Rendered parses the SSE event stream into readable text; raw stream shows it verbatim; non-stream folds the event stream into the final JSON structure (Anthropic streams accumulate onto the message_start skeleton, Responses streams take the response.completed object; an incomplete stream is marked as a partial snapshot), and "Interactive JSON" in this state trees the assembled object; the request-body state replays the request body that caused this stream (JSON pretty-printed, non-complete JSON shown verbatim). Request body and output are recorded per link side — toggle with the "Link" button: the default proxy↔upstream side holds the request body actually sent upstream and the raw stream coming back; the client↔proxy side holds what the client sent and actually received. Only streams whose two sides differ are stored twice — Responses translation streams always differ (Responses downstream, Anthropic upstream, one copy each); for convertAlltoStream JSON-rebuilt streams the downstream output is the rebuilt one-shot JSON; direct streams record a separate downstream request body only when the body was rewritten (classifier thinking-off, route model change, etc.), and model-rerouted streams also differ on the response side (the model name is written back to the client's original), so the response is stored on both sides as well — the upstream side always holds the upstream's exact bytes; switching to a side with no record falls back to the other side, with a hint next to the button. Browsing always caps at the first 256KB. With "Store full payloads" on (default off, resets on restart), new requests additionally record the full request body and output (no cap, in memory), and the viewer shows "Download request/Download output" buttons for complete files (JSON pretty-printed, non-JSON verbatim; downloads follow the current link side, and on fallback the file name uses the actually-served side). Unchecking immediately purges stored full copies and the download buttons disappear. The "Interactive JSON" button is always available (the store-full switch is not required): it renders the content currently in view as a collapsible JSON tree (the root first level is expanded by default, deeper levels lazily expand on key-row click; SSE event streams are parsed into an event array first; in the non-stream state the tree is built from the assembled final object; when the side's full copy is recorded the tree fetches it, otherwise it trees the on-screen first-256KB copy, a truncated tail event included verbatim), and it follows link-side switches. Streams with incomplete data are never silently treated as complete: "Download request" is greyed out when only a truncated request body remains (hover for the reason), "Download output" is greyed out without a full output copy (both judged per current link side); Interactive JSON declines only a truncated request body (unparseable as complete JSON) — outputs are treed from whatever copy is on screen.</p>
-      <h3>Config management</h3>
-      <li>The Config tab can create / rename / delete / switch config files.</li>
-      <li>While on the Config tab, the file list auto-refreshes every 3 seconds — adding/removing config files needs no manual "refresh list".</li>
-      <li>The currently active config cannot be deleted.</li>
-      <h3>Removed config keys</h3>
-      <p>These legacy top-level keys were removed. A config still carrying them <b>starts and runs normally</b>, but their behavior stays inactive (not emulated): the tray icon turns red, and the startup warnings on the Logs tab name each key with its replacement. Delete the keys on the Config tab; if you need the old behavior, rewrite it as shown, then save (a save still containing removed keys is rejected).</p>
-      <ul>
-      <li><code>classifier_thinking_disabled</code> → set <code>"classifier_thinking": "off"</code> inside <code>classifier_route</code></li>
-      <li><code>classifier_max_tokens</code> → just delete it (classifier-request max_tokens is no longer modified)</li>
-      <li><code>translateNone2Low</code> → set <code>"convertOff2Low": "translate"</code> or <code>"all"</code> on routes[] entries / fast_route / multimodal_fallback / search_fallback (see the parameter cheat sheet)</li>
-      </ul>
-      <h3>Access control</h3>
-      <p>Both the forwarding channel and the admin endpoints (/__*) are only ever reachable from this machine (127.0.0.1/::1): even mistakenly setting listen / responses_listen to 0.0.0.0 won't expose the forwarding channel to the LAN.</p>
-`
-
 // enHTMLRepl static copy mapping (Chinese → English). Replacement runs by descending key length,
 // so short words (e.g. 「缓存命中」) can't pre-emptively truncate long sentences (e.g. 「缓存命中明细（按真实上游模型）」).
 var enHTMLRepl = [][2]string{
@@ -2162,7 +2038,6 @@ var enHTMLRepl = [][2]string{
 	{`缓存命中明细（按真实上游模型）`, `Cache-hit details (by real upstream model)`},
 	{`重试明细（按路由目标模型）`, `Retry details (by routed target model)`},
 	{`>分类器明细 <span`, `>Classifier details <span`},
-	{`使用文档`, `Usage Docs`},
 	{`配置文件: `, `Config file: `},
 	{`>刷新列表</button>`, `>Refresh list</button>`},
 	{`>新建</button>`, `>New</button>`},

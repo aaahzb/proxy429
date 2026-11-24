@@ -188,7 +188,7 @@ func TestRenderLogViewerENNoChinese(t *testing.T) {
 	}
 }
 
-// TestLogViewerHandlerZHDocBody: in the Chinese UI the doc popup body must be replaced by logViewerDocZH,
+// TestLogViewerHandlerZHDocBody: in the Chinese UI the docs-browser body must be replaced by logViewerDocZH,
 // with no __DOC_BODY__ placeholder left (regression of 00c08ab: the zh branch missed the replacement).
 func TestLogViewerHandlerZHDocBody(t *testing.T) {
 	old := platform.CurrentUILang()
@@ -202,7 +202,7 @@ func TestLogViewerHandlerZHDocBody(t *testing.T) {
 	if strings.Contains(body, "__DOC_BODY__") {
 		t.Errorf("中文页残留 __DOC_BODY__ 占位")
 	}
-	if !strings.Contains(body, "全局流式化 convertAlltoStream") {
+	if !strings.Contains(body, `<section class="docSec" id="doc-quickstart" data-group="开始使用">`) {
 		t.Errorf("中文页缺少文档正文")
 	}
 }
