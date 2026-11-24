@@ -73,7 +73,7 @@ func TestAdaptiveThinkingDefaultModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "adaptive" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "adaptive" {
 		t.Errorf("thinking=%v, want adaptive", out["thinking"])
 	}
 	if _, ok := out["output_config"]; ok {
@@ -95,10 +95,10 @@ func TestAdaptiveThinkingEffortMapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "adaptive" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "adaptive" {
 		t.Errorf("thinking=%v, want adaptive", out["thinking"])
 	}
-	if objStr(asObj(out["output_config"]), "effort") != "high" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["output_config"]), "effort") != "high" {
 		t.Errorf("output_config=%v, want effort=high", out["output_config"])
 	}
 	// Without effort: a non-default-adaptive model opens nothing.
@@ -121,10 +121,10 @@ func TestAdaptiveThinkingExplicitNone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "adaptive" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "adaptive" {
 		t.Errorf("thinking=%v, want adaptive（关不掉）", out["thinking"])
 	}
-	if objStr(asObj(out["output_config"]), "effort") != "low" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["output_config"]), "effort") != "low" {
 		t.Errorf("output_config=%v, want effort=low", out["output_config"])
 	}
 	if _, ok := out["temperature"]; ok {
@@ -136,7 +136,7 @@ func TestAdaptiveThinkingExplicitNone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if objStr(asObj(out2["thinking"]), "type") != "disabled" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out2["thinking"]), "type") != "disabled" {
 		t.Errorf("thinking=%v, want disabled", out2["thinking"])
 	}
 	if _, ok := out2["output_config"]; ok {
@@ -175,7 +175,7 @@ func TestThinkingHistoryInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "adaptive" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "adaptive" {
 		t.Errorf("thinking=%v, want adaptive（默认先试所请思考模式）", out["thinking"])
 	}
 	if _, ok := out["output_config"]; ok {
@@ -187,8 +187,8 @@ func TestThinkingHistoryInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	th := asObj(out2["thinking"])
-	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
+	th := jsonutil.AsObj(out2["thinking"])
+	if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("thinking=%v, want enabled/16000（默认先试所请 budget）", out2["thinking"])
 	}
 }
@@ -199,7 +199,7 @@ func TestThinkingHistoryValidWithEnvelope(t *testing.T) {
 		"type": "thinking", "thinking": "想", "signature": "sig_abc",
 	})
 	body := toolTurnBody("claude-sonnet-5")
-	body["input"] = append(asArr(body["input"]),
+	body["input"] = append(jsonutil.AsArr(body["input"]),
 		map[string]interface{}{"type": "message", "role": "user", "content": []interface{}{
 			map[string]interface{}{"type": "input_text", "text": "x"},
 		}},
@@ -211,7 +211,7 @@ func TestThinkingHistoryValidWithEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "adaptive" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "adaptive" {
 		t.Errorf("thinking=%v, want adaptive（历史有效）", out["thinking"])
 	}
 }
@@ -239,7 +239,7 @@ func TestForcedToolChoiceThinkingConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "disabled" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "disabled" {
 		t.Errorf("thinking=%v, want disabled", out["thinking"])
 	}
 	if _, ok := out["output_config"]; ok {
@@ -248,7 +248,7 @@ func TestForcedToolChoiceThinkingConflict(t *testing.T) {
 	if out["temperature"] != 0.7 {
 		t.Errorf("temperature=%v, want 0.7 恢复", out["temperature"])
 	}
-	if objStr(asObj(out["tool_choice"]), "type") != "tool" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["tool_choice"]), "type") != "tool" {
 		t.Errorf("tool_choice=%v, want tool 保留", out["tool_choice"])
 	}
 }

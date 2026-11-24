@@ -40,11 +40,11 @@ func TestResponsesToAnthropicSimple(t *testing.T) {
 		t.Errorf("max_tokens=%v, want 默认 %d", out["max_tokens"], defaultResponsesMaxTokens)
 	}
 	msgs := out["messages"].([]map[string]interface{})
-	if len(msgs) != 1 || objStr(msgs[0], "role") != "user" {
+	if len(msgs) != 1 || jsonutil.ObjStr(msgs[0], "role") != "user" {
 		t.Fatalf("messages=%v", msgs)
 	}
-	blk := asObj(msgs[0]["content"].([]interface{})[0])
-	if objStr(blk, "type") != "text" || objStr(blk, "text") != "hello" {
+	blk := jsonutil.AsObj(msgs[0]["content"].([]interface{})[0])
+	if jsonutil.ObjStr(blk, "type") != "text" || jsonutil.ObjStr(blk, "text") != "hello" {
 		t.Errorf("content=%v", blk)
 	}
 }
@@ -73,15 +73,15 @@ func TestResponsesToAnthropicFunctionCallMerging(t *testing.T) {
 		t.Fatalf("messages 数=%d, want 3: %v", len(msgs), msgs)
 	}
 	asst := msgs[1]
-	if objStr(asst, "role") != "assistant" {
-		t.Fatalf("msgs[1].role=%v", objStr(asst, "role"))
+	if jsonutil.ObjStr(asst, "role") != "assistant" {
+		t.Fatalf("msgs[1].role=%v", jsonutil.ObjStr(asst, "role"))
 	}
-	blocks := asArr(asst["content"])
+	blocks := jsonutil.AsArr(asst["content"])
 	if len(blocks) != 2 {
 		t.Fatalf("assistant 块数=%d, want 2", len(blocks))
 	}
-	b0 := asObj(blocks[0])
-	if objStr(b0, "type") != "tool_use" || objStr(b0, "id") != "c1" {
+	b0 := jsonutil.AsObj(blocks[0])
+	if jsonutil.ObjStr(b0, "type") != "tool_use" || jsonutil.ObjStr(b0, "id") != "c1" {
 		t.Errorf("tool_use[0]=%v", b0)
 	}
 	user := msgs[2]
@@ -131,8 +131,8 @@ func TestResponsesToAnthropicLeadingUserInserted(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 	msgs := out["messages"].([]map[string]interface{})
-	if objStr(msgs[0], "role") != "user" {
-		t.Fatalf("首条 role=%v, want user", objStr(msgs[0], "role"))
+	if jsonutil.ObjStr(msgs[0], "role") != "user" {
+		t.Fatalf("首条 role=%v, want user", jsonutil.ObjStr(msgs[0], "role"))
 	}
 	if len(msgs) != 3 {
 		t.Errorf("messages 数=%d, want 3（含补的前导 user）", len(msgs))
@@ -168,8 +168,8 @@ func TestResponsesToAnthropicIncompleteToolTurnDropped(t *testing.T) {
 		t.Errorf("messages=%v, want 两条 user", msgs)
 	}
 	for _, m := range msgs {
-		if objStr(m, "role") != "user" {
-			t.Errorf("role=%v, want user", objStr(m, "role"))
+		if jsonutil.ObjStr(m, "role") != "user" {
+			t.Errorf("role=%v, want user", jsonutil.ObjStr(m, "role"))
 		}
 	}
 }
@@ -194,9 +194,9 @@ func TestResponsesToAnthropicThinkingBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	th := asObj(out["thinking"])
+	th := jsonutil.AsObj(out["thinking"])
 	// Budget clamped to max_tokens/2=16000 (default max_tokens 32000; 16384 exceeds half).
-	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
+	if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("thinking=%v, want enabled/16000（max_tokens 半压顶）", th)
 	}
 }
@@ -220,8 +220,8 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("auto err: %v", err)
 	}
-	th := asObj(out["thinking"])
-	if objStr(th, "type") != "adaptive" || objStr(asObj(out["output_config"]), "effort") != "high" {
+	th := jsonutil.AsObj(out["thinking"])
+	if jsonutil.ObjStr(th, "type") != "adaptive" || jsonutil.ObjStr(jsonutil.AsObj(out["output_config"]), "effort") != "high" {
 		t.Errorf("auto fable-5: thinking=%v output_config=%v, want adaptive/high", th, out["output_config"])
 	}
 
@@ -230,8 +230,8 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("budget err: %v", err)
 	}
-	th = asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
+	th = jsonutil.AsObj(out["thinking"])
+	if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("budget fable-5: thinking=%v, want enabled/16000", th)
 	}
 	if out["output_config"] != nil {
@@ -243,8 +243,8 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("adaptive err: %v", err)
 	}
-	th = asObj(out["thinking"])
-	if objStr(th, "type") != "adaptive" || objStr(asObj(out["output_config"]), "effort") != "high" {
+	th = jsonutil.AsObj(out["thinking"])
+	if jsonutil.ObjStr(th, "type") != "adaptive" || jsonutil.ObjStr(jsonutil.AsObj(out["output_config"]), "effort") != "high" {
 		t.Errorf("adaptive gpt-5-codex: thinking=%v output_config=%v, want adaptive/high", th, out["output_config"])
 	}
 
@@ -253,7 +253,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("adaptive none err: %v", err)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "disabled" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "disabled" {
 		t.Errorf("adaptive+none: thinking=%v, want disabled", out["thinking"])
 	}
 
@@ -262,7 +262,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("budget none err: %v", err)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "disabled" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "disabled" {
 		t.Errorf("budget+none: thinking=%v, want disabled", out["thinking"])
 	}
 }
@@ -311,20 +311,20 @@ func TestResponsesToAnthropicToolChoiceAndTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	tools := asArr(out["tools"])
+	tools := jsonutil.AsArr(out["tools"])
 	if len(tools) != 2 {
 		t.Fatalf("tools 数=%d, want 2", len(tools))
 	}
-	t0 := asObj(tools[0])
-	if objStr(t0, "name") != "get_weather" || asObj(t0["input_schema"]) == nil {
+	t0 := jsonutil.AsObj(tools[0])
+	if jsonutil.ObjStr(t0, "name") != "get_weather" || jsonutil.AsObj(t0["input_schema"]) == nil {
 		t.Errorf("tool[0]=%v", t0)
 	}
-	t1 := asObj(tools[1])
-	if objStr(t1, "type") != "web_search_20250305" || objStr(t1, "name") != "web_search" {
+	t1 := jsonutil.AsObj(tools[1])
+	if jsonutil.ObjStr(t1, "type") != "web_search_20250305" || jsonutil.ObjStr(t1, "name") != "web_search" {
 		t.Errorf("tool[1]=%v, want web_search_20250305", t1)
 	}
-	tc := asObj(out["tool_choice"])
-	if objStr(tc, "type") != "any" {
+	tc := jsonutil.AsObj(out["tool_choice"])
+	if jsonutil.ObjStr(tc, "type") != "any" {
 		t.Errorf("tool_choice=%v, want required→any", tc)
 	}
 	if v, _ := tc["disable_parallel_tool_use"].(bool); !v {
@@ -346,7 +346,7 @@ func TestThinkingEnvelopeRoundTrip(t *testing.T) {
 	if dec == nil {
 		t.Fatalf("解码失败")
 	}
-	if objStr(dec, "thinking") != "先想一想" || objStr(dec, "signature") != "sig_abc" {
+	if jsonutil.ObjStr(dec, "thinking") != "先想一想" || jsonutil.ObjStr(dec, "signature") != "sig_abc" {
 		t.Errorf("还原块=%v", dec)
 	}
 	// Unsigned thinking isn't encoded; garbled/foreign envelopes don't decode.
@@ -382,30 +382,30 @@ func TestAnthropicToResponsesObject(t *testing.T) {
 	if out["model"] != "deepseek-v4-flash" {
 		t.Errorf("model=%v（应取上游回传的）", out["model"])
 	}
-	output := asArr(out["output"])
+	output := jsonutil.AsArr(out["output"])
 	if len(output) != 3 {
 		t.Fatalf("output 数=%d, want 3: %v", len(output), output)
 	}
-	rs := asObj(output[0])
-	if objStr(rs, "type") != "reasoning" || objStr(rs, "encrypted_content") == "" {
+	rs := jsonutil.AsObj(output[0])
+	if jsonutil.ObjStr(rs, "type") != "reasoning" || jsonutil.ObjStr(rs, "encrypted_content") == "" {
 		t.Errorf("reasoning 项: %v", rs)
 	}
-	if decodeThinkingEnvelope(objStr(rs, "encrypted_content")) == nil {
+	if decodeThinkingEnvelope(jsonutil.ObjStr(rs, "encrypted_content")) == nil {
 		t.Errorf("reasoning.encrypted_content 应能还原 thinking 块")
 	}
-	fc := asObj(output[2])
-	if objStr(fc, "type") != "function_call" || objStr(fc, "call_id") != "toolu_1" {
+	fc := jsonutil.AsObj(output[2])
+	if jsonutil.ObjStr(fc, "type") != "function_call" || jsonutil.ObjStr(fc, "call_id") != "toolu_1" {
 		t.Errorf("function_call 项: %v", fc)
 	}
 	var args map[string]interface{}
-	if err := json.Unmarshal([]byte(objStr(fc, "arguments")), &args); err != nil || args["city"] != "北京" {
-		t.Errorf("arguments=%v err=%v", objStr(fc, "arguments"), err)
+	if err := json.Unmarshal([]byte(jsonutil.ObjStr(fc, "arguments")), &args); err != nil || args["city"] != "北京" {
+		t.Errorf("arguments=%v err=%v", jsonutil.ObjStr(fc, "arguments"), err)
 	}
-	usage := asObj(out["usage"])
+	usage := jsonutil.AsObj(out["usage"])
 	if jsonutil.ToInt64(usage["input_tokens"]) != 88 || jsonutil.ToInt64(usage["output_tokens"]) != 9 {
 		t.Errorf("usage=%v, want input=88(77+11缓存) output=9", usage)
 	}
-	if jsonutil.ToInt64(asObj(usage["input_tokens_details"])["cached_tokens"]) != 11 {
+	if jsonutil.ToInt64(jsonutil.AsObj(usage["input_tokens_details"])["cached_tokens"]) != 11 {
 		t.Errorf("cached_tokens 应=11: %v", usage)
 	}
 }
@@ -464,49 +464,49 @@ func TestAnthToRespStreamAllBlocks(t *testing.T) {
 	}
 
 	final := conv.buildFinalResponse()
-	output := asArr(final["output"])
+	output := jsonutil.AsArr(final["output"])
 	// reasoning + web_search_call(call) + web_search_call(sources) + function_call + message = 5
 	if len(output) != 5 {
 		t.Fatalf("output 数=%d, want 5: %v", len(output), output)
 	}
 	// The reasoning item's envelope restores the thinking block (signature included).
-	rs := asObj(output[0])
-	dec := decodeThinkingEnvelope(objStr(rs, "encrypted_content"))
-	if dec == nil || objStr(dec, "signature") != "sig_abc" {
+	rs := jsonutil.AsObj(output[0])
+	dec := decodeThinkingEnvelope(jsonutil.ObjStr(rs, "encrypted_content"))
+	if dec == nil || jsonutil.ObjStr(dec, "signature") != "sig_abc" {
 		t.Errorf("reasoning 信封还原失败: %v", dec)
 	}
 	// Real search: the call item's action carries query, the result item's action carries sources.
 	var wsActions []map[string]interface{}
 	for _, it := range output {
-		if objStr(asObj(it), "type") == "web_search_call" {
-			wsActions = append(wsActions, asObj(asObj(it)["action"]))
+		if jsonutil.ObjStr(jsonutil.AsObj(it), "type") == "web_search_call" {
+			wsActions = append(wsActions, jsonutil.AsObj(jsonutil.AsObj(it)["action"]))
 		}
 	}
 	if len(wsActions) != 2 {
 		t.Fatalf("web_search_call 数=%d, want 2: %v", len(wsActions), output)
 	}
-	if objStr(wsActions[0], "query") != "测试查询" {
+	if jsonutil.ObjStr(wsActions[0], "query") != "测试查询" {
 		t.Errorf("搜索调用项 action=%v, want query=测试查询", wsActions[0])
 	}
-	if len(asArr(wsActions[1]["sources"])) != 1 {
+	if len(jsonutil.AsArr(wsActions[1]["sources"])) != 1 {
 		t.Errorf("搜索结果项 action=%v, want 1 条 sources", wsActions[1])
 	}
 	// function_call arguments fully assembled.
 	var fcItem map[string]interface{}
 	for _, it := range output {
-		if objStr(asObj(it), "type") == "function_call" {
-			fcItem = asObj(it)
+		if jsonutil.ObjStr(jsonutil.AsObj(it), "type") == "function_call" {
+			fcItem = jsonutil.AsObj(it)
 		}
 	}
 	if fcItem == nil {
 		t.Fatalf("缺 function_call 项")
 	}
 	var args map[string]interface{}
-	if err := json.Unmarshal([]byte(objStr(fcItem, "arguments")), &args); err != nil || args["city"] != "北京" {
-		t.Errorf("arguments=%v", objStr(fcItem, "arguments"))
+	if err := json.Unmarshal([]byte(jsonutil.ObjStr(fcItem, "arguments")), &args); err != nil || args["city"] != "北京" {
+		t.Errorf("arguments=%v", jsonutil.ObjStr(fcItem, "arguments"))
 	}
 	// usage merge: input 77+cache 11=88, output 9.
-	usage := asObj(final["usage"])
+	usage := jsonutil.AsObj(final["usage"])
 	if jsonutil.ToInt64(usage["input_tokens"]) != 88 || jsonutil.ToInt64(usage["output_tokens"]) != 9 {
 		t.Errorf("usage=%v", usage)
 	}
@@ -577,19 +577,19 @@ func TestAnthToRespStreamDropsEmptySearchTriplet(t *testing.T) {
 		t.Errorf("正文文本不应受影响")
 	}
 	final := conv.buildFinalResponse()
-	output := asArr(final["output"])
+	output := jsonutil.AsArr(final["output"])
 	// Only reasoning + message remain (preamble/empty-call/empty-result dropped).
 	if len(output) != 2 {
 		t.Fatalf("output 数=%d, want 2: %v", len(output), output)
 	}
-	if objStr(asObj(output[0]), "type") != "reasoning" {
+	if jsonutil.ObjStr(jsonutil.AsObj(output[0]), "type") != "reasoning" {
 		t.Errorf("output[0]=%v, want reasoning", output[0])
 	}
-	msg := asObj(output[1])
-	if objStr(msg, "type") != "message" {
+	msg := jsonutil.AsObj(output[1])
+	if jsonutil.ObjStr(msg, "type") != "message" {
 		t.Fatalf("output[1]=%v, want message", output[1])
 	}
-	text := objStr(asObj(asArr(msg["content"])[0]), "text")
+	text := jsonutil.ObjStr(jsonutil.AsObj(jsonutil.AsArr(msg["content"])[0]), "text")
 	if text != "答案" {
 		t.Errorf("正文=%q, want 答案", text)
 	}
@@ -633,19 +633,19 @@ func TestAnthToRespStreamStripsRepeatedPreamble(t *testing.T) {
 			}
 			var m map[string]interface{}
 			if json.Unmarshal([]byte(line[6:]), &m) == nil {
-				deltas.WriteString(objStr(m, "delta"))
+				deltas.WriteString(jsonutil.ObjStr(m, "delta"))
 			}
 		}
 	}
 	if deltas.String() != "我确认一下" {
 		t.Errorf("delta 拼接=%q, want 我确认一下（前言应剥离）", deltas.String())
 	}
-	output := asArr(conv.buildFinalResponse()["output"])
+	output := jsonutil.AsArr(conv.buildFinalResponse()["output"])
 	if len(output) != 1 {
 		t.Fatalf("output 数=%d, want 1: %v", len(output), output)
 	}
-	msg := asObj(output[0])
-	if got := objStr(asObj(asArr(msg["content"])[0]), "text"); got != "我确认一下" {
+	msg := jsonutil.AsObj(output[0])
+	if got := jsonutil.ObjStr(jsonutil.AsObj(jsonutil.AsArr(msg["content"])[0]), "text"); got != "我确认一下" {
 		t.Errorf("最终消息=%q, want 我确认一下", got)
 	}
 }
@@ -683,7 +683,7 @@ func TestAnthToRespStreamDropsSearchQueryEcho(t *testing.T) {
 	if strings.Contains(joined, "output_text") {
 		t.Errorf("纯回声块不应产生任何 output_text 事件")
 	}
-	if output := asArr(conv.buildFinalResponse()["output"]); len(output) != 0 {
+	if output := jsonutil.AsArr(conv.buildFinalResponse()["output"]); len(output) != 0 {
 		t.Fatalf("output 数=%d, want 0（纯回声块不进输出）: %v", len(output), output)
 	}
 }
@@ -701,13 +701,13 @@ func TestAnthropicToResponsesObjectDropsEmptySearch(t *testing.T) {
 		"usage": map[string]interface{}{"input_tokens": 1, "output_tokens": 1},
 	}
 	out := anthropicToResponsesObject(msg, "k3-256k", nil, nil, false)
-	output := asArr(out["output"])
+	output := jsonutil.AsArr(out["output"])
 	if len(output) != 1 {
 		t.Fatalf("output 数=%d, want 1（空搜索三连全丢）: %v", len(output), output)
 	}
-	m := asObj(output[0])
-	text := objStr(asObj(asArr(m["content"])[0]), "text")
-	if objStr(m, "type") != "message" || text != "正文" {
+	m := jsonutil.AsObj(output[0])
+	text := jsonutil.ObjStr(jsonutil.AsObj(jsonutil.AsArr(m["content"])[0]), "text")
+	if jsonutil.ObjStr(m, "type") != "message" || text != "正文" {
 		t.Errorf("output[0]=%v, want message(正文)", output[0])
 	}
 }
@@ -728,7 +728,7 @@ func TestAnthropicToResponsesObjectKeepsRealSearch(t *testing.T) {
 		"usage": map[string]interface{}{"input_tokens": 1, "output_tokens": 1},
 	}
 	out := anthropicToResponsesObject(msg, "k3-256k", nil, nil, false)
-	output := asArr(out["output"])
+	output := jsonutil.AsArr(out["output"])
 	// Echo text deleted: web_search_call(call) + web_search_call(sources) + message(answer) = 3
 	if len(output) != 3 {
 		t.Fatalf("output 数=%d, want 3: %v", len(output), output)
@@ -736,16 +736,16 @@ func TestAnthropicToResponsesObjectKeepsRealSearch(t *testing.T) {
 	if b, _ := json.Marshal(output); strings.Contains(string(b), "Search results for query") {
 		t.Errorf("query 回声行不应出现在输出: %s", b)
 	}
-	call := asObj(output[0])
-	if objStr(asObj(call["action"]), "query") != "pandas 版本" {
+	call := jsonutil.AsObj(output[0])
+	if jsonutil.ObjStr(jsonutil.AsObj(call["action"]), "query") != "pandas 版本" {
 		t.Errorf("调用项 action=%v, want query=pandas 版本", call["action"])
 	}
-	src := asObj(output[1])
-	if len(asArr(asObj(src["action"])["sources"])) != 1 {
+	src := jsonutil.AsObj(output[1])
+	if len(jsonutil.AsArr(jsonutil.AsObj(src["action"])["sources"])) != 1 {
 		t.Errorf("结果项 action=%v, want 1 条 sources", src["action"])
 	}
-	m := asObj(output[2])
-	if got := objStr(asObj(asArr(m["content"])[0]), "text"); got != "答案" {
+	m := jsonutil.AsObj(output[2])
+	if got := jsonutil.ObjStr(jsonutil.AsObj(jsonutil.AsArr(m["content"])[0]), "text"); got != "答案" {
 		t.Errorf("正文=%q, want 答案", got)
 	}
 }
@@ -825,7 +825,7 @@ func TestConvertInputDropsSearchQueryEcho(t *testing.T) {
 	if len(msgs) != 3 {
 		t.Fatalf("消息数=%d, want 3: %s", len(msgs), b)
 	}
-	if got := objStr(asObj(asArr(msgs[1]["content"])[0]), "text"); got != "今天广州晴，25°C" {
+	if got := jsonutil.ObjStr(jsonutil.AsObj(jsonutil.AsArr(msgs[1]["content"])[0]), "text"); got != "今天广州晴，25°C" {
 		t.Errorf("assistant 文本=%q, want 今天广州晴，25°C（回声行已删）", got)
 	}
 }
@@ -867,23 +867,23 @@ func TestConvertInputKeepsNonEmptySearch(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("消息数=%d, want 2: %s", len(msgs), b)
 	}
-	content := asArr(msgs[1]["content"])
+	content := jsonutil.AsArr(msgs[1]["content"])
 	wantTypes := []string{"server_tool_use", "web_search_tool_result", "text"}
 	if len(content) != len(wantTypes) {
 		t.Fatalf("assistant 块数=%d, want %d: %s", len(content), len(wantTypes), b)
 	}
 	for i, wt := range wantTypes {
-		if got := objStr(asObj(content[i]), "type"); got != wt {
+		if got := jsonutil.ObjStr(jsonutil.AsObj(content[i]), "type"); got != wt {
 			t.Errorf("块[%d].type=%q, want %q", i, got, wt)
 		}
 	}
 	// The pair going upstream as-is: ids stay the natively registered ids
-	stu := asObj(content[0])
-	if objStr(asObj(stu["input"]), "query") != "广州天气" || objStr(stu, "id") != "srvtoolu_1" {
+	stu := jsonutil.AsObj(content[0])
+	if jsonutil.ObjStr(jsonutil.AsObj(stu["input"]), "query") != "广州天气" || jsonutil.ObjStr(stu, "id") != "srvtoolu_1" {
 		t.Errorf("原样上行的 server_tool_use 不对: %v", stu)
 	}
-	wstr := asObj(content[1])
-	if objStr(wstr, "tool_use_id") != "srvtoolu_1" {
+	wstr := jsonutil.AsObj(content[1])
+	if jsonutil.ObjStr(wstr, "tool_use_id") != "srvtoolu_1" {
 		t.Errorf("原样上行的 web_search_tool_result 不对: %v", wstr)
 	}
 }
@@ -924,7 +924,7 @@ func TestConvertInputMediaFallback(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("消息数=%d, want 1: %s", len(msgs), s)
 	}
-	if n := len(asArr(msgs[0]["content"])); n != 4 {
+	if n := len(jsonutil.AsArr(msgs[0]["content"])); n != 4 {
 		t.Fatalf("块数=%d, want 4: %s", n, s)
 	}
 }
@@ -951,8 +951,8 @@ func TestTranslatingWriterNonStream(t *testing.T) {
 	if m["object"] != "response" || m["status"] != "completed" {
 		t.Errorf("object=%v status=%v", m["object"], m["status"])
 	}
-	if len(asArr(m["output"])) != 5 {
-		t.Errorf("output 数=%d, want 5", len(asArr(m["output"])))
+	if len(jsonutil.AsArr(m["output"])) != 5 {
+		t.Errorf("output 数=%d, want 5", len(jsonutil.AsArr(m["output"])))
 	}
 }
 
@@ -1024,16 +1024,16 @@ func TestResponsesHandlerEndToEnd(t *testing.T) {
 
 	// What the upstream receives should be the translated Anthropic request: system from instructions, stream forced true,
 	// model rewritten by routing.
-	if objStr(gotBody, "system") != "Be helpful." {
+	if jsonutil.ObjStr(gotBody, "system") != "Be helpful." {
 		t.Errorf("上游 system=%v", gotBody["system"])
 	}
 	if s, _ := gotBody["stream"].(bool); !s {
 		t.Errorf("上游 stream=%v, want true（内部强制流式）", gotBody["stream"])
 	}
-	if objStr(gotBody, "model") != "deepseek-v4-flash" {
+	if jsonutil.ObjStr(gotBody, "model") != "deepseek-v4-flash" {
 		t.Errorf("上游 model=%v, want 路由改写 deepseek-v4-flash", gotBody["model"])
 	}
-	msgs := asArr(gotBody["messages"])
+	msgs := jsonutil.AsArr(gotBody["messages"])
 	if len(msgs) != 1 {
 		t.Errorf("上游 messages=%v", gotBody["messages"])
 	}
@@ -1051,8 +1051,8 @@ func TestResponsesHandlerEndToEnd(t *testing.T) {
 		t.Errorf("model=%v, want gpt-5-codex", m["model"])
 	}
 	// Search envelope riding along (triple injected after routing settled): original 5 items + envelope reasoning item = 6.
-	if len(asArr(m["output"])) != 6 {
-		t.Errorf("output 数=%d, want 6（含搜索信封项）", len(asArr(m["output"])))
+	if len(jsonutil.AsArr(m["output"])) != 6 {
+		t.Errorf("output 数=%d, want 6（含搜索信封项）", len(jsonutil.AsArr(m["output"])))
 	}
 }
 
@@ -1088,7 +1088,7 @@ func TestResponsesFastRouteEntry(t *testing.T) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	if objStr(gotBody, "model") != "k3-256k" {
+	if jsonutil.ObjStr(gotBody, "model") != "k3-256k" {
 		t.Errorf("fast 通道上游 model=%v, want k3-256k（fast_route.model 改写）", gotBody["model"])
 	}
 	if _, has := gotBody["speed"]; has {

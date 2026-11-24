@@ -70,11 +70,11 @@ func buildToolRegistry(tools []interface{}) *toolRegistry {
 			reg.addCustomTool(map[string]interface{}{"type": "custom", "name": name})
 			continue
 		}
-		tm := asObj(t)
+		tm := jsonutil.AsObj(t)
 		if tm == nil {
 			continue
 		}
-		switch objStr(tm, "type") {
+		switch jsonutil.ObjStr(tm, "type") {
 		case "function":
 			reg.addFunctionTool(tm, "")
 		case "custom":
@@ -122,15 +122,15 @@ func (reg *toolRegistry) addFunctionTool(tool map[string]interface{}, namespace 
 		kind = tkNamespace
 	}
 	// parameters normalization: must be an object-type schema (Anthropic strictly validates).
-	schema := asObj(tool["parameters"])
+	schema := jsonutil.AsObj(tool["parameters"])
 	if len(schema) == 0 {
 		schema = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 	}
-	if objStr(schema, "type") != "object" {
+	if jsonutil.ObjStr(schema, "type") != "object" {
 		schema["type"] = "object"
 	}
 	anthTool := map[string]interface{}{"name": chatName, "input_schema": schema}
-	if d := objStr(tool, "description"); d != "" {
+	if d := jsonutil.ObjStr(tool, "description"); d != "" {
 		anthTool["description"] = d
 	}
 	if strict, ok := tool["strict"]; ok {
@@ -190,17 +190,17 @@ func (reg *toolRegistry) addToolSearchTool() {
 // addNamespaceTool registers an MCP namespace: each sub-tool (type=function entries in the tools/children array)
 // is flattened one by one into an ns__name ordinary function tool.
 func (reg *toolRegistry) addNamespaceTool(tool map[string]interface{}) {
-	namespace := objStr(tool, "name")
+	namespace := jsonutil.ObjStr(tool, "name")
 	if namespace == "" {
 		return
 	}
-	children := asArr(tool["tools"])
+	children := jsonutil.AsArr(tool["tools"])
 	if children == nil {
-		children = asArr(tool["children"])
+		children = jsonutil.AsArr(tool["children"])
 	}
 	for _, c := range children {
-		cm := asObj(c)
-		if objStr(cm, "type") == "function" {
+		cm := jsonutil.AsObj(c)
+		if jsonutil.ObjStr(cm, "type") == "function" {
 			reg.addFunctionTool(cm, namespace)
 		}
 	}
@@ -208,10 +208,10 @@ func (reg *toolRegistry) addNamespaceTool(tool map[string]interface{}) {
 
 // responsesToolName extracts a tool name (tolerating both nested function form and flat form).
 func responsesToolName(tool map[string]interface{}) string {
-	if n := objStr(asObj(tool["function"]), "name"); n != "" {
+	if n := jsonutil.ObjStr(jsonutil.AsObj(tool["function"]), "name"); n != "" {
 		return strings.TrimSpace(n)
 	}
-	return strings.TrimSpace(objStr(tool, "name"))
+	return strings.TrimSpace(jsonutil.ObjStr(tool, "name"))
 }
 
 // flattenNamespaceToolName flattens namespace__name; over 64 bytes it's truncated prefix + "__" +
@@ -394,15 +394,15 @@ func documentBlockFromInputFile(part map[string]interface{}) map[string]interfac
 	if part == nil {
 		return nil
 	}
-	filename := objStr(part, "filename")
+	filename := jsonutil.ObjStr(part, "filename")
 	var block map[string]interface{}
-	if url := objStr(part, "file_url"); strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+	if url := jsonutil.ObjStr(part, "file_url"); strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
 		block = map[string]interface{}{
 			"type":   "document",
 			"source": map[string]interface{}{"type": "url", "url": url},
 		}
 	} else {
-		fileData := objStr(part, "file_data")
+		fileData := jsonutil.ObjStr(part, "file_data")
 		if !strings.HasPrefix(fileData, "data:") {
 			return nil
 		}
@@ -443,7 +443,7 @@ func normalizedImageURL(part map[string]interface{}) map[string]interface{} {
 		}
 		return map[string]interface{}{"url": u}
 	case map[string]interface{}:
-		if strings.TrimSpace(objStr(u, "url")) == "" {
+		if strings.TrimSpace(jsonutil.ObjStr(u, "url")) == "" {
 			return nil
 		}
 		return u
@@ -471,26 +471,26 @@ func imageMediaPartFromToolPart(part map[string]interface{}) map[string]interfac
 		}
 		return "data:" + mediaType + ";base64," + data
 	}
-	switch objStr(part, "type") {
+	switch jsonutil.ObjStr(part, "type") {
 	case "input_image", "image_url":
 		if u := normalizedImageURL(part); u != nil {
 			return map[string]interface{}{"type": "image_url", "image_url": u}
 		}
 	case "image":
-		if src := asObj(part["source"]); src != nil {
+		if src := jsonutil.AsObj(part["source"]); src != nil {
 			// A missing media_type counts as an image; when present it must have the image/ prefix.
-			mt := objStr(src, "media_type")
+			mt := jsonutil.ObjStr(src, "media_type")
 			if mt == "" {
-				mt = objStr(src, "mime_type")
+				mt = jsonutil.ObjStr(src, "mime_type")
 			}
 			if mt == "" {
-				mt = objStr(src, "mimeType")
+				mt = jsonutil.ObjStr(src, "mimeType")
 			}
 			if mt == "" || isImageMimeType(mt) {
-				if url := objStr(src, "url"); strings.TrimSpace(url) != "" {
+				if url := jsonutil.ObjStr(src, "url"); strings.TrimSpace(url) != "" {
 					return wrap(url)
 				}
-				if data := objStr(src, "data"); data != "" {
+				if data := jsonutil.ObjStr(src, "data"); data != "" {
 					if mt == "" {
 						mt = "image/png"
 					}
@@ -499,10 +499,10 @@ func imageMediaPartFromToolPart(part map[string]interface{}) map[string]interfac
 			}
 			return nil
 		}
-		if data := objStr(part, "data"); data != "" {
-			mt := objStr(part, "mimeType")
+		if data := jsonutil.ObjStr(part, "data"); data != "" {
+			mt := jsonutil.ObjStr(part, "mimeType")
 			if mt == "" {
-				mt = objStr(part, "mime_type")
+				mt = jsonutil.ObjStr(part, "mime_type")
 			}
 			if mt != "" && isImageMimeType(mt) {
 				return wrap(dataURL(mt, data))
@@ -511,7 +511,7 @@ func imageMediaPartFromToolPart(part map[string]interface{}) map[string]interfac
 	case "":
 		// Loose shape: no type but carries image_url as a data: URL.
 		if u := normalizedImageURL(part); u != nil {
-			if url := objStr(u, "url"); len(url) >= 5 && strings.EqualFold(url[:5], "data:") {
+			if url := jsonutil.ObjStr(u, "url"); len(url) >= 5 && strings.EqualFold(url[:5], "data:") {
 				return map[string]interface{}{"type": "image_url", "image_url": u}
 			}
 		}
@@ -651,10 +651,10 @@ func appendSanitizedToolResultValue(v interface{}, content *[]interface{}, isErr
 		}
 	case []interface{}:
 		for _, p := range t {
-			pm := asObj(p)
-			switch objStr(pm, "type") {
+			pm := jsonutil.AsObj(p)
+			switch jsonutil.ObjStr(pm, "type") {
 			case "input_text", "output_text", "text":
-				if txt := objStr(pm, "text"); txt == toolResultErrorMarker {
+				if txt := jsonutil.ObjStr(pm, "text"); txt == toolResultErrorMarker {
 					*isError = true
 				} else if txt != "" {
 					*content = append(*content, map[string]interface{}{"type": "text", "text": txt})
@@ -664,9 +664,9 @@ func appendSanitizedToolResultValue(v interface{}, content *[]interface{}, isErr
 			}
 		}
 	case map[string]interface{}:
-		switch objStr(t, "type") {
+		switch jsonutil.ObjStr(t, "type") {
 		case "input_text", "output_text", "text":
-			if txt := objStr(t, "text"); txt == toolResultErrorMarker {
+			if txt := jsonutil.ObjStr(t, "text"); txt == toolResultErrorMarker {
 				*isError = true
 			} else if txt != "" {
 				*content = append(*content, map[string]interface{}{"type": "text", "text": txt})
@@ -695,7 +695,7 @@ func alternateImageToolResultContent(v interface{}) (content []interface{}, isEr
 	}
 	appendSanitizedToolResultValue(cleaned, &content, &isError)
 	for _, p := range mediaParts {
-		if b := imageBlockFromInputImage(asObj(p)); b != nil {
+		if b := imageBlockFromInputImage(jsonutil.AsObj(p)); b != nil {
 			content = append(content, b)
 		}
 	}

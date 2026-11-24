@@ -178,12 +178,12 @@ func matchRouteRule(c *config.Config, model string) *config.RouteRule {
 // matching exactly the shapes buildToolRegistry converts. The main handler's hasWebSearch runs on the
 // translated Anthropic body; the translation-time fallback prediction needs the same answer up front.
 func responsesHasWebSearch(body map[string]interface{}) bool {
-	for _, t := range asArr(body["tools"]) {
-		tm := asObj(t)
+	for _, t := range jsonutil.AsArr(body["tools"]) {
+		tm := jsonutil.AsObj(t)
 		if tm == nil {
 			continue
 		}
-		switch objStr(tm, "type") {
+		switch jsonutil.ObjStr(tm, "type") {
 		case "web_search", "web_search_preview":
 			return true
 		}
@@ -371,23 +371,6 @@ func writeResponsesError(w http.ResponseWriter, status int, typ, msg string) {
 
 // ---- Helpers: map value extraction ----
 
-func asObj(v interface{}) map[string]interface{} {
-	m, _ := v.(map[string]interface{})
-	return m
-}
-
-func asArr(v interface{}) []interface{} {
-	a, _ := v.([]interface{})
-	return a
-}
-
-func asStr(v interface{}) string {
-	s, _ := v.(string)
-	return s
-}
-
-func objStr(m map[string]interface{}, k string) string { return asStr(m[k]) }
-
 func isMeaningfulText(s string) bool { return strings.TrimSpace(s) != "" }
 
 // ---- Request translation: Responses → Anthropic ----
@@ -420,25 +403,25 @@ func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, 
 // Motivation: Kimi's docs — "turning off thinking routes to the K2.8 Preview no-thinking variant"; keeping thinking on keeps K3 from being downgraded.
 func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx, thinkStyle string, none2Low bool, allowNoThink bool) (map[string]interface{}, *toolRegistry, int, error) {
 	result := map[string]interface{}{}
-	if model := objStr(body, "model"); model != "" {
+	if model := jsonutil.ObjStr(body, "model"); model != "" {
 		result["model"] = model
 	}
 
 	// The tool registry is built before messages conversion: function_call replay needs it to resolve namespace names back.
-	reg := buildToolRegistry(asArr(body["tools"]))
+	reg := buildToolRegistry(jsonutil.AsArr(body["tools"]))
 
 	// instructions + role=system/developer texts from input → system (joined with \n\n).
 	var sysParts []string
-	if ins := objStr(body, "instructions"); isMeaningfulText(ins) {
+	if ins := jsonutil.ObjStr(body, "instructions"); isMeaningfulText(ins) {
 		sysParts = append(sysParts, strings.TrimSpace(ins))
 	}
-	if items := asArr(body["input"]); items != nil {
+	if items := jsonutil.AsArr(body["input"]); items != nil {
 		for _, it := range items {
-			m := asObj(it)
+			m := jsonutil.AsObj(it)
 			if m == nil {
 				continue
 			}
-			if role := objStr(m, "role"); role == "system" || role == "developer" {
+			if role := jsonutil.ObjStr(m, "role"); role == "system" || role == "developer" {
 				sysParts = append(sysParts, responsesSystemText(m)...)
 			}
 		}
@@ -493,8 +476,8 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	// reading body.model. Mirrors transform_codex_anthropic.rs 312-367.
 	// When thinkStyle isn't auto, the route declaration overrides the decision: when the target model's capability disagrees with the client alias
 	// (e.g. an alias called claude-fable-5 actually routing to a budget-only upstream) the route config wins.
-	effort := objStr(asObj(body["reasoning"]), "effort")
-	model := objStr(body, "model")
+	effort := jsonutil.ObjStr(jsonutil.AsObj(body["reasoning"]), "effort")
+	model := jsonutil.ObjStr(body, "model")
 	adaptiveModel := usesAdaptiveThinking(model)
 	cannotDisable := thinkingCannotBeDisabled(model)
 	switch thinkStyle {
@@ -649,7 +632,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			// Anthropic rejects forced tool_choice with thinking on: models that can't disable error out;
 			// the rest keep the user's tool constraint and turn thinking off for this request (restoring temperature/top_p),
 			// without silently weakening a required/specified choice. Mirrors cc-switch 398-425.
-			if t := objStr(mapped, "type"); thinkingEnabled && (t == "any" || t == "tool") {
+			if t := jsonutil.ObjStr(mapped, "type"); thinkingEnabled && (t == "any" || t == "tool") {
 				if cannotDisable {
 					return nil, nil, n2lNone, fmt.Errorf("Anthropic model requires adaptive thinking and cannot honor a forced tool_choice")
 				}
@@ -666,7 +649,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			result["tool_choice"] = mapped
 		}
 		if v, ok := body["parallel_tool_calls"].(bool); ok && !v {
-			tc := asObj(result["tool_choice"])
+			tc := jsonutil.AsObj(result["tool_choice"])
 			if tc == nil {
 				tc = map[string]interface{}{"type": "auto"}
 				result["tool_choice"] = tc
@@ -687,10 +670,10 @@ func responsesSystemText(item map[string]interface{}) []string {
 		}
 	case []interface{}:
 		for _, p := range c {
-			pm := asObj(p)
-			switch objStr(pm, "type") {
+			pm := jsonutil.AsObj(p)
+			switch jsonutil.ObjStr(pm, "type") {
 			case "input_text", "output_text", "text":
-				if t := objStr(pm, "text"); isMeaningfulText(t) {
+				if t := jsonutil.ObjStr(pm, "text"); isMeaningfulText(t) {
 					out = append(out, strings.TrimSpace(t))
 				}
 			}
@@ -718,57 +701,57 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 		reqMask = reqTriple.mask
 	}
 	for _, it := range items {
-		item := asObj(it)
+		item := jsonutil.AsObj(it)
 		if item == nil {
 			continue
 		}
-		itemType := objStr(item, "type")
+		itemType := jsonutil.ObjStr(item, "type")
 		// Historically unfinished (incomplete) tool calls are dropped wholesale; replaying them 400s.
 		switch itemType {
 		case "function_call", "custom_tool_call", "tool_search_call":
-			if objStr(item, "status") == "incomplete" {
+			if jsonutil.ObjStr(item, "status") == "incomplete" {
 				continue
 			}
 		}
 		switch itemType {
 		case "function_call":
-			callID := objStr(item, "call_id")
+			callID := jsonutil.ObjStr(item, "call_id")
 			if callID == "" {
-				callID = objStr(item, "id")
+				callID = jsonutil.ObjStr(item, "id")
 			}
-			name := objStr(item, "name")
-			upstreamName := reg.chatNameForFunction(name, objStr(item, "namespace"))
-			argsStr := objStr(item, "arguments")
+			name := jsonutil.ObjStr(item, "name")
+			upstreamName := reg.chatNameForFunction(name, jsonutil.ObjStr(item, "namespace"))
+			argsStr := jsonutil.ObjStr(item, "arguments")
 			var input interface{}
 			if strings.TrimSpace(argsStr) == "" {
 				input = map[string]interface{}{}
 			} else if err := json.Unmarshal([]byte(argsStr), &input); err != nil {
 				return nil, fmt.Errorf("invalid function_call arguments for '%s': %v", name, err)
 			}
-			if asObj(input) == nil {
+			if jsonutil.AsObj(input) == nil {
 				return nil, fmt.Errorf("function_call arguments for '%s' must be a JSON object", name)
 			}
 			pushBlock(&msgs, "assistant", map[string]interface{}{
 				"type": "tool_use", "id": callID, "name": upstreamName,
-				"input": sanitizeToolUseInput(name, asObj(input)),
+				"input": sanitizeToolUseInput(name, jsonutil.AsObj(input)),
 			})
 		case "custom_tool_call":
-			callID := objStr(item, "call_id")
+			callID := jsonutil.ObjStr(item, "call_id")
 			if callID == "" {
-				callID = objStr(item, "id")
+				callID = jsonutil.ObjStr(item, "id")
 			}
 			// A custom tool's input is a raw value (usually a string): wrap it into {"input": ...} to match the wrapper schema.
 			input := item["input"]
 			pushBlock(&msgs, "assistant", map[string]interface{}{
-				"type": "tool_use", "id": callID, "name": objStr(item, "name"),
+				"type": "tool_use", "id": callID, "name": jsonutil.ObjStr(item, "name"),
 				"input": map[string]interface{}{customToolInputField: input},
 			})
 		case "tool_search_call":
-			callID := objStr(item, "call_id")
+			callID := jsonutil.ObjStr(item, "call_id")
 			if callID == "" {
-				callID = objStr(item, "id")
+				callID = jsonutil.ObjStr(item, "id")
 			}
-			input := asObj(item["arguments"])
+			input := jsonutil.AsObj(item["arguments"])
 			if input == nil {
 				input = map[string]interface{}{}
 			}
@@ -776,7 +759,7 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 				"type": "tool_use", "id": callID, "name": toolSearchProxyName, "input": input,
 			})
 		case "function_call_output", "custom_tool_call_output", "tool_search_output":
-			callID := objStr(item, "call_id")
+			callID := jsonutil.ObjStr(item, "call_id")
 			content, isError := toolResultContentFromResponsesItem(item)
 			block := map[string]interface{}{
 				"type": "tool_result", "tool_use_id": callID, "content": content,
@@ -787,7 +770,7 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 			pushToolResultBlock(&msgs, block)
 		case "input_text":
 			// Strip search query echo lines from history (see stripSearchQueryEcho), applied unconditionally to all text.
-			if t := stripSearchQueryEcho(objStr(item, "text")); isMeaningfulText(t) {
+			if t := stripSearchQueryEcho(jsonutil.ObjStr(item, "text")); isMeaningfulText(t) {
 				pushBlock(&msgs, "user", map[string]interface{}{"type": "text", "text": t})
 			}
 		case "input_image", "input_file":
@@ -795,7 +778,7 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 			// (see pushMediaPart).
 			pushMediaPart(&msgs, "user", item)
 		case "reasoning":
-			enc := objStr(item, "encrypted_content")
+			enc := jsonutil.ObjStr(item, "encrypted_content")
 			if b := decodeThinkingEnvelope(enc); b != nil {
 				pushAssistantThinkingBlock(&msgs, b)
 			} else if tri, blocks, ts, ok := decodeSearchEnvelope(enc, reqMask); ok {
@@ -837,7 +820,7 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 			}
 		default:
 			// message items or role-bearing items: system/developer were already collected into system above; skipped here.
-			role := objStr(item, "role")
+			role := jsonutil.ObjStr(item, "role")
 			if role == "" {
 				role = "user"
 			}
@@ -855,14 +838,14 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 				}
 			case []interface{}:
 				for _, p := range c {
-					pm := asObj(p)
-					switch objStr(pm, "type") {
+					pm := jsonutil.AsObj(p)
+					switch jsonutil.ObjStr(pm, "type") {
 					case "input_text", "output_text":
-						if t := stripSearchQueryEcho(objStr(pm, "text")); isMeaningfulText(t) {
+						if t := stripSearchQueryEcho(jsonutil.ObjStr(pm, "text")); isMeaningfulText(t) {
 							pushBlock(&msgs, anthRole, map[string]interface{}{"type": "text", "text": t})
 						}
 					case "refusal":
-						if t := stripSearchQueryEcho(objStr(pm, "refusal")); isMeaningfulText(t) {
+						if t := stripSearchQueryEcho(jsonutil.ObjStr(pm, "refusal")); isMeaningfulText(t) {
 							pushBlock(&msgs, anthRole, map[string]interface{}{"type": "text", "text": t})
 						}
 					case "input_image", "input_file":
@@ -891,10 +874,10 @@ func toolResultContentFromResponsesItem(item map[string]interface{}) (interface{
 		var content []interface{}
 		isError := false
 		for _, p := range out {
-			pm := asObj(p)
-			switch objStr(pm, "type") {
+			pm := jsonutil.AsObj(p)
+			switch jsonutil.ObjStr(pm, "type") {
 			case "input_text", "output_text":
-				if t := objStr(pm, "text"); t == toolResultErrorMarker {
+				if t := jsonutil.ObjStr(pm, "text"); t == toolResultErrorMarker {
 					isError = true
 				} else if t != "" {
 					content = append(content, map[string]interface{}{"type": "text", "text": t})
@@ -936,9 +919,9 @@ func toolResultContentFromResponsesItem(item map[string]interface{}) (interface{
 
 // imageBlockFromInputImage converts a Responses input_image (data URL or http URL) into an Anthropic image block.
 func imageBlockFromInputImage(part map[string]interface{}) map[string]interface{} {
-	url := objStr(part, "image_url")
+	url := jsonutil.ObjStr(part, "image_url")
 	if url == "" {
-		url = objStr(asObj(part["image_url"]), "url")
+		url = jsonutil.ObjStr(jsonutil.AsObj(part["image_url"]), "url")
 	}
 	if url == "" {
 		return nil
@@ -976,7 +959,7 @@ func imageBlockFromInputImage(part map[string]interface{}) map[string]interface{
 func pushBlock(msgs *[]map[string]interface{}, role string, block map[string]interface{}) {
 	if n := len(*msgs); n > 0 {
 		last := (*msgs)[n-1]
-		if objStr(last, "role") == role {
+		if jsonutil.ObjStr(last, "role") == role {
 			if arr, ok := last["content"].([]interface{}); ok {
 				last["content"] = append(arr, block)
 				return
@@ -994,7 +977,7 @@ func pushBlock(msgs *[]map[string]interface{}, role string, block map[string]int
 // fallback semantics as the tool-result parts path (see toolResultContentFromResponsesItem).
 func pushMediaPart(msgs *[]map[string]interface{}, role string, pm map[string]interface{}) {
 	var b map[string]interface{}
-	switch objStr(pm, "type") {
+	switch jsonutil.ObjStr(pm, "type") {
 	case "input_image":
 		b = imageBlockFromInputImage(pm)
 	case "input_file":
@@ -1011,11 +994,11 @@ func pushMediaPart(msgs *[]map[string]interface{}, role string, pm map[string]in
 func pushToolResultBlock(msgs *[]map[string]interface{}, block map[string]interface{}) {
 	if n := len(*msgs); n > 0 {
 		last := (*msgs)[n-1]
-		if objStr(last, "role") == "user" {
+		if jsonutil.ObjStr(last, "role") == "user" {
 			if arr, ok := last["content"].([]interface{}); ok {
 				insertAt := len(arr)
 				for i, b := range arr {
-					if objStr(asObj(b), "type") != "tool_result" {
+					if jsonutil.ObjStr(jsonutil.AsObj(b), "type") != "tool_result" {
 						insertAt = i
 						break
 					}
@@ -1038,11 +1021,11 @@ func pushToolResultBlock(msgs *[]map[string]interface{}, block map[string]interf
 func pushAssistantThinkingBlock(msgs *[]map[string]interface{}, block map[string]interface{}) {
 	if n := len(*msgs); n > 0 {
 		last := (*msgs)[n-1]
-		if objStr(last, "role") == "assistant" {
+		if jsonutil.ObjStr(last, "role") == "assistant" {
 			if arr, ok := last["content"].([]interface{}); ok {
 				idx := 0
 				for idx < len(arr) {
-					t := objStr(asObj(arr[idx]), "type")
+					t := jsonutil.ObjStr(jsonutil.AsObj(arr[idx]), "type")
 					if t != "thinking" && t != "redacted_thinking" {
 						break
 					}
@@ -1062,7 +1045,7 @@ func pushAssistantThinkingBlock(msgs *[]map[string]interface{}, block map[string
 // ensureLeadingUserMessage guarantees a leading user message: compacted/resumed sessions may start with an assistant or
 // function_call; Anthropic requires user first, else 400.
 func ensureLeadingUserMessage(msgs []map[string]interface{}) []map[string]interface{} {
-	if len(msgs) == 0 || objStr(msgs[0], "role") == "user" {
+	if len(msgs) == 0 || jsonutil.ObjStr(msgs[0], "role") == "user" {
 		return msgs
 	}
 	head := map[string]interface{}{
@@ -1080,8 +1063,8 @@ func dropIncompleteToolTurns(msgs []map[string]interface{}) []map[string]interfa
 	for i := 0; i < len(msgs); {
 		m := msgs[i]
 		toolUseIDs := messageBlockIDs(m, "tool_use", "id")
-		if objStr(m, "role") != "assistant" || len(toolUseIDs) == 0 {
-			if objStr(m, "role") == "user" {
+		if jsonutil.ObjStr(m, "role") != "assistant" || len(toolUseIDs) == 0 {
+			if jsonutil.ObjStr(m, "role") == "user" {
 				m = dropToolResultBlocks(m)
 			}
 			if messageHasContent(m) {
@@ -1092,7 +1075,7 @@ func dropIncompleteToolTurns(msgs []map[string]interface{}) []map[string]interfa
 		}
 		// Assistant carrying tool_use: check the immediately following user answers it completely.
 		var paired map[string]interface{}
-		if i+1 < len(msgs) && objStr(msgs[i+1], "role") == "user" {
+		if i+1 < len(msgs) && jsonutil.ObjStr(msgs[i+1], "role") == "user" {
 			paired = msgs[i+1]
 		}
 		toolResultIDs := map[string]bool{}
@@ -1130,10 +1113,10 @@ func dropIncompleteToolTurns(msgs []map[string]interface{}) []map[string]interfa
 // messageBlockIDs collects the id field values of blocks of the given types in a message.
 func messageBlockIDs(m map[string]interface{}, blockType, idField string) []string {
 	var ids []string
-	for _, b := range asArr(m["content"]) {
-		bm := asObj(b)
-		if objStr(bm, "type") == blockType {
-			ids = append(ids, objStr(bm, idField))
+	for _, b := range jsonutil.AsArr(m["content"]) {
+		bm := jsonutil.AsObj(b)
+		if jsonutil.ObjStr(bm, "type") == blockType {
+			ids = append(ids, jsonutil.ObjStr(bm, idField))
 		}
 	}
 	return ids
@@ -1141,13 +1124,13 @@ func messageBlockIDs(m map[string]interface{}, blockType, idField string) []stri
 
 // dropToolResultBlocks returns a copy of the message with tool_result blocks removed.
 func dropToolResultBlocks(m map[string]interface{}) map[string]interface{} {
-	arr := asArr(m["content"])
+	arr := jsonutil.AsArr(m["content"])
 	if arr == nil {
 		return m
 	}
 	var kept []interface{}
 	for _, b := range arr {
-		if objStr(asObj(b), "type") != "tool_result" {
+		if jsonutil.ObjStr(jsonutil.AsObj(b), "type") != "tool_result" {
 			kept = append(kept, b)
 		}
 	}
@@ -1160,7 +1143,7 @@ func dropToolResultBlocks(m map[string]interface{}) map[string]interface{} {
 }
 
 func messageHasContent(m map[string]interface{}) bool {
-	arr := asArr(m["content"])
+	arr := jsonutil.AsArr(m["content"])
 	return arr == nil || len(arr) > 0
 }
 
@@ -1182,18 +1165,18 @@ func trimTrailingAssistantText(msgs []map[string]interface{}) {
 		return
 	}
 	last := msgs[len(msgs)-1]
-	if objStr(last, "role") != "assistant" {
+	if jsonutil.ObjStr(last, "role") != "assistant" {
 		return
 	}
-	arr := asArr(last["content"])
+	arr := jsonutil.AsArr(last["content"])
 	if len(arr) == 0 {
 		return
 	}
-	blk := asObj(arr[len(arr)-1])
-	if objStr(blk, "type") != "text" {
+	blk := jsonutil.AsObj(arr[len(arr)-1])
+	if jsonutil.ObjStr(blk, "type") != "text" {
 		return
 	}
-	text := objStr(blk, "text")
+	text := jsonutil.ObjStr(blk, "text")
 	trimmed := strings.TrimRight(text, " \t\r\n")
 	if trimmed == "" {
 		last["content"] = arr[:len(arr)-1]
@@ -1285,7 +1268,7 @@ func reasoningExplicitlyDisabled(effort string) bool {
 // reasoning.effort shows just the level word ("high"…), explicit-off values (none/off/disabled) merge into "关";
 // no reasoning/effort field returns empty (column shows -).
 func responsesThinkMode(body map[string]interface{}) string {
-	effort := objStr(asObj(body["reasoning"]), "effort")
+	effort := jsonutil.ObjStr(jsonutil.AsObj(body["reasoning"]), "effort")
 	if effort == "" {
 		return ""
 	}
@@ -1304,17 +1287,17 @@ func trailingTurnSupportsThinking(msgs []map[string]interface{}) bool {
 		return false
 	}
 	last := msgs[len(msgs)-1]
-	if objStr(last, "role") != "user" {
+	if jsonutil.ObjStr(last, "role") != "user" {
 		return false
 	}
 	var toolResultIDs []string
 	if blocks, ok := last["content"].([]interface{}); ok {
 		for _, b := range blocks {
-			blk := asObj(b)
-			if objStr(blk, "type") != "tool_result" {
+			blk := jsonutil.AsObj(b)
+			if jsonutil.ObjStr(blk, "type") != "tool_result" {
 				continue
 			}
-			id := objStr(blk, "tool_use_id")
+			id := jsonutil.ObjStr(blk, "tool_use_id")
 			if id == "" {
 				return false
 			}
@@ -1328,7 +1311,7 @@ func trailingTurnSupportsThinking(msgs []map[string]interface{}) bool {
 		return false
 	}
 	paired := msgs[len(msgs)-2]
-	if objStr(paired, "role") != "assistant" {
+	if jsonutil.ObjStr(paired, "role") != "assistant" {
 		return false
 	}
 	blocks, ok := paired["content"].([]interface{})
@@ -1338,12 +1321,12 @@ func trailingTurnSupportsThinking(msgs []map[string]interface{}) bool {
 	hasSignedThinking := false
 	toolUseIDs := map[string]bool{}
 	for _, b := range blocks {
-		blk := asObj(b)
-		switch objStr(blk, "type") {
+		blk := jsonutil.AsObj(b)
+		switch jsonutil.ObjStr(blk, "type") {
 		case "thinking", "redacted_thinking":
 			hasSignedThinking = true
 		case "tool_use":
-			if id := objStr(blk, "id"); id != "" {
+			if id := jsonutil.ObjStr(blk, "id"); id != "" {
 				toolUseIDs[id] = true
 			}
 		}
@@ -1373,12 +1356,12 @@ func mapToolChoiceToAnthropic(tc interface{}, reg *toolRegistry) map[string]inte
 		}
 		return map[string]interface{}{"type": "auto"}
 	case map[string]interface{}:
-		switch objStr(v, "type") {
+		switch jsonutil.ObjStr(v, "type") {
 		case "function":
-			name := reg.chatNameForFunction(objStr(v, "name"), objStr(v, "namespace"))
+			name := reg.chatNameForFunction(jsonutil.ObjStr(v, "name"), jsonutil.ObjStr(v, "namespace"))
 			return map[string]interface{}{"type": "tool", "name": name}
 		case "custom":
-			return map[string]interface{}{"type": "tool", "name": objStr(v, "name")}
+			return map[string]interface{}{"type": "tool", "name": jsonutil.ObjStr(v, "name")}
 		case "tool_search":
 			return map[string]interface{}{"type": "tool", "name": toolSearchProxyName}
 		}
@@ -1393,13 +1376,13 @@ func mapToolChoiceToAnthropic(tc interface{}, reg *toolRegistry) map[string]inte
 // Responses reasoning.encrypted_content string (version-prefixed base64url JSON).
 // Blocks without a signature (empty signature/data) aren't encoded — replaying them is pointless.
 func encodeThinkingEnvelope(block map[string]interface{}) string {
-	switch objStr(block, "type") {
+	switch jsonutil.ObjStr(block, "type") {
 	case "thinking":
-		if objStr(block, "signature") == "" {
+		if jsonutil.ObjStr(block, "signature") == "" {
 			return ""
 		}
 	case "redacted_thinking":
-		if objStr(block, "data") == "" {
+		if jsonutil.ObjStr(block, "data") == "" {
 			return ""
 		}
 	default:
@@ -1539,7 +1522,7 @@ func encodeSearchEnvelope(t *searchTriple, useBlk, resBlk map[string]interface{}
 	if t == nil || useBlk == nil || resBlk == nil {
 		return ""
 	}
-	if objStr(asObj(useBlk["input"]), "query") == "" {
+	if jsonutil.ObjStr(jsonutil.AsObj(useBlk["input"]), "query") == "" {
 		return ""
 	}
 	// id normalization: Kimi streaming search's server_tool_use block id starts with tool_, but the search registry
@@ -1547,7 +1530,7 @@ func encodeSearchEnvelope(t *searchTriple, useBlk, resBlk map[string]interface{}
 	// tool_call_id is not found (2026-09-10 controlled experiment: verbatim streaming replay 400'd; rewriting stu.id
 	// to result.tool_use_id returned 200; non-streaming search has both naturally identical, unaffected).
 	// The envelope is the only replay carrier; normalization happens at sealing time; the shallow copy doesn't mutate the caller's shared blocks.
-	if tid := objStr(resBlk, "tool_use_id"); tid != "" && objStr(useBlk, "id") != tid {
+	if tid := jsonutil.ObjStr(resBlk, "tool_use_id"); tid != "" && jsonutil.ObjStr(useBlk, "id") != tid {
 		cp := make(map[string]interface{}, len(useBlk)+1)
 		for k, v := range useBlk {
 			cp[k] = v
@@ -1592,8 +1575,8 @@ func decodeSearchEnvelope(s string, mask []byte) (*searchTriple, []map[string]in
 	if err := json.Unmarshal(b, &payload); err != nil || payload.T == nil || len(payload.B) != 2 {
 		return nil, nil, time.Time{}, false
 	}
-	if objStr(payload.B[0], "type") != "server_tool_use" ||
-		objStr(payload.B[1], "type") != "web_search_tool_result" {
+	if jsonutil.ObjStr(payload.B[0], "type") != "server_tool_use" ||
+		jsonutil.ObjStr(payload.B[1], "type") != "web_search_tool_result" {
 		return nil, nil, time.Time{}, false
 	}
 	var ts time.Time
@@ -1613,22 +1596,22 @@ func stripSearchBlocksInBody(body []byte) (nb []byte, n int, ok bool) {
 	if err := json.Unmarshal(body, &m); err != nil {
 		return nil, 0, false
 	}
-	msgs := asArr(m["messages"])
+	msgs := jsonutil.AsArr(m["messages"])
 	if msgs == nil {
 		return nil, 0, false
 	}
 	stripped := false
 	var newMsgs []interface{}
 	for _, mi := range msgs {
-		msg := asObj(mi)
-		content := asArr(msg["content"])
+		msg := jsonutil.AsObj(mi)
+		content := jsonutil.AsArr(msg["content"])
 		if msg == nil || content == nil {
 			newMsgs = append(newMsgs, mi)
 			continue
 		}
 		var nc []interface{}
 		for _, c := range content {
-			if t := objStr(asObj(c), "type"); t == "server_tool_use" || t == "web_search_tool_result" {
+			if t := jsonutil.ObjStr(jsonutil.AsObj(c), "type"); t == "server_tool_use" || t == "web_search_tool_result" {
 				stripped = true
 				n++
 				continue
@@ -1657,12 +1640,12 @@ func stripSearchBlocksInBody(body []byte) (nb []byte, n int, ok bool) {
 func mergeSameRoleMessages(msgs []interface{}) []interface{} {
 	var out []interface{}
 	for _, mi := range msgs {
-		msg := asObj(mi)
+		msg := jsonutil.AsObj(mi)
 		if len(out) > 0 && msg != nil {
-			prev := asObj(out[len(out)-1])
+			prev := jsonutil.AsObj(out[len(out)-1])
 			pc, pok := prev["content"].([]interface{})
 			cc, cok := msg["content"].([]interface{})
-			if pok && cok && objStr(prev, "role") != "" && objStr(prev, "role") == objStr(msg, "role") {
+			if pok && cok && jsonutil.ObjStr(prev, "role") != "" && jsonutil.ObjStr(prev, "role") == jsonutil.ObjStr(msg, "role") {
 				prev["content"] = append(pc, cc...)
 				continue
 			}
@@ -1695,7 +1678,7 @@ func buildResponsesUsage(usage map[string]interface{}) map[string]interface{} {
 	cacheRead := jsonutil.ToInt64(usage["cache_read_input_tokens"])
 	cacheCreation := jsonutil.ToInt64(usage["cache_creation_input_tokens"])
 	var reasoning int64
-	if d := asObj(usage["output_tokens_details"]); d != nil {
+	if d := jsonutil.AsObj(usage["output_tokens_details"]); d != nil {
 		reasoning = jsonutil.ToInt64(d["thinking_tokens"])
 	}
 	input := fresh + cacheRead + cacheCreation
@@ -1722,7 +1705,7 @@ func buildResponsesUsage(usage map[string]interface{}) map[string]interface{} {
 // stripThinking=true (convertOff2Low upgrade streams) drops thinking/redacted_thinking blocks
 // (no reasoning items produced); usage is unaffected, passed through truthfully.
 func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *toolRegistry, triple *searchTriple, stripThinking bool) map[string]interface{} {
-	id := objStr(msg, "id")
+	id := jsonutil.ObjStr(msg, "id")
 	var responseID string
 	switch {
 	case id == "":
@@ -1732,7 +1715,7 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 	default:
 		responseID = "resp_" + id
 	}
-	if m := objStr(msg, "model"); m != "" {
+	if m := jsonutil.ObjStr(msg, "model"); m != "" {
 		model = m
 	}
 
@@ -1753,21 +1736,21 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 		textParts = nil
 	}
 
-	for _, b := range asArr(msg["content"]) {
-		blk := asObj(b)
-		switch objStr(blk, "type") {
+	for _, b := range jsonutil.AsArr(msg["content"]) {
+		blk := jsonutil.AsObj(b)
+		switch jsonutil.ObjStr(blk, "type") {
 		case "text":
 			// Search query echo lines are deleted whole (see stripSearchQueryEcho); the block is dropped if nothing remains.
-			if t := stripSearchQueryEcho(objStr(blk, "text")); strings.TrimSpace(t) != "" {
+			if t := stripSearchQueryEcho(jsonutil.ObjStr(blk, "text")); strings.TrimSpace(t) != "" {
 				textParts = append(textParts, map[string]interface{}{
 					"type": "output_text", "text": t, "annotations": []interface{}{},
 				})
 			}
 		case "tool_use":
 			flushText()
-			callID := objStr(blk, "id")
-			name := objStr(blk, "name")
-			input := asObj(blk["input"])
+			callID := jsonutil.ObjStr(blk, "id")
+			name := jsonutil.ObjStr(blk, "name")
+			input := jsonutil.AsObj(blk["input"])
 			if input == nil {
 				input = map[string]interface{}{}
 			}
@@ -1790,7 +1773,7 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 					"summary":           []interface{}{},
 					"encrypted_content": enc,
 				}
-				if t := objStr(blk, "thinking"); t != "" {
+				if t := jsonutil.ObjStr(blk, "thinking"); t != "" {
 					item["summary"] = []interface{}{
 						map[string]interface{}{"type": "summary_text", "text": t},
 					}
@@ -1805,7 +1788,7 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 			}
 			// Search-block envelope: when the result block arrives it's bagged with the preceding server_tool_use, riding along as an extra
 			// reasoning item — kept by the client, restored on next-turn replay (see searchEnvelopePrefix).
-			if objStr(blk, "type") == "server_tool_use" {
+			if jsonutil.ObjStr(blk, "type") == "server_tool_use" {
 				lastSearchUse = blk
 			} else if lastSearchUse != nil {
 				if enc := encodeSearchEnvelope(triple, lastSearchUse, blk); enc != "" {
@@ -1825,7 +1808,7 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 		output = []interface{}{}
 	}
 
-	status, incompleteReason := mapStopReasonToStatus(objStr(msg, "stop_reason"))
+	status, incompleteReason := mapStopReasonToStatus(jsonutil.ObjStr(msg, "stop_reason"))
 	result := map[string]interface{}{
 		"id":         responseID,
 		"object":     "response",
@@ -1833,7 +1816,7 @@ func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *t
 		"status":     status,
 		"model":      model,
 		"output":     output,
-		"usage":      buildResponsesUsage(asObj(msg["usage"])),
+		"usage":      buildResponsesUsage(jsonutil.AsObj(msg["usage"])),
 		"error":      nil,
 	}
 	if incompleteReason != "" {
@@ -1942,12 +1925,12 @@ func holdSearchQueryEchoText(accum string) bool {
 // the web_search_tool_result block itself doesn't become a separate item (the result can't be fully expressed in server_tool_use's action;
 // v1 merges the result's source URLs into action.sources).
 func webSearchCallItem(blk map[string]interface{}, responseID string, idx int) map[string]interface{} {
-	switch objStr(blk, "type") {
+	switch jsonutil.ObjStr(blk, "type") {
 	case "server_tool_use":
-		if objStr(blk, "name") != "web_search" {
+		if jsonutil.ObjStr(blk, "name") != "web_search" {
 			return nil
 		}
-		q := objStr(asObj(blk["input"]), "query")
+		q := jsonutil.ObjStr(jsonutil.AsObj(blk["input"]), "query")
 		if q == "" {
 			// The empty-search triple's server_tool_use has no id and no input (see kimiSearchPreamble):
 			// no information content, dropped. A real search always carries a query; its paired result block's sources items are still produced.
@@ -1962,9 +1945,9 @@ func webSearchCallItem(blk map[string]interface{}, responseID string, idx int) m
 	case "web_search_tool_result":
 		// Result block: the source URL list extracted, presented as a completed call item's sources.
 		var sources []interface{}
-		for _, r := range asArr(blk["content"]) {
-			rm := asObj(r)
-			if u := objStr(rm, "url"); u != "" {
+		for _, r := range jsonutil.AsArr(blk["content"]) {
+			rm := jsonutil.AsObj(r)
+			if u := jsonutil.ObjStr(rm, "url"); u != "" {
 				sources = append(sources, map[string]interface{}{"type": "url", "url": u})
 			}
 		}
@@ -1990,28 +1973,28 @@ func webSearchCallItem(blk map[string]interface{}, responseID string, idx int) m
 // server_tool_use/web_search_tool_result (defensive coverage, ids natively registered) with content
 // go upstream as-is; shells (no input/no content) are deleted.
 func searchBlocksFromResponsesItem(item map[string]interface{}) []map[string]interface{} {
-	switch objStr(item, "type") {
+	switch jsonutil.ObjStr(item, "type") {
 	case "web_search_call":
 		return nil
 	case "server_tool_use":
 		// Non-Responses-protocol items (defensive coverage): already in Anthropic block shape; content-bearing
 		// ones go upstream as-is; empty calls (shells like Kimi's empty-search triple with no id and no input) are deleted.
-		inp := asObj(item["input"])
+		inp := jsonutil.AsObj(item["input"])
 		if len(inp) == 0 {
 			return nil
 		}
 		return []map[string]interface{}{{
-			"type": "server_tool_use", "id": objStr(item, "id"),
-			"name": objStr(item, "name"), "input": inp,
+			"type": "server_tool_use", "id": jsonutil.ObjStr(item, "id"),
+			"name": jsonutil.ObjStr(item, "name"), "input": inp,
 		}}
 	case "web_search_tool_result":
-		content := asArr(item["content"])
+		content := jsonutil.AsArr(item["content"])
 		if len(content) == 0 {
 			return nil
 		}
-		tid := objStr(item, "tool_use_id")
+		tid := jsonutil.ObjStr(item, "tool_use_id")
 		if tid == "" {
-			tid = objStr(item, "id")
+			tid = jsonutil.ObjStr(item, "id")
 		}
 		return []map[string]interface{}{{
 			"type": "web_search_tool_result", "tool_use_id": tid, "content": content,

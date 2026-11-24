@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/json"
+	"proxy429/internal/jsonutil"
 	"strings"
 	"testing"
 )
@@ -433,13 +434,13 @@ func TestStreamCustomToolCall(t *testing.T) {
 			if err := json.Unmarshal([]byte(chunk[6:]), &m); err != nil {
 				continue
 			}
-			typ := objStr(m, "type")
+			typ := jsonutil.ObjStr(m, "type")
 			names = append(names, typ)
 			if typ == "response.custom_tool_call_input.done" {
-				doneInput = objStr(m, "input")
+				doneInput = jsonutil.ObjStr(m, "input")
 			}
 			if typ == "response.output_item.done" {
-				doneItem = asObj(m["item"])
+				doneItem = jsonutil.AsObj(m["item"])
 			}
 		}
 	}
@@ -454,7 +455,7 @@ func TestStreamCustomToolCall(t *testing.T) {
 	if doneItem == nil || doneItem["type"] != "custom_tool_call" {
 		t.Fatalf("done 项=%v", doneItem)
 	}
-	if !strings.HasPrefix(objStr(doneItem, "id"), "ctc_") {
+	if !strings.HasPrefix(jsonutil.ObjStr(doneItem, "id"), "ctc_") {
 		t.Errorf("custom 项 id 应 ctc_ 前缀: %v", doneItem["id"])
 	}
 }
@@ -484,11 +485,11 @@ func TestStreamNamespaceToolCall(t *testing.T) {
 			if err := json.Unmarshal([]byte(chunk[6:]), &m); err != nil {
 				continue
 			}
-			switch objStr(m, "type") {
+			switch jsonutil.ObjStr(m, "type") {
 			case "response.function_call_arguments.delta":
 				sawDelta = true
 			case "response.output_item.done":
-				doneItem = asObj(m["item"])
+				doneItem = jsonutil.AsObj(m["item"])
 			}
 		}
 	}
@@ -517,11 +518,11 @@ func TestStreamReadToolSanitize(t *testing.T) {
 			if err := json.Unmarshal([]byte(chunk[6:]), &m); err != nil {
 				continue
 			}
-			switch objStr(m, "type") {
+			switch jsonutil.ObjStr(m, "type") {
 			case "response.function_call_arguments.delta":
 				sawDelta = true
 			case "response.function_call_arguments.done":
-				doneArgs = objStr(m, "arguments")
+				doneArgs = jsonutil.ObjStr(m, "arguments")
 			}
 		}
 	}
@@ -565,7 +566,7 @@ func TestMCPToolImageNotStringified(t *testing.T) {
 		t.Fatalf("content=%v", content)
 	}
 	first := content[0].(map[string]interface{})
-	if first["type"] != "text" || strings.Contains(objStr(first, "text"), "MCP_SENTINEL") {
+	if first["type"] != "text" || strings.Contains(jsonutil.ObjStr(first, "text"), "MCP_SENTINEL") {
 		t.Errorf("首块应是不含 base64 的文本: %v", first)
 	}
 	img := content[1].(map[string]interface{})
@@ -607,14 +608,14 @@ func TestJSONStringNestedToolImage(t *testing.T) {
 	var foundImage bool
 	for _, c := range content {
 		cm := c.(map[string]interface{})
-		switch objStr(cm, "type") {
+		switch jsonutil.ObjStr(cm, "type") {
 		case "image":
 			src := cm["source"].(map[string]interface{})
 			if src["data"] == "STRING_SENTINEL" {
 				foundImage = true
 			}
 		case "text":
-			txt := objStr(cm, "text")
+			txt := jsonutil.ObjStr(cm, "text")
 			if strings.Contains(txt, "STRING_SENTINEL") {
 				t.Errorf("文本块不应残留图片 base64: %v", txt[:100])
 			}
@@ -642,7 +643,7 @@ func TestToolResultErrorMarker(t *testing.T) {
 		t.Fatalf("error marker 应置 is_error")
 	}
 	blocks := content.([]interface{})
-	if len(blocks) != 1 || objStr(blocks[0].(map[string]interface{}), "text") != "boom" {
+	if len(blocks) != 1 || jsonutil.ObjStr(blocks[0].(map[string]interface{}), "text") != "boom" {
 		t.Errorf("marker 本身不进内容: %v", blocks)
 	}
 	// Plain string output unaffected.

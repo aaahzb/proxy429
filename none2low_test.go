@@ -32,8 +32,8 @@ func TestNone2LowUpgradeShapes(t *testing.T) {
 	if n2l != n2lStealth {
 		t.Errorf("adaptive none: n2l=%d, want n2lStealth", n2l)
 	}
-	th := asObj(out["thinking"])
-	if objStr(th, "type") != "adaptive" || objStr(asObj(out["output_config"]), "effort") != "low" {
+	th := jsonutil.AsObj(out["thinking"])
+	if jsonutil.ObjStr(th, "type") != "adaptive" || jsonutil.ObjStr(jsonutil.AsObj(out["output_config"]), "effort") != "low" {
 		t.Errorf("adaptive 升级: thinking=%v output_config=%v, want adaptive/low", th, out["output_config"])
 	}
 
@@ -45,8 +45,8 @@ func TestNone2LowUpgradeShapes(t *testing.T) {
 	if n2l != n2lStealth {
 		t.Errorf("budget none: n2l=%d, want n2lStealth", n2l)
 	}
-	th = asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
+	th = jsonutil.AsObj(out["thinking"])
+	if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 		t.Errorf("budget 升级: thinking=%v, want enabled/2048", th)
 	}
 	if out["output_config"] != nil {
@@ -63,7 +63,7 @@ func TestNone2LowUpgradeShapes(t *testing.T) {
 	if n2l != n2lNone {
 		t.Errorf("压顶不足下限: n2l=%d, want n2lNone（放弃升级）", n2l)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "disabled" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "disabled" {
 		t.Errorf("压顶不足下限: thinking=%v, want disabled", out["thinking"])
 	}
 
@@ -75,7 +75,7 @@ func TestNone2LowUpgradeShapes(t *testing.T) {
 	if n2l != n2lNone {
 		t.Errorf("开关关闭: n2l=%d, want n2lNone", n2l)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "disabled" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "disabled" {
 		t.Errorf("开关关闭: thinking=%v, want disabled", out["thinking"])
 	}
 
@@ -87,8 +87,8 @@ func TestNone2LowUpgradeShapes(t *testing.T) {
 	if n2l != n2lNone {
 		t.Errorf("high: n2l=%d, want n2lNone（只升级关思考）", n2l)
 	}
-	th = asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
+	th = jsonutil.AsObj(out["thinking"])
+	if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("high: thinking=%v, want enabled/16000", th)
 	}
 
@@ -126,8 +126,8 @@ func TestNone2LowUpgradeToolContinuation(t *testing.T) {
 	if n2l != n2lStealth {
 		t.Errorf("工具续轮: n2l=%d, want n2lStealth", n2l)
 	}
-	th := asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
+	th := jsonutil.AsObj(out["thinking"])
+	if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 		t.Errorf("工具续轮升级: thinking=%v, want enabled/2048", th)
 	}
 
@@ -170,8 +170,8 @@ func TestNone2LowTryOnInvalidHistory(t *testing.T) {
 	if n2l != n2lTryOn {
 		t.Errorf("tryon budget: n2l=%d, want n2lTryOn", n2l)
 	}
-	th := asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
+	th := jsonutil.AsObj(out["thinking"])
+	if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("tryon budget: thinking=%v, want enabled/16000（16384 压顶 32000/2）", th)
 	}
 	if out["temperature"] != nil {
@@ -186,8 +186,8 @@ func TestNone2LowTryOnInvalidHistory(t *testing.T) {
 	if n2l != n2lTryOn {
 		t.Errorf("tryon adaptive: n2l=%d, want n2lTryOn", n2l)
 	}
-	th = asObj(out["thinking"])
-	if objStr(th, "type") != "adaptive" || objStr(asObj(out["output_config"]), "effort") != "max" {
+	th = jsonutil.AsObj(out["thinking"])
+	if jsonutil.ObjStr(th, "type") != "adaptive" || jsonutil.ObjStr(jsonutil.AsObj(out["output_config"]), "effort") != "max" {
 		t.Errorf("tryon adaptive: thinking=%v output_config=%v, want adaptive/max", th, out["output_config"])
 	}
 
@@ -201,8 +201,8 @@ func TestNone2LowTryOnInvalidHistory(t *testing.T) {
 	if n2l != n2lTryOn {
 		t.Errorf("tryon 保底: n2l=%d, want n2lTryOn", n2l)
 	}
-	th = asObj(out["thinking"])
-	if objStr(th, "type") != "adaptive" || objStr(asObj(out["output_config"]), "effort") != "low" {
+	th = jsonutil.AsObj(out["thinking"])
+	if jsonutil.ObjStr(th, "type") != "adaptive" || jsonutil.ObjStr(jsonutil.AsObj(out["output_config"]), "effort") != "low" {
 		t.Errorf("tryon 保底: thinking=%v output_config=%v, want adaptive/low", th, out["output_config"])
 	}
 
@@ -214,7 +214,7 @@ func TestNone2LowTryOnInvalidHistory(t *testing.T) {
 	if n2l != n2lNone {
 		t.Errorf("tryon 对照: n2l=%d, want n2lNone", n2l)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "disabled" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "disabled" {
 		t.Errorf("tryon 对照: thinking=%v, want disabled", out["thinking"])
 	}
 }
@@ -245,13 +245,13 @@ func TestNone2LowToolChoiceConflict(t *testing.T) {
 	if n2l != n2lNone {
 		t.Errorf("tool_choice 冲突: n2l=%d, want n2lNone（思考已关无需剥离）", n2l)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "disabled" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "disabled" {
 		t.Errorf("tool_choice 冲突: thinking=%v, want disabled", out["thinking"])
 	}
 	if out["output_config"] != nil {
 		t.Errorf("tool_choice 冲突: output_config 应删除: %v", out["output_config"])
 	}
-	if objStr(asObj(out["tool_choice"]), "type") != "any" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["tool_choice"]), "type") != "any" {
 		t.Errorf("tool_choice 冲突: tool_choice=%v, want any（required 映射）", out["tool_choice"])
 	}
 	if out["temperature"] != 0.5 {
@@ -283,12 +283,12 @@ func TestAnthToRespStreamStripThinking(t *testing.T) {
 		t.Errorf("正文 delta 不应受剥离影响")
 	}
 	final := conv.buildFinalResponse()
-	output := asArr(final["output"])
+	output := jsonutil.AsArr(final["output"])
 	if len(output) != 4 {
 		t.Fatalf("output 数=%d, want 4（思考块剥离，其余 4 块不动）", len(output))
 	}
 	for _, it := range output {
-		if objStr(asObj(it), "type") == "reasoning" {
+		if jsonutil.ObjStr(jsonutil.AsObj(it), "type") == "reasoning" {
 			t.Errorf("items 里不应有 reasoning 项: %v", it)
 		}
 	}
@@ -297,7 +297,7 @@ func TestAnthToRespStreamStripThinking(t *testing.T) {
 		t.Errorf("output_index 应连续（0..3），不应出现 4")
 	}
 	// usage untouched: the fixture's output_tokens=9 lands in the final response as-is.
-	if jsonutil.ToInt64(asObj(final["usage"])["output_tokens"]) != 9 {
+	if jsonutil.ToInt64(jsonutil.AsObj(final["usage"])["output_tokens"]) != 9 {
 		t.Errorf("usage 应如实透传: %v", final["usage"])
 	}
 }
@@ -322,12 +322,12 @@ func TestTranslatingWriterStripThinkingNonStream(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
 		t.Fatalf("响应不是 JSON: %v", err)
 	}
-	output := asArr(m["output"])
+	output := jsonutil.AsArr(m["output"])
 	if len(output) != 4 {
 		t.Fatalf("output 数=%d, want 4（思考块剥离）", len(output))
 	}
 	for _, it := range output {
-		if objStr(asObj(it), "type") == "reasoning" {
+		if jsonutil.ObjStr(jsonutil.AsObj(it), "type") == "reasoning" {
 			t.Errorf("非流式输出不应有 reasoning 项: %v", it)
 		}
 	}
@@ -347,18 +347,18 @@ func TestAnthropicToResponsesObjectStripThinking(t *testing.T) {
 	}
 
 	out := anthropicToResponsesObject(msg, "m", nil, nil, true)
-	output := asArr(out["output"])
-	if len(output) != 1 || objStr(asObj(output[0]), "type") != "message" {
+	output := jsonutil.AsArr(out["output"])
+	if len(output) != 1 || jsonutil.ObjStr(jsonutil.AsObj(output[0]), "type") != "message" {
 		t.Fatalf("剥离后 output=%v, want 仅 message 一项", output)
 	}
-	if jsonutil.ToInt64(asObj(out["usage"])["output_tokens"]) != 5 {
+	if jsonutil.ToInt64(jsonutil.AsObj(out["usage"])["output_tokens"]) != 5 {
 		t.Errorf("usage 应原样保留: %v", out["usage"])
 	}
 
 	// Control: without stripping, the two thinking blocks each produce a reasoning item.
 	out = anthropicToResponsesObject(msg, "m", nil, nil, false)
-	output = asArr(out["output"])
-	if len(output) != 3 || objStr(asObj(output[0]), "type") != "reasoning" || objStr(asObj(output[1]), "type") != "reasoning" {
+	output = jsonutil.AsArr(out["output"])
+	if len(output) != 3 || jsonutil.ObjStr(jsonutil.AsObj(output[0]), "type") != "reasoning" || jsonutil.ObjStr(jsonutil.AsObj(output[1]), "type") != "reasoning" {
 		t.Fatalf("不剥离 output=%v, want reasoning×2 + message", output)
 	}
 }
@@ -411,8 +411,8 @@ func TestNone2LowFallbackRetry(t *testing.T) {
 		calls++
 		if calls == 1 {
 			// First time: the upstream should receive the upgraded low thinking (budget-style enabled+2048).
-			th := asObj(m["thinking"])
-			if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
+			th := jsonutil.AsObj(m["thinking"])
+			if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 				t.Errorf("首请求 thinking=%v, want enabled/2048", th)
 			}
 			// Reject with 200 + in-body error (Kimi style); the error text mentions thinking, triggering the fallback.
@@ -450,7 +450,7 @@ func TestNone2LowFallbackRetry(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("上游请求数=%d, want 2（兜底重试一次）", calls)
 	}
-	if objStr(asObj(secondBody["thinking"]), "type") != "disabled" {
+	if jsonutil.ObjStr(jsonutil.AsObj(secondBody["thinking"]), "type") != "disabled" {
 		t.Errorf("兜底重发 thinking=%v, want disabled", secondBody["thinking"])
 	}
 	if secondBody["output_config"] != nil {
@@ -464,7 +464,7 @@ func TestNone2LowFallbackRetry(t *testing.T) {
 		t.Fatalf("响应不是 JSON: %v (%s)", err, body)
 	}
 	// Return-side stripping of thinking blocks (stripThinking still in effect): 5 blocks - thinking + search envelope = 5 items.
-	output := asArr(out["output"])
+	output := jsonutil.AsArr(out["output"])
 	if len(output) != 5 {
 		t.Errorf("output 数=%d, want 5（思考剥离+搜索信封随行）: %v", len(output), output)
 	}
@@ -513,8 +513,8 @@ func TestNone2LowTryOnNoStrip(t *testing.T) {
 	}
 
 	// What the upstream receives is thinking-on at the requested level (enabled/16000), not thinking-off.
-	th := asObj(gotBody["thinking"])
-	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
+	th := jsonutil.AsObj(gotBody["thinking"])
+	if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("上游 thinking=%v, want enabled/16000（所请 max 压顶 32000/2）", th)
 	}
 
@@ -524,8 +524,8 @@ func TestNone2LowTryOnNoStrip(t *testing.T) {
 		t.Fatalf("响应不是 JSON: %v (%s)", err, raw)
 	}
 	foundReasoning := false
-	for _, it := range asArr(out["output"]) {
-		if objStr(asObj(it), "type") == "reasoning" {
+	for _, it := range jsonutil.AsArr(out["output"]) {
+		if jsonutil.ObjStr(jsonutil.AsObj(it), "type") == "reasoning" {
 			foundReasoning = true
 		}
 	}
@@ -565,7 +565,7 @@ func TestNone2LowOffByDefault(t *testing.T) {
 		t.Fatalf("请求失败: %v", err)
 	}
 	resp.Body.Close()
-	if objStr(asObj(gotBody["thinking"]), "type") != "disabled" {
+	if jsonutil.ObjStr(jsonutil.AsObj(gotBody["thinking"]), "type") != "disabled" {
 		t.Errorf("未设 convertOff2Low 时上游 thinking=%v, want disabled（不升级）", gotBody["thinking"])
 	}
 }
@@ -600,8 +600,8 @@ func TestNone2LowAllAlsoTranslates(t *testing.T) {
 		t.Fatalf("请求失败: %v", err)
 	}
 	resp.Body.Close()
-	th := asObj(gotBody["thinking"])
-	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
+	th := jsonutil.AsObj(gotBody["thinking"])
+	if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 		t.Errorf(`convertOff2Low:"all" 在翻译口也应升级: thinking=%v, want enabled/2048`, th)
 	}
 }
@@ -638,8 +638,8 @@ func TestNone2LowFastRouteFlag(t *testing.T) {
 		t.Fatalf("请求失败: %v", err)
 	}
 	resp.Body.Close()
-	th := asObj(gotBody["thinking"])
-	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
+	th := jsonutil.AsObj(gotBody["thinking"])
+	if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 		t.Errorf("fast_route 自带 convertOff2Low 应升级: thinking=%v, want enabled/2048", th)
 	}
 }
@@ -670,8 +670,8 @@ func TestAllowNoThinkBlock4Anthropic(t *testing.T) {
 	if n2l != n2lTryOn {
 		t.Errorf("default budget: n2l=%d, want n2lTryOn", n2l)
 	}
-	th := asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
+	th := jsonutil.AsObj(out["thinking"])
+	if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("default budget: thinking=%v, want enabled/16000", th)
 	}
 
@@ -683,7 +683,7 @@ func TestAllowNoThinkBlock4Anthropic(t *testing.T) {
 	if n2l != n2lTryOn {
 		t.Errorf("default adaptive: n2l=%d, want n2lTryOn", n2l)
 	}
-	if objStr(asObj(out["thinking"]), "type") != "adaptive" || objStr(asObj(out["output_config"]), "effort") != "max" {
+	if jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "adaptive" || jsonutil.ObjStr(jsonutil.AsObj(out["output_config"]), "effort") != "max" {
 		t.Errorf("default adaptive: thinking=%v output_config=%v, want adaptive/max", out["thinking"], out["output_config"])
 	}
 
@@ -692,7 +692,7 @@ func TestAllowNoThinkBlock4Anthropic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("false adaptive err: %v", err)
 	}
-	if n2l != n2lNone || objStr(asObj(out["thinking"]), "type") != "disabled" {
+	if n2l != n2lNone || jsonutil.ObjStr(jsonutil.AsObj(out["thinking"]), "type") != "disabled" {
 		t.Errorf("false adaptive: n2l=%d thinking=%v, want n2lNone/disabled", n2l, out["thinking"])
 	}
 	out, _, n2l, err = responsesToAnthropicTriple(mk("gpt-5-codex", "max"), nil, nil, "", true, false)
@@ -711,8 +711,8 @@ func TestAllowNoThinkBlock4Anthropic(t *testing.T) {
 	if n2l != n2lStealth {
 		t.Errorf("false 显式关: n2l=%d, want n2lStealth", n2l)
 	}
-	th = asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
+	th = jsonutil.AsObj(out["thinking"])
+	if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 		t.Errorf("false 显式关: thinking=%v, want enabled/2048", th)
 	}
 
@@ -786,8 +786,8 @@ func TestAllowNoThinkBlockDefaultEndToEnd(t *testing.T) {
 	}
 
 	// What the upstream receives is thinking-on at the requested level (enabled/16000) even without convertOff2Low.
-	th := asObj(gotBody["thinking"])
-	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
+	th := jsonutil.AsObj(gotBody["thinking"])
+	if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("默认 true: 上游 thinking=%v, want enabled/16000（所请 max 压顶 32000/2）", th)
 	}
 
@@ -797,8 +797,8 @@ func TestAllowNoThinkBlockDefaultEndToEnd(t *testing.T) {
 		t.Fatalf("响应不是 JSON: %v (%s)", err, raw)
 	}
 	foundReasoning := false
-	for _, it := range asArr(out["output"]) {
-		if objStr(asObj(it), "type") == "reasoning" {
+	for _, it := range jsonutil.AsArr(out["output"]) {
+		if jsonutil.ObjStr(jsonutil.AsObj(it), "type") == "reasoning" {
 			foundReasoning = true
 		}
 	}

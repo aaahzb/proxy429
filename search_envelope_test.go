@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/jsonutil"
 	"strings"
 	"testing"
 	"time"
@@ -46,8 +47,8 @@ func TestSearchEnvelopeCodec(t *testing.T) {
 	if decTri.URL != tri.URL || decTri.Model != tri.Model || decTri.KeyH != tri.KeyH {
 		t.Errorf("三元组=%+v, want %+v", decTri, tri)
 	}
-	if len(blocks) != 2 || objStr(blocks[0], "id") != "srvtoolu_1" ||
-		objStr(blocks[1], "tool_use_id") != "srvtoolu_1" {
+	if len(blocks) != 2 || jsonutil.ObjStr(blocks[0], "id") != "srvtoolu_1" ||
+		jsonutil.ObjStr(blocks[1], "tool_use_id") != "srvtoolu_1" {
 		t.Errorf("块还原错误: %v", blocks)
 	}
 	// The sealing moment round-trips with the payload (the basis for time-rule stripping); old envelopes without the ts field decode to the zero value.
@@ -77,10 +78,10 @@ func TestSearchEnvelopeCodec(t *testing.T) {
 	}
 	enc2 := encodeSearchEnvelope(tri, misUse, misRes)
 	_, blocks2, _, ok2 := decodeSearchEnvelope(enc2, tri.mask)
-	if !ok2 || objStr(blocks2[0], "id") != "srvtoolu_xyz" {
+	if !ok2 || jsonutil.ObjStr(blocks2[0], "id") != "srvtoolu_xyz" {
 		t.Fatalf("错配 id 未归一: ok=%v blocks=%v", ok2, blocks2)
 	}
-	if objStr(misUse, "id") != "tool_abc" {
+	if jsonutil.ObjStr(misUse, "id") != "tool_abc" {
 		t.Errorf("encodeSearchEnvelope 改了调用方的块: %v", misUse)
 	}
 
@@ -160,8 +161,8 @@ func TestConvertInputSearchEnvelopeRestore(t *testing.T) {
 	countSearchBlocks := func(msgs []map[string]interface{}) int {
 		n := 0
 		for _, m := range msgs {
-			for _, c := range asArr(m["content"]) {
-				if tp := objStr(asObj(c), "type"); tp == "server_tool_use" || tp == "web_search_tool_result" {
+			for _, c := range jsonutil.AsArr(m["content"]) {
+				if tp := jsonutil.ObjStr(jsonutil.AsObj(c), "type"); tp == "server_tool_use" || tp == "web_search_tool_result" {
 					n++
 				}
 			}
@@ -255,26 +256,26 @@ func TestAnthToRespStreamSearchEnvelope(t *testing.T) {
 	feedSSEToConv(conv, testSSEAllBlocks())
 
 	final := conv.buildFinalResponse()
-	output := asArr(final["output"])
+	output := jsonutil.AsArr(final["output"])
 	// Without the envelope it's 5 (reasoning + 2×web_search_call + function_call + message); the envelope adds 1.
 	if len(output) != 6 {
 		t.Fatalf("output 数=%d, want 6（含搜索信封项）: %v", len(output), output)
 	}
 	var envItem map[string]interface{}
 	for _, it := range output {
-		o := asObj(it)
-		if objStr(o, "type") == "reasoning" && strings.HasPrefix(objStr(o, "encrypted_content"), searchEnvelopePrefix) {
+		o := jsonutil.AsObj(it)
+		if jsonutil.ObjStr(o, "type") == "reasoning" && strings.HasPrefix(jsonutil.ObjStr(o, "encrypted_content"), searchEnvelopePrefix) {
 			envItem = o
 		}
 	}
 	if envItem == nil {
 		t.Fatalf("缺搜索信封 reasoning 项: %v", output)
 	}
-	decTri, blocks, _, ok := decodeSearchEnvelope(objStr(envItem, "encrypted_content"), tri.mask)
+	decTri, blocks, _, ok := decodeSearchEnvelope(jsonutil.ObjStr(envItem, "encrypted_content"), tri.mask)
 	if !ok || decTri.URL != tri.URL || decTri.Model != tri.Model || decTri.KeyH != tri.KeyH {
 		t.Fatalf("信封解码失败: ok=%v tri=%v", ok, decTri)
 	}
-	if objStr(asObj(blocks[0]["input"]), "query") != "测试查询" {
+	if jsonutil.ObjStr(jsonutil.AsObj(blocks[0]["input"]), "query") != "测试查询" {
 		t.Errorf("信封里 server_tool_use.query=%v, want 测试查询", blocks[0]["input"])
 	}
 	// The envelope item's id starts with rs_ and carries the env marker, and both added+done were sent.
@@ -290,7 +291,7 @@ func TestAnthToRespStreamSearchEnvelope(t *testing.T) {
 	var events2 []string
 	conv2 := newAnthToRespStream(func(ev string) { events2 = append(events2, ev) }, "k3-256k", nil)
 	feedSSEToConv(conv2, testSSEAllBlocks())
-	if n := len(asArr(conv2.buildFinalResponse()["output"])); n != 5 {
+	if n := len(jsonutil.AsArr(conv2.buildFinalResponse()["output"])); n != 5 {
 		t.Errorf("无三元组 output 数=%d, want 5（不出信封）", n)
 	}
 }
@@ -328,21 +329,21 @@ func TestAnthToRespStreamSearchStreamedQuery(t *testing.T) {
 	feedSSEToConv(conv, testSSEStreamedQuerySearch())
 
 	final := conv.buildFinalResponse()
-	output := asArr(final["output"])
+	output := jsonutil.AsArr(final["output"])
 	// Call item + sources item + envelope item = 3.
 	if len(output) != 3 {
 		t.Fatalf("output 数=%d, want 3: %v", len(output), output)
 	}
 	var callItem, envItem map[string]interface{}
 	for _, it := range output {
-		o := asObj(it)
-		switch objStr(o, "type") {
+		o := jsonutil.AsObj(it)
+		switch jsonutil.ObjStr(o, "type") {
 		case "web_search_call":
-			if objStr(asObj(o["action"]), "query") != "" {
+			if jsonutil.ObjStr(jsonutil.AsObj(o["action"]), "query") != "" {
 				callItem = o
 			}
 		case "reasoning":
-			if strings.HasPrefix(objStr(o, "encrypted_content"), searchEnvelopePrefix) {
+			if strings.HasPrefix(jsonutil.ObjStr(o, "encrypted_content"), searchEnvelopePrefix) {
 				envItem = o
 			}
 		}
@@ -350,18 +351,18 @@ func TestAnthToRespStreamSearchStreamedQuery(t *testing.T) {
 	if callItem == nil {
 		t.Fatalf("缺带 query 的 web_search_call 调用项: %v", output)
 	}
-	if objStr(asObj(callItem["action"]), "query") != "测试查询" {
-		t.Errorf("调用项 query=%v, want 测试查询", asObj(callItem["action"])["query"])
+	if jsonutil.ObjStr(jsonutil.AsObj(callItem["action"]), "query") != "测试查询" {
+		t.Errorf("调用项 query=%v, want 测试查询", jsonutil.AsObj(callItem["action"])["query"])
 	}
 	if envItem == nil {
 		t.Fatalf("缺搜索信封项: %v", output)
 	}
-	_, blocks, _, ok := decodeSearchEnvelope(objStr(envItem, "encrypted_content"), tri.mask)
-	if !ok || objStr(asObj(blocks[0]["input"]), "query") != "测试查询" {
+	_, blocks, _, ok := decodeSearchEnvelope(jsonutil.ObjStr(envItem, "encrypted_content"), tri.mask)
+	if !ok || jsonutil.ObjStr(jsonutil.AsObj(blocks[0]["input"]), "query") != "测试查询" {
 		t.Fatalf("信封里的 server_tool_use 缺 query: ok=%v blocks=%v", ok, blocks)
 	}
 	// id normalization: the streaming stu's native id (tool_abc) isn't recognized by the registry; inside the envelope it must be replaced with the result block's id.
-	if objStr(blocks[0], "id") != "srvtoolu_xyz" {
+	if jsonutil.ObjStr(blocks[0], "id") != "srvtoolu_xyz" {
 		t.Errorf("信封 stu.id=%v, want srvtoolu_xyz（结果块的注册 id）", blocks[0]["id"])
 	}
 	// Search blocks' argument fragments must not go through function_call_arguments events (web_search_call has no argument stream).
@@ -391,13 +392,13 @@ func TestStripSearchBlocksInBody(t *testing.T) {
 	if err := json.Unmarshal(nb, &m); err != nil {
 		t.Fatalf("剥后非法 JSON: %v", err)
 	}
-	msgs := asArr(m["messages"])
+	msgs := jsonutil.AsArr(m["messages"])
 	// assistant shell deleted wholesale → user user adjacent → merged into 1 user message (2 text blocks).
 	if len(msgs) != 1 {
 		b, _ := json.Marshal(msgs)
 		t.Fatalf("消息数=%d, want 1（合并后）: %s", len(msgs), b)
 	}
-	if objStr(asObj(msgs[0]), "role") != "user" || len(asArr(asObj(msgs[0])["content"])) != 2 {
+	if jsonutil.ObjStr(jsonutil.AsObj(msgs[0]), "role") != "user" || len(jsonutil.AsArr(jsonutil.AsObj(msgs[0])["content"])) != 2 {
 		b, _ := json.Marshal(msgs)
 		t.Errorf("合并形态错误: %s", b)
 	}
@@ -421,12 +422,12 @@ func TestStripSearchBlocksInBody(t *testing.T) {
 	}
 	var m2 map[string]interface{}
 	_ = json.Unmarshal(nb2, &m2)
-	msgs2 := asArr(m2["messages"])
+	msgs2 := jsonutil.AsArr(m2["messages"])
 	if len(msgs2) != 3 {
 		b, _ := json.Marshal(msgs2)
 		t.Fatalf("body2 消息数=%d, want 3（assistant 留 text）: %s", len(msgs2), b)
 	}
-	if n := len(asArr(asObj(msgs2[1])["content"])); n != 1 {
+	if n := len(jsonutil.AsArr(jsonutil.AsObj(msgs2[1])["content"])); n != 1 {
 		t.Errorf("body2 assistant 块数=%d, want 1（只剩 text）", n)
 	}
 
@@ -540,8 +541,8 @@ func TestConvertInputSearchEnvelopeWaterLevel(t *testing.T) {
 	countSearchBlocks := func(msgs []map[string]interface{}) int {
 		n := 0
 		for _, m := range msgs {
-			for _, c := range asArr(m["content"]) {
-				if tp := objStr(asObj(c), "type"); tp == "server_tool_use" || tp == "web_search_tool_result" {
+			for _, c := range jsonutil.AsArr(m["content"]) {
+				if tp := jsonutil.ObjStr(jsonutil.AsObj(c), "type"); tp == "server_tool_use" || tp == "web_search_tool_result" {
 					n++
 				}
 			}

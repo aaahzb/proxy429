@@ -3608,11 +3608,11 @@ func TestClassifierLowOffThenUpgrade(t *testing.T) {
 
 	t.Run("adaptive model: upgraded to adaptive low and stripped", func(t *testing.T) {
 		up, respBody := run(t, `{"model":"claude-fable-5","system":"You are a security monitor.","thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"max_tokens":4096,"messages":[{"role":"user","content":"hi"}]}`)
-		th := asObj(up["thinking"])
-		if objStr(th, "type") != "adaptive" {
+		th := jsonutil.AsObj(up["thinking"])
+		if jsonutil.ObjStr(th, "type") != "adaptive" {
 			t.Errorf("upstream thinking type=%v want adaptive", up["thinking"])
 		}
-		if objStr(asObj(up["output_config"]), "effort") != "low" {
+		if jsonutil.ObjStr(jsonutil.AsObj(up["output_config"]), "effort") != "low" {
 			t.Errorf("upstream output_config=%v want effort low", up["output_config"])
 		}
 		if up["reasoning_effort"] != "low" {
@@ -3628,8 +3628,8 @@ func TestClassifierLowOffThenUpgrade(t *testing.T) {
 
 	t.Run("budget model: upgraded to enabled 2048 and stripped", func(t *testing.T) {
 		up, respBody := run(t, `{"model":"x","system":"You are a security monitor.","thinking":{"type":"enabled","budget_tokens":8192},"max_tokens":4096,"messages":[{"role":"user","content":"hi"}]}`)
-		th := asObj(up["thinking"])
-		if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
+		th := jsonutil.AsObj(up["thinking"])
+		if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 			t.Errorf("upstream thinking=%v want enabled/2048", up["thinking"])
 		}
 		if bytes.Contains(respBody, []byte("thinking_delta")) {
@@ -3639,8 +3639,8 @@ func TestClassifierLowOffThenUpgrade(t *testing.T) {
 
 	t.Run("budget floor: max_tokens bumped +1024, upgraded and stripped", func(t *testing.T) {
 		up, respBody := run(t, `{"model":"x","system":"You are a security monitor.","thinking":{"type":"enabled","budget_tokens":8192},"max_tokens":1000,"messages":[{"role":"user","content":"hi"}]}`)
-		th := asObj(up["thinking"])
-		if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 1024 {
+		th := jsonutil.AsObj(up["thinking"])
+		if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 1024 {
 			t.Errorf("upstream thinking=%v want enabled/1024 (floor bump)", up["thinking"])
 		}
 		if jsonutil.ToInt64(up["max_tokens"]) != 2024 {
@@ -3653,8 +3653,8 @@ func TestClassifierLowOffThenUpgrade(t *testing.T) {
 
 	t.Run("already thinking-off: off phase passes through, upgrade counts the one real rewrite", func(t *testing.T) {
 		up, respBody := run(t, `{"model":"x","system":"You are a security monitor.","thinking":{"type":"disabled"},"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
-		th := asObj(up["thinking"])
-		if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 1024 {
+		th := jsonutil.AsObj(up["thinking"])
+		if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 1024 {
 			t.Errorf("upstream thinking=%v want enabled/1024 (floor bump)", up["thinking"])
 		}
 		if jsonutil.ToInt64(up["max_tokens"]) != 1088 {
@@ -3673,8 +3673,8 @@ func TestClassifierLowOffThenUpgrade(t *testing.T) {
 
 	t.Run("already low: full pass-through, thinking kept in the response, no count", func(t *testing.T) {
 		up, respBody := run(t, `{"model":"x","system":"You are a security monitor.","thinking":{"type":"enabled","budget_tokens":2048},"max_tokens":4096,"messages":[{"role":"user","content":"hi"}]}`)
-		th := asObj(up["thinking"])
-		if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
+		th := jsonutil.AsObj(up["thinking"])
+		if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 			t.Errorf("upstream thinking=%v want the client's own enabled/2048, untouched", up["thinking"])
 		}
 		if _, ok := up["reasoning_effort"]; ok {

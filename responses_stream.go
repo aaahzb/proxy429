@@ -135,26 +135,26 @@ func (s *anthToRespStream) responseSkeleton(status string) map[string]interface{
 
 // handleEvent handles one Anthropic SSE event block (event name + data JSON).
 func (s *anthToRespStream) handleEvent(event string, data map[string]interface{}) {
-	typ := objStr(data, "type")
+	typ := jsonutil.ObjStr(data, "type")
 	if typ == "" {
 		typ = event
 	}
 	switch typ {
 	case "message_start":
-		s.handleMessageStart(asObj(data["message"]))
+		s.handleMessageStart(jsonutil.AsObj(data["message"]))
 	case "content_block_start":
-		s.handleBlockStart(int(jsonutil.ToInt64(data["index"])), asObj(data["content_block"]))
+		s.handleBlockStart(int(jsonutil.ToInt64(data["index"])), jsonutil.AsObj(data["content_block"]))
 	case "content_block_delta":
-		s.handleBlockDelta(int(jsonutil.ToInt64(data["index"])), asObj(data["delta"]))
+		s.handleBlockDelta(int(jsonutil.ToInt64(data["index"])), jsonutil.AsObj(data["delta"]))
 	case "content_block_stop":
 		s.handleBlockStop(int(jsonutil.ToInt64(data["index"])))
 	case "message_delta":
-		if d := asObj(data["delta"]); d != nil {
-			if sr := objStr(d, "stop_reason"); sr != "" {
+		if d := jsonutil.AsObj(data["delta"]); d != nil {
+			if sr := jsonutil.ObjStr(d, "stop_reason"); sr != "" {
 				s.stopReason = sr
 			}
 		}
-		for k, v := range asObj(data["usage"]) {
+		for k, v := range jsonutil.AsObj(data["usage"]) {
 			s.usage[k] = v
 		}
 	case "message_stop":
@@ -167,7 +167,7 @@ func (s *anthToRespStream) handleEvent(event string, data map[string]interface{}
 }
 
 func (s *anthToRespStream) handleMessageStart(msg map[string]interface{}) {
-	id := objStr(msg, "id")
+	id := jsonutil.ObjStr(msg, "id")
 	switch {
 	case id == "":
 		s.responseID = "resp_p429"
@@ -176,10 +176,10 @@ func (s *anthToRespStream) handleMessageStart(msg map[string]interface{}) {
 	default:
 		s.responseID = "resp_" + id
 	}
-	if m := objStr(msg, "model"); m != "" {
+	if m := jsonutil.ObjStr(msg, "model"); m != "" {
 		s.model = m
 	}
-	for k, v := range asObj(msg["usage"]) {
+	for k, v := range jsonutil.AsObj(msg["usage"]) {
 		s.usage[k] = v
 	}
 	if s.responseStarted {
@@ -226,12 +226,12 @@ func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}
 	}
 	bs := &blockState{outputIndex: s.allocOutputIndex()}
 	itemNum := bs.outputIndex
-	switch objStr(cb, "type") {
+	switch jsonutil.ObjStr(cb, "type") {
 	case "text":
 		bs.kind = bkText
 		bs.heldText = true
 		bs.itemID = fmt.Sprintf("%s_msg_%d", s.responseID, itemNum)
-		bs.accum = objStr(cb, "text")
+		bs.accum = jsonutil.ObjStr(cb, "text")
 		// item.added / content_part.added are deferred to emitTextStart: the Kimi preamble/query echo
 		// (kimiSearchPreamble, stripSearchQueryEcho) needs whole-block judgment (echo lines deleted whole /
 		// repeated bare preambles stripped bare / pure preamble dropped), so it must wait for the text to diverge from the prefix (or the block to end).
@@ -243,13 +243,13 @@ func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}
 			s.nextOutputIndex--
 			break
 		}
-		if objStr(cb, "type") == "thinking" {
+		if jsonutil.ObjStr(cb, "type") == "thinking" {
 			bs.kind = bkThinking
-			bs.accum = objStr(cb, "thinking")
-			bs.signature = objStr(cb, "signature")
+			bs.accum = jsonutil.ObjStr(cb, "thinking")
+			bs.signature = jsonutil.ObjStr(cb, "signature")
 		} else {
 			bs.kind = bkRedactedThinking
-			bs.signature = objStr(cb, "data")
+			bs.signature = jsonutil.ObjStr(cb, "data")
 		}
 		bs.itemID = fmt.Sprintf("rs_%s_%d", s.responseID, itemNum)
 		s.send(respOutputItemAdded(bs.outputIndex, map[string]interface{}{
@@ -264,8 +264,8 @@ func (s *anthToRespStream) handleBlockStart(index int, cb map[string]interface{}
 		}
 	case "tool_use":
 		bs.kind = bkToolUse
-		bs.callID = objStr(cb, "id")
-		bs.name = objStr(cb, "name")
+		bs.callID = jsonutil.ObjStr(cb, "id")
+		bs.name = jsonutil.ObjStr(cb, "name")
 		bs.itemID = toolCallItemID(s.reg, bs.callID, bs.name)
 		if bs.callID == "" {
 			// When call_id is empty the id degenerates to a bare prefix: back-fill the output index to keep it unique.
@@ -328,9 +328,9 @@ func (s *anthToRespStream) handleBlockDelta(index int, delta map[string]interfac
 	if bs.kind == bkDropped {
 		return // Stripped thinking block: deltas dropped directly
 	}
-	switch objStr(delta, "type") {
+	switch jsonutil.ObjStr(delta, "type") {
 	case "text_delta":
-		t := objStr(delta, "text")
+		t := jsonutil.ObjStr(delta, "text")
 		bs.accum += t
 		if bs.heldText {
 			// Preamble fragments not all in yet, or stripped-empty per stripSearchQueryEcho (echo lines not fully received /
@@ -349,7 +349,7 @@ func (s *anthToRespStream) handleBlockDelta(index int, delta map[string]interfac
 			s.emitTextDelta(bs, t)
 		}
 	case "thinking_delta":
-		t := objStr(delta, "thinking")
+		t := jsonutil.ObjStr(delta, "thinking")
 		bs.accum += t
 		if t != "" {
 			s.send(respSSEEvent("response.reasoning_summary_text.delta", map[string]interface{}{
@@ -358,9 +358,9 @@ func (s *anthToRespStream) handleBlockDelta(index int, delta map[string]interfac
 			}))
 		}
 	case "signature_delta":
-		bs.signature += objStr(delta, "signature")
+		bs.signature += jsonutil.ObjStr(delta, "signature")
 	case "input_json_delta":
-		t := objStr(delta, "partial_json")
+		t := jsonutil.ObjStr(delta, "partial_json")
 		bs.accum += t
 		// custom tools and Read don't forward argument deltas midway: custom must unwrap into a bare
 		// string at closing time for custom_tool_call_input.done, and Read must do the pages:"" sanitize
@@ -472,7 +472,7 @@ func (s *anthToRespStream) handleBlockStop(index int) {
 			// custom tool: unwrapped into a bare string at closing time, sent as custom_tool_call_input.done.
 			s.send(respSSEEvent("response.custom_tool_call_input.done", map[string]interface{}{
 				"type": "response.custom_tool_call_input.done", "item_id": bs.itemID,
-				"output_index": bs.outputIndex, "input": objStr(item, "input"),
+				"output_index": bs.outputIndex, "input": jsonutil.ObjStr(item, "input"),
 			}))
 		} else {
 			s.send(respSSEEvent("response.function_call_arguments.done", map[string]interface{}{
@@ -496,12 +496,12 @@ func (s *anthToRespStream) handleMessageStop() {
 }
 
 func (s *anthToRespStream) handleError(data map[string]interface{}) {
-	errObj := asObj(data["error"])
-	msg := objStr(errObj, "message")
+	errObj := jsonutil.AsObj(data["error"])
+	msg := jsonutil.ObjStr(errObj, "message")
 	if msg == "" {
 		msg = "upstream stream error"
 	}
-	typ := objStr(errObj, "type")
+	typ := jsonutil.ObjStr(errObj, "type")
 	if typ == "" {
 		typ = "api_error"
 	}
@@ -742,11 +742,11 @@ func (tw *translatingWriter) finishBuffered() {
 		var body map[string]interface{}
 		typ, msg := "api_error", strings.TrimSpace(string(tw.buf))
 		if json.Unmarshal(tw.buf, &body) == nil {
-			if errObj := asObj(body["error"]); errObj != nil {
-				if t := objStr(errObj, "type"); t != "" {
+			if errObj := jsonutil.AsObj(body["error"]); errObj != nil {
+				if t := jsonutil.ObjStr(errObj, "type"); t != "" {
 					typ = t
 				}
-				if m := objStr(errObj, "message"); m != "" {
+				if m := jsonutil.ObjStr(errObj, "message"); m != "" {
 					msg = m
 				}
 			}
@@ -778,8 +778,8 @@ func (tw *translatingWriter) finishBuffered() {
 			"status": "in_progress", "model": respObj["model"], "output": []interface{}{},
 		},
 	}))
-	for i, it := range asArr(respObj["output"]) {
-		item := asObj(it)
+	for i, it := range jsonutil.AsArr(respObj["output"]) {
+		item := jsonutil.AsObj(it)
 		emit(respOutputItemAdded(i, item))
 		emit(respOutputItemDone(i, item))
 	}

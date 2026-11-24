@@ -287,7 +287,7 @@ func TestLazyApplyClassifierE2E(t *testing.T) {
 				t.Fatalf("rewritten = %v, want %v (out: %s)", rewritten, tc.wantRewritten, out)
 			}
 			if tc.wantRewritten {
-				if th := asObj(parseBody(t, out)["thinking"]); objStr(th, "type") != "disabled" {
+				if th := jsonutil.AsObj(parseBody(t, out)["thinking"]); jsonutil.ObjStr(th, "type") != "disabled" {
 					t.Errorf("thinking=%v, want disabled", th)
 				}
 			}
@@ -346,9 +346,9 @@ func TestLazyApplyResponsesThinkingE2E(t *testing.T) {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 
-			th := asObj(got["thinking"])
+			th := jsonutil.AsObj(got["thinking"])
 			if tc.want == "enabled" {
-				if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != tc.budget {
+				if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != tc.budget {
 					t.Errorf("thinking=%v, want enabled/%d", th, tc.budget)
 				}
 				if got["output_config"] != nil {
@@ -356,7 +356,7 @@ func TestLazyApplyResponsesThinkingE2E(t *testing.T) {
 				}
 				return
 			}
-			if objStr(th, "type") != "adaptive" || objStr(asObj(got["output_config"]), "effort") != "high" {
+			if jsonutil.ObjStr(th, "type") != "adaptive" || jsonutil.ObjStr(jsonutil.AsObj(got["output_config"]), "effort") != "high" {
 				t.Errorf("thinking=%v output_config=%v, want adaptive/high", th, got["output_config"])
 			}
 		})
@@ -423,8 +423,8 @@ func TestLazyApplyResponsesConvertOff2LowE2E(t *testing.T) {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 
-			th := asObj(got["thinking"])
-			gotType := objStr(th, "type")
+			th := jsonutil.AsObj(got["thinking"])
+			gotType := jsonutil.ObjStr(th, "type")
 			if tc.want == "translate" {
 				// Adaptive route models upgrade a disabled request to adaptive thinking; budget models (fast_route)
 				// get the low floor. Either shape proves convertOff2Low reached the translation layer.
@@ -530,14 +530,14 @@ func TestLazyApplyResponsesFallbackThinkingE2E(t *testing.T) {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 
-			th := asObj(got["thinking"])
+			th := jsonutil.AsObj(got["thinking"])
 			if tc.wantEnabled {
-				if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
+				if jsonutil.ObjStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 					t.Errorf("thinking=%v, want enabled/16000", th)
 				}
 				return
 			}
-			if objStr(th, "type") != "adaptive" || objStr(asObj(got["output_config"]), "effort") != "high" {
+			if jsonutil.ObjStr(th, "type") != "adaptive" || jsonutil.ObjStr(jsonutil.AsObj(got["output_config"]), "effort") != "high" {
 				t.Errorf("thinking=%v output_config=%v, want adaptive/high", th, got["output_config"])
 			}
 		})
