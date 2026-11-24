@@ -43,8 +43,11 @@ func TestCompactionConsoleBadge(t *testing.T) {
 	if !strings.Contains(logViewerHTML, "[Comp]") || !strings.Contains(logViewerHTML, "f.compaction") {
 		t.Error("model cell should render the [Comp] badge from f.compaction")
 	}
-	if !strings.Contains(logViewerHTML, "f.compactSave") {
-		t.Error("finished rows should append the compact result from f.compactSave")
+	if !strings.Contains(logViewerHTML, `model = model + '<span style="color:#ce9178">['+esc(f.compactSave)+']</span>'`) {
+		t.Error("finished rows should append the compact result after the model name")
+	}
+	if !strings.Contains(logViewerHTML, `if(f.compaction) model = '<span style="color:#ce9178">[Comp]</span>' + model`) {
+		t.Error("the [Comp] badge should stay ahead of the model name")
 	}
 	en := renderLogViewerEN(logViewerHTML)
 	if !strings.Contains(en, "Context-compaction badge") {

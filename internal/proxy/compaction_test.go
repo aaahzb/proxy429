@@ -14,8 +14,9 @@ import (
 	"time"
 )
 
-// TestIsCompactionRequest pins the client compaction prompts the console recognizes: the three known
-// client prompts are positive, while an ordinary message and the post-compaction resume injection are not.
+// TestIsCompactionRequest pins the compaction detector: the three known client prompts are positive only as
+// the opening of the request's final user message, and conversation content that merely quotes them (a
+// resumed summary, a pasted file dump, a mid-sentence mention) is negative.
 func TestIsCompactionRequest(t *testing.T) {
 	tests := []struct {
 		name string
@@ -25,9 +26,17 @@ func TestIsCompactionRequest(t *testing.T) {
 		{name: "claude code compact prompt", body: `{"messages":[{"role":"user","content":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools."}]}`, want: true},
 		{name: "claude code legacy compact prompt", body: `{"messages":[{"role":"user","content":"Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests."}]}`, want: true},
 		{name: "codex checkpoint compaction", body: `{"input":[{"role":"user","content":"You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM."}]}`, want: true},
+		{name: "compact prompt in content blocks", body: `{"messages":[{"role":"user","content":[{"type":"text","text":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools."}]}]}`, want: true},
+		{name: "compact prompt with custom instructions", body: `{"messages":[{"role":"user","content":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\nAdditional instructions: focus on the API decisions."}]}`, want: true},
+		{name: "responses plain-string input", body: `{"input":"You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary."}`, want: true},
 		{name: "normal message", body: `{"model":"claude-opus-4-8","messages":[{"role":"user","content":"refactor this function"}]}`, want: false},
 		{name: "post-compaction resume injection", body: `{"messages":[{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion."}]}`, want: false},
 		{name: "empty body", body: "", want: false},
+		// The live false-positive shape: the resumed summary and a pasted file dump quote all three prompts,
+		// but the final user turn is an ordinary follow-up, so the stream is not a compaction.
+		{name: "prompts quoted in conversation history", body: `{"messages":[{"role":"user","content":"Summary: markers are CRITICAL: Respond with TEXT ONLY, Your task is to create a detailed summary of the conversation so far, You are performing a CONTEXT CHECKPOINT COMPACTION."},{"role":"assistant","content":"noted"},{"role":"user","content":"normal follow-up question"}]}`, want: false},
+		{name: "prompt quoted mid-sentence in final turn", body: `{"messages":[{"role":"user","content":"please explain this log line: CRITICAL: Respond with TEXT ONLY. Do NOT call any tools."}]}`, want: false},
+		{name: "prompt inside final tool_result", body: `{"messages":[{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools."}]}]}]}`, want: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,6 +183,7 @@ func TestCompactionBadgeEndToEnd(t *testing.T) {
 	}
 	var decoded struct {
 		List []struct {
+			ID          int    `json:"id"`
 			Compaction  bool   `json:"compaction"`
 			CompactSave string `json:"compactSave"`
 		} `json:"list"`
@@ -183,5 +193,52 @@ func TestCompactionBadgeEndToEnd(t *testing.T) {
 	}
 	if len(decoded.List) != 1 || !decoded.List[0].Compaction || decoded.List[0].CompactSave != "170k->20k, 88%" {
 		t.Errorf("finished row = %+v, want compaction true and compactSave 170k->20k, 88%%", decoded.List)
+	}
+
+	// Live-bug regression: a normal request whose conversation history quotes the prompts must stay
+	// unflagged, so its console row carries neither the [Comp] badge nor a save result.
+	historyRequest := `{"model":"claude-opus-4-8","stream":true,"max_tokens":32000,"messages":[{"role":"user","content":"The log quoted CRITICAL: Respond with TEXT ONLY and Your task is to create a detailed summary of the conversation so far."},{"role":"assistant","content":"noted"},{"role":"user","content":"normal follow-up question"}]}`
+	resp, err := http.Post(proxy.URL+"/v1/messages", "application/json", strings.NewReader(historyRequest))
+	if err != nil {
+		t.Fatalf("history-quoting request failed: %v", err)
+	}
+	hb, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(hb), "message_stop") {
+		t.Fatalf("history-quoting request did not finish normally: %s", hb)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		recorder.FinishedMu.Lock()
+		archived := len(recorder.Finished)
+		recorder.FinishedMu.Unlock()
+		if archived == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the history-quoting stream was never archived (archived %d)", archived)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, logview.RecentFlightsPath, nil)
+	req.RemoteAddr = "127.0.0.1:1"
+	logview.RecentFlightsHandler(rec, req)
+	if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("recentFlights is not JSON: %v", err)
+	}
+	if len(decoded.List) != 2 {
+		t.Fatalf("want 2 finished rows, got %+v", decoded.List)
+	}
+	newest, older := decoded.List[0], decoded.List[1]
+	if newest.ID < older.ID {
+		newest, older = older, newest
+	}
+	if newest.Compaction || newest.CompactSave != "" {
+		t.Errorf("history-quoting row = %+v, want no compaction flag and no save result", newest)
+	}
+	if !older.Compaction || older.CompactSave != "170k->20k, 88%" {
+		t.Errorf("compaction row = %+v, want compaction true and compactSave 170k->20k, 88%%", older)
 	}
 }

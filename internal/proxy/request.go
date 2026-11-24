@@ -691,22 +691,83 @@ func hasSearchSubagentMarker(body []byte) bool {
 	return bytes.Contains(body, []byte(searchSubagentMarker))
 }
 
-// compactionMarkers are the known client context-compaction prompts: Claude Code's current compact prompt,
-// Claude Code's legacy compact prompt, and Codex CLI's checkpoint compaction prompt.
-var compactionMarkers = [][]byte{
-	[]byte("CRITICAL: Respond with TEXT ONLY"),
-	[]byte("Your task is to create a detailed summary of the conversation so far"),
-	[]byte("You are performing a CONTEXT CHECKPOINT COMPACTION"),
+// compactionMarkers are the openings of the known client context-compaction prompts: Claude Code's current
+// compact prompt, Claude Code's legacy compact prompt, and Codex CLI's checkpoint compaction prompt.
+var compactionMarkers = []string{
+	"CRITICAL: Respond with TEXT ONLY",
+	"Your task is to create a detailed summary of the conversation so far",
+	"You are performing a CONTEXT CHECKPOINT COMPACTION",
 }
 
-// isCompactionRequest reports whether the request body carries a known client context-compaction prompt.
+// isCompactionRequest reports whether the request's final user message is a known client context-compaction
+// prompt. Only the opening of that final user turn counts: once a conversation has been compacted, its
+// history (and any file dump or summary inside it) can quote these prompts verbatim, so a whole-body scan
+// would flag every later request in the session as a compaction.
 func isCompactionRequest(body []byte) bool {
+	text := strings.TrimSpace(lastUserMessageText(body))
 	for _, marker := range compactionMarkers {
-		if bytes.Contains(body, marker) {
+		if strings.HasPrefix(text, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+// chatMessage is one entry of an Anthropic messages array or a Responses input array.
+type chatMessage struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+// lastUserMessageText returns the text of the last user-role message: the Anthropic messages array first,
+// then the Responses input (a plain string input is a user turn by itself). Non-text blocks contribute nothing.
+func lastUserMessageText(body []byte) string {
+	var req struct {
+		Messages []chatMessage   `json:"messages"`
+		Input    json.RawMessage `json:"input"`
+	}
+	if json.Unmarshal(body, &req) != nil {
+		return ""
+	}
+	items := req.Messages
+	if len(items) == 0 && len(req.Input) > 0 {
+		var s string
+		if json.Unmarshal(req.Input, &s) == nil {
+			return s
+		}
+		if json.Unmarshal(req.Input, &items) != nil {
+			return ""
+		}
+	}
+	for i := len(items) - 1; i >= 0; i-- {
+		if items[i].Role != "user" {
+			continue
+		}
+		return messageText(items[i].Content)
+	}
+	return ""
+}
+
+// messageText flattens a message content: a plain string, or an array of blocks whose "text" fields are joined.
+func messageText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var blocks []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	parts := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		parts = append(parts, b.Text)
+	}
+	return strings.Join(parts, "\n")
 }
 
 // searchStringEnd locates the closing quote of the JSON string containing position `from`
