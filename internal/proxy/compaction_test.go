@@ -45,6 +45,13 @@ func TestIsCompactionRequest(t *testing.T) {
 			}
 		})
 	}
+	// Prompt letters sent as JSON escapes decode to the prompt's opening but never appear as literal bytes.
+	// Conservative: reads as no compaction, matching the search marker's stance. Built at run time to keep the
+	// escape out of source.
+	escaped := `{"messages":[{"role":"user","content":"` + string(rune(0x5c)) + `u0043RITICAL: Respond with TEXT ONLY"}]}`
+	if isCompactionRequest([]byte(escaped)) {
+		t.Errorf("escaped prompt letters must read as no compaction")
+	}
 }
 
 const compactionRequest = `{"model":"claude-opus-4-8","stream":true,"max_tokens":32000,"messages":[{"role":"user","content":"CRITICAL: Respond with TEXT ONLY"}]}`

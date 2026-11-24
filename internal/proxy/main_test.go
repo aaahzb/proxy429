@@ -2449,6 +2449,7 @@ func TestHasImage(t *testing.T) {
 		want bool
 	}{
 		{"图片块", `{"messages":[{"content":[{"type":"text","text":"看图"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}]}]}`, true},
+		{"历史引用的转义形态", `{"messages":[{"content":[{"type":"text","text":"pasted source: {\"type\":\"image\",\"source\":{}}"}]}]}`, false}, // conversation history quotes the structural token; JSON escaping keeps the raw scan honest
 		{"纯文本字符串content", `{"messages":[{"role":"user","content":"hi"}]}`, false},
 		{"纯文本数组content", `{"messages":[{"content":[{"type":"text","text":"hi"}]}]}`, false},
 		{"空body", ``, false},
@@ -2713,7 +2714,8 @@ func TestHasWebSearch(t *testing.T) {
 		want bool
 	}{
 		{"server-side web_search", `{"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":5}]}`, true},
-		{"client-side WebSearch", `{"tools":[{"name":"WebSearch","description":"x","input_schema":{}}]}`, false}, // Client-side tool definitions are not recognized (every Code request carries them; would false-positive)
+		{"client-side WebSearch", `{"tools":[{"name":"WebSearch","description":"x","input_schema":{}}]}`, false},                                     // Client-side tool definitions are not recognized (every Code request carries them; would false-positive)
+		{"历史引用的转义形态", `{"messages":[{"role":"user","content":"pasted source: {\"type\":\"web_search_20250305\",\"name\":\"web_search\"}"}]}`, false}, // conversation history quotes the structural token; JSON escaping keeps the raw scan honest
 		{"纯文本无工具", `{"messages":[{"role":"user","content":"hi"}]}`, false},
 		{"普通工具非搜索", `{"tools":[{"name":"computer","input_schema":{}}]}`, false},
 		{"空body", ``, false},

@@ -7,6 +7,9 @@
 # Search: s1 routes via search_fallback (the smoke-sf route's own claudeSearchSummary=forceHigh overrides sf's forceMid
 # per field; sf's thinking=low still applies); s2 via enhance_search (legacy summary_*). Both must reach the mock exactly
 # once (single-request summary injection, no step1/step2) and stream its search answer back untouched.
+# History-quote negatives: s3 quotes the search marker in an earlier user turn (and still carries a web_search tool),
+# h1 quotes the compaction prompt in an earlier user turn. Their final user message is ordinary talk, so neither may arm
+# search/compaction: no upstream injection, badge fields stay false, and the global searchMarker=true count stays 2.
 # Vars: the config resolves $SMOKE_KEY from the top-level vars section (search_fallback uses it; routes keep a
 # literal key) — a green run proves variable expansion works end to end on the real startup path.
 # Pattern arrays: smoke-sf is written as "pattern": ["smoke-sf", "smoke-sf-alt"] (desugared into two route copies at
@@ -51,6 +54,11 @@ for i in $(seq 1 60); do
 done
 echo "listeners: 9099=$a 18083=$b 18084=$c"
 [ "$ok" = 1 ] || { echo "ABORT: proxy ports never came up"; exit 1; }
+
+# The suite queries archived upstream bodies by id after all requests have run. The product default keeps only the
+# last 10 finished streams, which evicts early flights (id 10 was the first casualty once the suite grew to 20).
+# Raise it through the product's own status-page endpoint so every id stays queryable.
+curl -s --max-time 10 -X POST "http://127.0.0.1:18083/__finishedcap" -H "Content-Type: application/json" -d '{"n":60}' | grep -q '"ok":true' || { echo "ABORT: could not raise finished-stream cap"; exit 1; }
 
 # Anthropic port: metadata.user_id inner-JSON session_id (escaped quotes preserved literally).
 cat > "$OUT/a1.json" <<'EOF'
@@ -151,7 +159,16 @@ EOF
 cat > "$OUT/s2.json" <<'EOF'
 {"model":"smoke-enh","max_tokens":8192,"stream":true,"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"Perform a web search for the query: smoke transit"}]}
 EOF
-for n in s1 s2; do
+# s3/h1 history-quote negatives: the marker lives in an earlier user turn, the final user turn is ordinary talk.
+# Both ride the default upstream (model matches no route): upstream must receive the history bytes untouched and
+# no badge may be set. s3 keeps the web_search tool so it also covers a search-capable request that is no sub-agent.
+cat > "$OUT/s3.json" <<'EOF'
+{"model":"smoke-hist-search","max_tokens":8192,"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"Pasted detector source for reference: hasSearchSubagentMarker scans for the literal Perform a web search for the query prefix."},{"role":"assistant","content":"Noted."},{"role":"user","content":"Explain that function, no search needed."}]}
+EOF
+cat > "$OUT/h1.json" <<'EOF'
+{"model":"smoke-hist-compact","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Earlier prompt to review: CRITICAL: Respond with TEXT ONLY. Do not call any tools. Explain it."},{"role":"assistant","content":"It asks for a plain-text summary."},{"role":"user","content":"Good, continue the original task."}]}
+EOF
+for n in s1 s2 s3 h1; do
   code=$(curl -s -o "$OUT/$n.resp" -w "%{http_code}" --max-time 30 -X POST "http://127.0.0.1:18083/v1/messages" -H "Content-Type: application/json" --data-binary "@$OUT/$n.json")
   echo "anthropic $n -> HTTP $code"
 done
@@ -245,6 +262,34 @@ echo "badge fields in recent.json: searchMarker=true x$smark, searchLevel=high x
 grep -qF 'SearchSummary-' "$OUT/page.html" || { echo "SearchSummary BADGE JS MISSING in served page"; searchok=0; }
 grep -qF "thinkFrom||'auto'" "$OUT/page.html" || { echo "auto-from BADGE JS MISSING in served page"; searchok=0; }
 [ "$searchok" = 1 ] && echo "SEARCH SMOKE PASS" || { echo "SEARCH SMOKE FAIL"; exit 1; }
+
+# --- history-quote negative fixtures (s3 id 19, h1 id 20): a marker quoted in conversation history must not arm
+# search or compaction. Rows are located by their unique model names, not by fixed ids.
+hqok=1
+srow=$(sed 's/},{/}\n{/g' "$OUT/recent.json" | grep '"model":"smoke-hist-search"')
+hrow=$(sed 's/},{/}\n{/g' "$OUT/recent.json" | grep '"model":"smoke-hist-compact"')
+sid=$(echo "$srow" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+[ -n "$sid" ] || { echo "S3 ROW MISSING (model smoke-hist-search)"; hqok=0; }
+echo "$srow" | grep -q '"searchMarker":false' || { echo "S3 SEARCH MARKER FALSE POSITIVE"; hqok=0; }
+echo "$srow" | grep -q '"searchPrompt":""' || { echo "S3 SEARCH PROMPT MUST STAY EMPTY"; hqok=0; }
+echo "$srow" | grep -q '"searchGuard":false' || { echo "S3 SEARCH GUARD FALSE POSITIVE"; hqok=0; }
+[ -n "$hrow" ] || { echo "H1 ROW MISSING (model smoke-hist-compact)"; hqok=0; }
+echo "$hrow" | grep -q '"compaction":false' || { echo "H1 COMPACTION FALSE POSITIVE"; hqok=0; }
+echo "$hrow" | grep -q '"compactSave":""' || { echo "H1 COMPACT SAVE MUST STAY EMPTY"; hqok=0; }
+ccount=$(grep -o '"compaction":true' "$OUT/recent.json" | wc -l | tr -d ' ')
+echo "compaction=true rows in recent.json: $ccount (want 0: no genuine compaction request in smoke)"
+[ "$ccount" = "0" ] || { echo "HISTORY QUOTE FLAGGED AS COMPACTION"; hqok=0; }
+if [ -n "$sid" ]; then
+  s3up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=$sid&side=up")
+  echo "$s3up" | grep -q 'Perform a web search for the query' || { echo "S3 HISTORY QUOTE LOST upstream"; hqok=0; }
+  mcount=$(echo "$s3up" | grep -o 'Perform a web search for the query' | wc -l | tr -d ' ')
+  echo "S3 marker occurrences upstream: $mcount (want 1, the history quote only)"
+  [ "$mcount" = "1" ] || { echo "S3 MARKER COUNT WRONG upstream"; hqok=0; }
+  ! echo "$s3up" | grep -q 'After performing the web search' || { echo "S3 GUARD INJECTED AT HISTORY QUOTE"; hqok=0; }
+  ! echo "$s3up" | grep -q 'detailed comprehensive plaintext summary' || { echo "S3 SUMMARY INJECTED AT HISTORY QUOTE"; hqok=0; }
+  echo "$s3up" | grep -q 'Explain that function, no search needed.' || { echo "S3 FINAL MESSAGE LOST upstream"; hqok=0; }
+fi
+[ "$hqok" = 1 ] && echo "HISTORY-QUOTE NEGATIVE SMOKE PASS" || { echo "HISTORY-QUOTE NEGATIVE SMOKE FAIL"; exit 1; }
 echo "page classifier(codex) log lines: $(grep -c 'classifier(codex)' "$OUT/data.json")"
 [ "$clsok" = 1 ] && echo "CLS SMOKE PASS" || { echo "CLS SMOKE FAIL"; exit 1; }
 if [ "$pairs" = "$want" ]; then echo "SMOKE PASS"; else echo "SMOKE FAIL (want [$want])"; exit 1; fi

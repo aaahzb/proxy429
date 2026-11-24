@@ -43,6 +43,12 @@ func TestHasSearchSubagentMarker(t *testing.T) {
 			t.Errorf("%s: hasSearchSubagentMarker = %v, want %v", tc.name, got, tc.want)
 		}
 	}
+	// Marker letters sent as JSON escapes decode to the marker's opening but never appear as literal bytes.
+	// Conservative: reads as no marker, so nothing is injected. Built at run time to keep the escape out of source.
+	escaped := `{"messages":[{"role":"user","content":"` + string(rune(0x5c)) + `u0050erform a web search for the query: X"}]}`
+	if hasSearchSubagentMarker([]byte(escaped)) {
+		t.Errorf("escaped marker letters must read as no marker")
+	}
 }
 
 // TestSearchMarkerQuery locks query extraction: the text after the marker inside the same JSON string,

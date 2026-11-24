@@ -690,6 +690,11 @@ const searchSubagentMarker = "Perform a web search for the query"
 // later request of a conversation that quotes it once (a source dump, a transcript, a pasted request body).
 // body: the request body. Returns whether the final user message opens with the marker.
 func hasSearchSubagentMarker(body []byte) bool {
+	// The span search only succeeds when the raw literal contains the marker bytes (escaped marker letters read
+	// as no marker), so this byte pre-filter is exact and keeps ordinary requests on the zero-allocation path.
+	if !bytes.Contains(body, []byte(searchSubagentMarker)) {
+		return false
+	}
 	_, _, ok := searchMarkerSpan(body)
 	return ok
 }
@@ -707,6 +712,19 @@ var compactionMarkers = []string{
 // history (and any file dump or summary inside it) can quote these prompts verbatim, so a whole-body scan
 // would flag every later request in the session as a compaction.
 func isCompactionRequest(body []byte) bool {
+	// Same pre-filter principle as the search marker: the prompts are plain ASCII, so a body whose raw bytes lack
+	// every prompt keeps the zero-allocation fast path. A client escaping the prompt's letters would read as no
+	// compaction, the conservative stance markerInString takes for the search marker.
+	found := false
+	for _, marker := range compactionMarkers {
+		if bytes.Contains(body, []byte(marker)) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false
+	}
 	text := strings.TrimSpace(lastUserMessageText(body))
 	for _, marker := range compactionMarkers {
 		if strings.HasPrefix(text, marker) {
@@ -786,8 +804,9 @@ func searchMarkerSpan(body []byte) (markerAt, strEnd int, ok bool) {
 	if !ok {
 		return 0, 0, false
 	}
-	// The final user message serializes last in the messages array, so its content literal's last occurrence
-	// in the body is the one to read and edit.
+	// The marker sits in the final user-role message, the last user message of the array. The bodies these clients
+	// send serialize it last, so its content literal's last occurrence in the body is the one to read and edit.
+	// A body that echoes the exact literal in a field serialized after it would anchor on that copy instead.
 	base := bytes.LastIndex(body, strRaw)
 	if base < 0 {
 		return 0, 0, false
