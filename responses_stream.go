@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"proxy429/internal/jsonutil"
 	"strings"
 )
 
@@ -142,11 +143,11 @@ func (s *anthToRespStream) handleEvent(event string, data map[string]interface{}
 	case "message_start":
 		s.handleMessageStart(asObj(data["message"]))
 	case "content_block_start":
-		s.handleBlockStart(int(toInt64(data["index"])), asObj(data["content_block"]))
+		s.handleBlockStart(int(jsonutil.ToInt64(data["index"])), asObj(data["content_block"]))
 	case "content_block_delta":
-		s.handleBlockDelta(int(toInt64(data["index"])), asObj(data["delta"]))
+		s.handleBlockDelta(int(jsonutil.ToInt64(data["index"])), asObj(data["delta"]))
 	case "content_block_stop":
-		s.handleBlockStop(int(toInt64(data["index"])))
+		s.handleBlockStop(int(jsonutil.ToInt64(data["index"])))
 	case "message_delta":
 		if d := asObj(data["delta"]); d != nil {
 			if sr := objStr(d, "stop_reason"); sr != "" {

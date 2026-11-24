@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/jsonutil"
 	"strings"
 	"testing"
 )
@@ -195,7 +196,7 @@ func TestResponsesToAnthropicThinkingBudget(t *testing.T) {
 	}
 	th := asObj(out["thinking"])
 	// Budget clamped to max_tokens/2=16000 (default max_tokens 32000; 16384 exceeds half).
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("thinking=%v, want enabled/16000（max_tokens 半压顶）", th)
 	}
 }
@@ -230,7 +231,7 @@ func TestResponsesToAnthropicThinkStyleOverride(t *testing.T) {
 		t.Fatalf("budget err: %v", err)
 	}
 	th = asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("budget fable-5: thinking=%v, want enabled/16000", th)
 	}
 	if out["output_config"] != nil {
@@ -401,10 +402,10 @@ func TestAnthropicToResponsesObject(t *testing.T) {
 		t.Errorf("arguments=%v err=%v", objStr(fc, "arguments"), err)
 	}
 	usage := asObj(out["usage"])
-	if toInt64(usage["input_tokens"]) != 88 || toInt64(usage["output_tokens"]) != 9 {
+	if jsonutil.ToInt64(usage["input_tokens"]) != 88 || jsonutil.ToInt64(usage["output_tokens"]) != 9 {
 		t.Errorf("usage=%v, want input=88(77+11缓存) output=9", usage)
 	}
-	if toInt64(asObj(usage["input_tokens_details"])["cached_tokens"]) != 11 {
+	if jsonutil.ToInt64(asObj(usage["input_tokens_details"])["cached_tokens"]) != 11 {
 		t.Errorf("cached_tokens 应=11: %v", usage)
 	}
 }
@@ -506,7 +507,7 @@ func TestAnthToRespStreamAllBlocks(t *testing.T) {
 	}
 	// usage merge: input 77+cache 11=88, output 9.
 	usage := asObj(final["usage"])
-	if toInt64(usage["input_tokens"]) != 88 || toInt64(usage["output_tokens"]) != 9 {
+	if jsonutil.ToInt64(usage["input_tokens"]) != 88 || jsonutil.ToInt64(usage["output_tokens"]) != 9 {
 		t.Errorf("usage=%v", usage)
 	}
 	if final["status"] != "completed" {

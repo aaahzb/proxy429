@@ -12,7 +12,7 @@ import (
 // JSON string (its session_id is taken); a bare API caller's free text passes through as-is; no metadata returns empty.
 // Includes a case with a giant messages array up front, verifying the scan can skip over big fields to reach metadata.
 func TestExtractConvID(t *testing.T) {
-	// Giant messages precede metadata, verifying locateTopFields' cross-field locating
+	// Giant messages precede metadata, verifying jsonutil.LocateTopFields' cross-field locating
 	bigMessages := `"messages":[` + strings.Repeat(`{"role":"user","content":"`+strings.Repeat("x", 1024)+`"},`, 64) + `{"role":"user","content":"尾"}]`
 	cases := []struct {
 		name string

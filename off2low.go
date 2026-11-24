@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"proxy429/internal/jsonutil"
 	"strconv"
 	"strings"
 )
@@ -50,23 +51,23 @@ func lowThinkingBudget(maxTokens int64) (budget int64, ok bool) {
 // On upgrade: reasoning deleted, reasoning_effort set to "low" (set or appended — belt-and-braces for
 // OpenAI-vocabulary upstreams, mirroring the classifier rewrite's "none"), temperature/top_p deleted
 // (thinking-on forbids sampling knobs, same rule as the translation port). All edits go through
-// setTopLevelJSONValue: positional, every other field's bytes and order preserved.
+// jsonutil.SetTopLevelJSONValue: positional, every other field's bytes and order preserved.
 // Returns (newBody, upgraded, abandoned, bumped); newBody is the original body when upgraded=false.
 func maybeUpgradeOffToLow(body []byte, effModel string, floorBump bool) (newBody []byte, upgraded, abandoned, bumped bool) {
-	spans, ok := locateTopFields(body)
+	spans, ok := jsonutil.LocateTopFields(body)
 	if !ok {
 		return body, false, false, false
 	}
 	var thinkVal, effortVal []byte
 	var maxTokens int64
 	for _, s := range spans {
-		switch s.name {
+		switch s.Name {
 		case "thinking":
-			thinkVal = body[s.valStart:s.valEnd]
+			thinkVal = body[s.ValStart:s.ValEnd]
 		case "reasoning_effort":
-			effortVal = body[s.valStart:s.valEnd]
+			effortVal = body[s.ValStart:s.ValEnd]
 		case "max_tokens":
-			mt, _ := strconv.ParseInt(strings.TrimSpace(string(body[s.valStart:s.valEnd])), 10, 64)
+			mt, _ := strconv.ParseInt(strings.TrimSpace(string(body[s.ValStart:s.ValEnd])), 10, 64)
 			maxTokens = mt // Unparseable = no ceiling (the request is broken anyway; the upstream will complain)
 		}
 	}
@@ -103,22 +104,22 @@ func maybeUpgradeOffToLow(body []byte, effModel string, floorBump bool) (newBody
 		}
 		thinkingJSON = []byte(fmt.Sprintf(`{"type":"enabled","budget_tokens":%d}`, b))
 	}
-	nb, ok := setTopLevelJSONValue(body, "thinking", thinkingJSON)
+	nb, ok := jsonutil.SetTopLevelJSONValue(body, "thinking", thinkingJSON)
 	if !ok {
 		return body, false, false, false
 	}
 	if raisedMaxTokens > 0 {
-		nb, _ = setTopLevelJSONValue(nb, "max_tokens", []byte(strconv.FormatInt(raisedMaxTokens, 10)))
+		nb, _ = jsonutil.SetTopLevelJSONValue(nb, "max_tokens", []byte(strconv.FormatInt(raisedMaxTokens, 10)))
 	}
 	if outputConfigJSON != nil {
-		nb, _ = setTopLevelJSONValue(nb, "output_config", outputConfigJSON)
+		nb, _ = jsonutil.SetTopLevelJSONValue(nb, "output_config", outputConfigJSON)
 	} else {
-		nb, _ = setTopLevelJSONValue(nb, "output_config", nil) // Budget shape: a stale output_config would contradict the budget form
+		nb, _ = jsonutil.SetTopLevelJSONValue(nb, "output_config", nil) // Budget shape: a stale output_config would contradict the budget form
 	}
-	nb, _ = setTopLevelJSONValue(nb, "reasoning_effort", []byte(`"low"`))
-	nb, _ = setTopLevelJSONValue(nb, "reasoning", nil)   // Responses-vocabulary field: gone
-	nb, _ = setTopLevelJSONValue(nb, "temperature", nil) // Thinking-on forbids sampling knobs upstream-side
-	nb, _ = setTopLevelJSONValue(nb, "top_p", nil)
+	nb, _ = jsonutil.SetTopLevelJSONValue(nb, "reasoning_effort", []byte(`"low"`))
+	nb, _ = jsonutil.SetTopLevelJSONValue(nb, "reasoning", nil)   // Responses-vocabulary field: gone
+	nb, _ = jsonutil.SetTopLevelJSONValue(nb, "temperature", nil) // Thinking-on forbids sampling knobs upstream-side
+	nb, _ = jsonutil.SetTopLevelJSONValue(nb, "top_p", nil)
 	return nb, true, false, raisedMaxTokens > 0
 }
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/jsonutil"
 	"strings"
 	"testing"
 )
@@ -45,7 +46,7 @@ func TestNone2LowUpgradeShapes(t *testing.T) {
 		t.Errorf("budget none: n2l=%d, want n2lStealth", n2l)
 	}
 	th = asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
+	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 		t.Errorf("budget 升级: thinking=%v, want enabled/2048", th)
 	}
 	if out["output_config"] != nil {
@@ -87,7 +88,7 @@ func TestNone2LowUpgradeShapes(t *testing.T) {
 		t.Errorf("high: n2l=%d, want n2lNone（只升级关思考）", n2l)
 	}
 	th = asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("high: thinking=%v, want enabled/16000", th)
 	}
 
@@ -126,7 +127,7 @@ func TestNone2LowUpgradeToolContinuation(t *testing.T) {
 		t.Errorf("工具续轮: n2l=%d, want n2lStealth", n2l)
 	}
 	th := asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
+	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 		t.Errorf("工具续轮升级: thinking=%v, want enabled/2048", th)
 	}
 
@@ -170,7 +171,7 @@ func TestNone2LowTryOnInvalidHistory(t *testing.T) {
 		t.Errorf("tryon budget: n2l=%d, want n2lTryOn", n2l)
 	}
 	th := asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("tryon budget: thinking=%v, want enabled/16000（16384 压顶 32000/2）", th)
 	}
 	if out["temperature"] != nil {
@@ -296,7 +297,7 @@ func TestAnthToRespStreamStripThinking(t *testing.T) {
 		t.Errorf("output_index 应连续（0..3），不应出现 4")
 	}
 	// usage untouched: the fixture's output_tokens=9 lands in the final response as-is.
-	if toInt64(asObj(final["usage"])["output_tokens"]) != 9 {
+	if jsonutil.ToInt64(asObj(final["usage"])["output_tokens"]) != 9 {
 		t.Errorf("usage 应如实透传: %v", final["usage"])
 	}
 }
@@ -350,7 +351,7 @@ func TestAnthropicToResponsesObjectStripThinking(t *testing.T) {
 	if len(output) != 1 || objStr(asObj(output[0]), "type") != "message" {
 		t.Fatalf("剥离后 output=%v, want 仅 message 一项", output)
 	}
-	if toInt64(asObj(out["usage"])["output_tokens"]) != 5 {
+	if jsonutil.ToInt64(asObj(out["usage"])["output_tokens"]) != 5 {
 		t.Errorf("usage 应原样保留: %v", out["usage"])
 	}
 
@@ -411,7 +412,7 @@ func TestNone2LowFallbackRetry(t *testing.T) {
 		if calls == 1 {
 			// First time: the upstream should receive the upgraded low thinking (budget-style enabled+2048).
 			th := asObj(m["thinking"])
-			if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
+			if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 				t.Errorf("首请求 thinking=%v, want enabled/2048", th)
 			}
 			// Reject with 200 + in-body error (Kimi style); the error text mentions thinking, triggering the fallback.
@@ -513,7 +514,7 @@ func TestNone2LowTryOnNoStrip(t *testing.T) {
 
 	// What the upstream receives is thinking-on at the requested level (enabled/16000), not thinking-off.
 	th := asObj(gotBody["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("上游 thinking=%v, want enabled/16000（所请 max 压顶 32000/2）", th)
 	}
 
@@ -600,7 +601,7 @@ func TestNone2LowAllAlsoTranslates(t *testing.T) {
 	}
 	resp.Body.Close()
 	th := asObj(gotBody["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
+	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 		t.Errorf(`convertOff2Low:"all" 在翻译口也应升级: thinking=%v, want enabled/2048`, th)
 	}
 }
@@ -638,7 +639,7 @@ func TestNone2LowFastRouteFlag(t *testing.T) {
 	}
 	resp.Body.Close()
 	th := asObj(gotBody["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
+	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 		t.Errorf("fast_route 自带 convertOff2Low 应升级: thinking=%v, want enabled/2048", th)
 	}
 }
@@ -670,7 +671,7 @@ func TestAllowNoThinkBlock4Anthropic(t *testing.T) {
 		t.Errorf("default budget: n2l=%d, want n2lTryOn", n2l)
 	}
 	th := asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("default budget: thinking=%v, want enabled/16000", th)
 	}
 
@@ -711,7 +712,7 @@ func TestAllowNoThinkBlock4Anthropic(t *testing.T) {
 		t.Errorf("false 显式关: n2l=%d, want n2lStealth", n2l)
 	}
 	th = asObj(out["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 2048 {
+	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 2048 {
 		t.Errorf("false 显式关: thinking=%v, want enabled/2048", th)
 	}
 
@@ -786,7 +787,7 @@ func TestAllowNoThinkBlockDefaultEndToEnd(t *testing.T) {
 
 	// What the upstream receives is thinking-on at the requested level (enabled/16000) even without convertOff2Low.
 	th := asObj(gotBody["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("默认 true: 上游 thinking=%v, want enabled/16000（所请 max 压顶 32000/2）", th)
 	}
 

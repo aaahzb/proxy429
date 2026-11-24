@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"proxy429/internal/config"
+	"proxy429/internal/jsonutil"
 	"strings"
 	"sync"
 	"time"
@@ -480,7 +481,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	result["messages"] = msgs
 
 	// max_output_tokens → max_tokens (required).
-	maxTokens := toInt64(body["max_output_tokens"])
+	maxTokens := jsonutil.ToInt64(body["max_output_tokens"])
 	if maxTokens <= 0 {
 		maxTokens = defaultResponsesMaxTokens
 	}
@@ -1689,13 +1690,13 @@ func mapStopReasonToStatus(stop string) (string, string) {
 // Anthropic's input_tokens excludes cache; Responses reports total input with cache as a subset:
 // input_tokens = fresh + cache_read + cache_creation.
 func buildResponsesUsage(usage map[string]interface{}) map[string]interface{} {
-	fresh := toInt64(usage["input_tokens"])
-	output := toInt64(usage["output_tokens"])
-	cacheRead := toInt64(usage["cache_read_input_tokens"])
-	cacheCreation := toInt64(usage["cache_creation_input_tokens"])
+	fresh := jsonutil.ToInt64(usage["input_tokens"])
+	output := jsonutil.ToInt64(usage["output_tokens"])
+	cacheRead := jsonutil.ToInt64(usage["cache_read_input_tokens"])
+	cacheCreation := jsonutil.ToInt64(usage["cache_creation_input_tokens"])
 	var reasoning int64
 	if d := asObj(usage["output_tokens_details"]); d != nil {
-		reasoning = toInt64(d["thinking_tokens"])
+		reasoning = jsonutil.ToInt64(d["thinking_tokens"])
 	}
 	input := fresh + cacheRead + cacheCreation
 	result := map[string]interface{}{

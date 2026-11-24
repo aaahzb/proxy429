@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/jsonutil"
 	"strings"
 	"sync"
 	"testing"
@@ -347,7 +348,7 @@ func TestLazyApplyResponsesThinkingE2E(t *testing.T) {
 
 			th := asObj(got["thinking"])
 			if tc.want == "enabled" {
-				if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != tc.budget {
+				if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != tc.budget {
 					t.Errorf("thinking=%v, want enabled/%d", th, tc.budget)
 				}
 				if got["output_config"] != nil {
@@ -427,7 +428,7 @@ func TestLazyApplyResponsesConvertOff2LowE2E(t *testing.T) {
 			if tc.want == "translate" {
 				// Adaptive route models upgrade a disabled request to adaptive thinking; budget models (fast_route)
 				// get the low floor. Either shape proves convertOff2Low reached the translation layer.
-				if gotType != "adaptive" && !(gotType == "enabled" && toInt64(th["budget_tokens"]) == 2048) {
+				if gotType != "adaptive" && !(gotType == "enabled" && jsonutil.ToInt64(th["budget_tokens"]) == 2048) {
 					t.Errorf("thinking=%v, want adaptive or enabled/2048", th)
 				}
 				return
@@ -531,7 +532,7 @@ func TestLazyApplyResponsesFallbackThinkingE2E(t *testing.T) {
 
 			th := asObj(got["thinking"])
 			if tc.wantEnabled {
-				if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+				if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 					t.Errorf("thinking=%v, want enabled/16000", th)
 				}
 				return

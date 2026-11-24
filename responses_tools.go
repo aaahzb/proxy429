@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"proxy429/internal/jsonutil"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -84,7 +85,7 @@ func buildToolRegistry(tools []interface{}) *toolRegistry {
 			reg.addNamespaceTool(tm)
 		case "web_search", "web_search_preview":
 			tool := map[string]interface{}{"type": "web_search_20250305", "name": "web_search"}
-			if mu := toInt64(tm["max_uses"]); mu > 0 {
+			if mu := jsonutil.ToInt64(tm["max_uses"]); mu > 0 {
 				tool["max_uses"] = mu
 			}
 			reg.tools = append(reg.tools, tool)

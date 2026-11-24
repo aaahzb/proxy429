@@ -125,7 +125,7 @@ func TestInjectAfterMarkerNoMarker(t *testing.T) {
 // shape (adaptive + output_config.effort; mid=medium; sampling knobs die when thinking turns on). Neither the
 // request thinking shape nor any model name is consulted, and the adaptive shape has no budget, so a tiny
 // max_tokens never blocks the rewrite. (A field the request did not have is appended pretty-spaced by
-// setTopLevelJSONValue, so effort assertions match the inner pair only.)
+// jsonutil.SetTopLevelJSONValue, so effort assertions match the inner pair only.)
 func TestRewriteSearchThinking(t *testing.T) {
 	base := `{"model":"M","max_tokens":64000,"temperature":1,"top_p":0.9,"thinking":{"type":"disabled"},"output_config":{"effort":"low"},"messages":[]}`
 	cases := []struct {

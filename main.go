@@ -27,6 +27,7 @@ import (
 	"fyne.io/systray"
 
 	"proxy429/internal/config"
+	"proxy429/internal/jsonutil"
 	"proxy429/internal/platform"
 )
 
@@ -60,7 +61,7 @@ const codexGuardianSystemPrefix = "You are judging one planned coding-agent acti
 
 // resolveProgramUILang determines the web console UI language at startup: program-settings.txt's ui-lang
 // wins; otherwise a one-time migration moves any legacy ui_lang left in config files into program-settings.txt
-// and deletes it from the config (setTopLevelJSONValue text-level surgery, every other byte untouched); otherwise follow the OS.
+// and deletes it from the config (jsonutil.SetTopLevelJSONValue text-level surgery, every other byte untouched); otherwise follow the OS.
 // After migration, no code path writes to existing config files programmatically (the config editor saves the user's verbatim text).
 func resolveProgramUILang() {
 	if l := config.ReadProgramSetting("ui-lang"); l == "zh" || l == "en" {
@@ -75,7 +76,7 @@ func resolveProgramUILang() {
 			if err := config.WriteProgramSetting("ui-lang", probe.UILang); err != nil {
 				log.Printf("[lang] failed to write %s: %v", config.ProgramSettingsFile, err)
 			}
-			if out, ok := setTopLevelJSONValue(data, "ui_lang", nil); ok {
+			if out, ok := jsonutil.SetTopLevelJSONValue(data, "ui_lang", nil); ok {
 				if err := os.WriteFile(config.CurrentConfigPath(), out, 0644); err != nil {
 					log.Printf("[lang] failed to remove migrated ui_lang from %s: %v", filepath.Base(config.CurrentConfigPath()), err)
 				}
@@ -558,23 +559,6 @@ func (s *liveStats) recentLatency() (avgFirstByteMs float64, tps float64) {
 		tps = float64(sumOut) / (float64(sumST) / 1000.0)
 	}
 	return
-}
-
-// toInt64 safely converts a JSON-parsed number (float64 / json.Number etc.) to int64.
-func toInt64(v interface{}) int64 {
-	switch n := v.(type) {
-	case float64:
-		return int64(n)
-	case int:
-		return int64(n)
-	case int64:
-		return n
-	case json.Number:
-		if i, err := n.Int64(); err == nil {
-			return i
-		}
-	}
-	return 0
 }
 
 // humanNum compresses large numbers to 1.2k / 3.40M forms for single-line display.
@@ -1616,28 +1600,28 @@ func parseSSEStats(line []byte, lastOutput, lastInput, lastCacheRead, lastCacheC
 	// taking the last value yields the standard-semantics input_tokens. Missing fields keep their previous value (never overwritten with 0).
 	// Note: ARK's usage has no cache_creation_input_tokens; cache writes for that upstream count as 0.
 	if v, ok := usage["input_tokens"]; ok {
-		in := toInt64(v)
+		in := jsonutil.ToInt64(v)
 		if in != *lastInput {
 			stats.inputTokens += in - *lastInput
 			*lastInput = in
 		}
 	}
 	if v, ok := usage["cache_read_input_tokens"]; ok {
-		cr := toInt64(v)
+		cr := jsonutil.ToInt64(v)
 		if cr != *lastCacheRead {
 			stats.cacheRead += cr - *lastCacheRead
 			*lastCacheRead = cr
 		}
 	}
 	if v, ok := usage["cache_creation_input_tokens"]; ok {
-		cc := toInt64(v)
+		cc := jsonutil.ToInt64(v)
 		if cc != *lastCacheCreation {
 			stats.cacheCreation += cc - *lastCacheCreation
 			*lastCacheCreation = cc
 		}
 	}
 	if v, ok := usage["output_tokens"]; ok {
-		out := toInt64(v)
+		out := jsonutil.ToInt64(v)
 		if out != *lastOutput {
 			stats.outputTokens += out - *lastOutput
 			*lastOutput = out
@@ -1960,27 +1944,27 @@ func parseNonStreamUsage(content []byte) (input, cacheRead, cacheCreation, outpu
 	// The Responses shape must be checked first: it also has top-level input_tokens/output_tokens;
 	// the criterion is the presence of input_tokens_details (neither Anthropic's nor OpenAI's usage has this sub-object).
 	if det, _ := u["input_tokens_details"].(map[string]interface{}); det != nil {
-		cached := toInt64(det["cached_tokens"])
-		input = toInt64(u["input_tokens"]) - cached
+		cached := jsonutil.ToInt64(det["cached_tokens"])
+		input = jsonutil.ToInt64(u["input_tokens"]) - cached
 		if input < 0 {
 			input = 0
 		}
 		cacheRead = cached
-		cacheCreation = toInt64(u["cache_creation_input_tokens"])
-		output = toInt64(u["output_tokens"])
+		cacheCreation = jsonutil.ToInt64(u["cache_creation_input_tokens"])
+		output = jsonutil.ToInt64(u["output_tokens"])
 		if input == 0 && cacheRead == 0 && cacheCreation == 0 && output == 0 {
 			return 0, 0, 0, 0, false
 		}
 		return input, cacheRead, cacheCreation, output, true
 	}
-	input = toInt64(u["input_tokens"])
-	cacheRead = toInt64(u["cache_read_input_tokens"])
-	cacheCreation = toInt64(u["cache_creation_input_tokens"])
-	output = toInt64(u["output_tokens"])
+	input = jsonutil.ToInt64(u["input_tokens"])
+	cacheRead = jsonutil.ToInt64(u["cache_read_input_tokens"])
+	cacheCreation = jsonutil.ToInt64(u["cache_creation_input_tokens"])
+	output = jsonutil.ToInt64(u["output_tokens"])
 	if input == 0 && cacheRead == 0 && cacheCreation == 0 && output == 0 {
 		// OpenAI style: prompt_tokens / completion_tokens (no cache_*)
-		input = toInt64(u["prompt_tokens"])
-		output = toInt64(u["completion_tokens"])
+		input = jsonutil.ToInt64(u["prompt_tokens"])
+		output = jsonutil.ToInt64(u["completion_tokens"])
 	}
 	if input == 0 && cacheRead == 0 && cacheCreation == 0 && output == 0 {
 		return 0, 0, 0, 0, false
@@ -2087,91 +2071,14 @@ func truncate(s string, n int) string {
 	return s
 }
 
-// fieldSpan records a field's byte positions within a top-level JSON object (based on the original body, quotes/colon included in the locating).
-// keyStart/keyEnd are the key's span (including the double quotes); valStart/valEnd are the value's byte span.
-type fieldSpan struct {
-	name     string
-	keyStart int
-	keyEnd   int
-	valStart int
-	valEnd   int
-}
-
-// locateTopFields streaming-parses a top-level JSON object and returns each field's byte position in the original body (appearance order preserved).
-// It reads keys with json.Decoder's Token and values into RawMessage with Decode, then calibrates the value's byte span using InputOffset +
-// the RawMessage content. Only top-level keys match; same-named fields in nested objects are untouched.
-// On locating failure it returns ok=false; the caller then passes the original body through (forwarding unaffected).
-func locateTopFields(body []byte) ([]fieldSpan, bool) {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
-		return nil, false
-	}
-	var spans []fieldSpan
-	for dec.More() {
-		tk, err := dec.Token()
-		if err != nil {
-			return nil, false
-		}
-		key, ok := tk.(string)
-		if !ok {
-			return nil, false
-		}
-		var v json.RawMessage
-		if err := dec.Decode(&v); err != nil {
-			return nil, false
-		}
-		valStart, valEnd, ok := locateValueRange(body, v, dec.InputOffset())
-		if !ok {
-			return nil, false
-		}
-		keyStart, keyEnd, ok := findKeySpan(body, valStart, key)
-		if !ok {
-			return nil, false
-		}
-		spans = append(spans, fieldSpan{name: key, keyStart: keyStart, keyEnd: keyEnd, valStart: valStart, valEnd: valEnd})
-	}
-	return spans, true
-}
-
-// locateValueRange derives the value's byte span from the Decoder's InputOffset and calibrates it with the RawMessage content.
-// After Decode, InputOffset usually points at the value's end, but scanp/trailing whitespace can shift it a few bytes;
-// so an exact match (body slice == RawMessage) is attempted within ±8 bytes nearby; no match means locating failed.
-func locateValueRange(body, v []byte, off int64) (valStart, valEnd int, ok bool) {
-	approx := int(off)
-	for d := 0; d <= 8; d++ {
-		for _, end := range []int{approx + d, approx - d} {
-			start := end - len(v)
-			if start >= 0 && end >= 0 && end <= len(body) && bytes.Equal(body[start:end], v) {
-				return start, end, true
-			}
-		}
-	}
-	return 0, 0, false
-}
-
-// findKeySpan searches backwards from the value's start for the "key": pattern, locating the key's byte span (including the double quotes).
-// The target field names are all simple identifiers without escapes, so plain literal matching suffices; LastIndex takes the most recent occurrence.
-func findKeySpan(body []byte, valStart int, key string) (keyStart, keyEnd int, ok bool) {
-	needle := []byte(`"` + key + `":`)
-	end := valStart
-	if end > len(body) {
-		end = len(body)
-	}
-	idx := bytes.LastIndex(body[:end], needle)
-	if idx < 0 {
-		return 0, 0, false
-	}
-	return idx, idx + len(key) + 2, true // +2 = opening " + key + closing "
-}
-
 // classifierSystemMatches reports whether the system field (raw bytes) starts with the given prefix.
 // system may be a string or an Anthropic-style [{type,text}] array.
-func classifierSystemMatches(body []byte, spans []fieldSpan, prefix string) bool {
+func classifierSystemMatches(body []byte, spans []jsonutil.FieldSpan, prefix string) bool {
 	for _, s := range spans {
-		if s.name != "system" {
+		if s.Name != "system" {
 			continue
 		}
-		sysRaw := body[s.valStart:s.valEnd]
+		sysRaw := body[s.ValStart:s.ValEnd]
 		var str string
 		if err := json.Unmarshal(sysRaw, &str); err == nil {
 			return strings.HasPrefix(str, prefix)
@@ -2192,9 +2099,9 @@ func classifierSystemMatches(body []byte, spans []fieldSpan, prefix string) bool
 // fieldDeleteRange computes the byte span for deleting a field (key, colon, value included), handling the surrounding commas correctly:
 // if a comma follows the field, delete through it; otherwise if a comma precedes the field (after skipping whitespace), delete from that comma.
 // This avoids leaving illegal shapes like ,, / {, / ,} behind.
-func fieldDeleteRange(body []byte, f *fieldSpan) (int, int) {
-	start := f.keyStart
-	end := f.valEnd
+func fieldDeleteRange(body []byte, f *jsonutil.FieldSpan) (int, int) {
+	start := f.KeyStart
+	end := f.ValEnd
 	if end < len(body) && body[end] == ',' {
 		return start, end + 1 // Delete through the trailing comma
 	}
@@ -2225,13 +2132,13 @@ func lastCloseBrace(body []byte) int {
 // applyClassifierEdits performs text replacements/deletions/appends on the original body, touching only the target fields and preserving every other byte.
 // thinking->{"type":"disabled"}, reasoning_effort->"none", reasoning->deleted.
 // Fields absent from the original are appended before the top-level closing }. Edits are spliced by ascending start, all based on the original body, without interfering with each other.
-func applyClassifierEdits(body []byte, spans []fieldSpan) []byte {
-	have := map[string]*fieldSpan{}
+func applyClassifierEdits(body []byte, spans []jsonutil.FieldSpan) []byte {
+	have := map[string]*jsonutil.FieldSpan{}
 	for i := range spans {
 		s := &spans[i]
-		switch s.name {
+		switch s.Name {
 		case "thinking", "reasoning_effort", "reasoning":
-			have[s.name] = s
+			have[s.Name] = s
 		}
 	}
 
@@ -2247,10 +2154,10 @@ func applyClassifierEdits(body []byte, spans []fieldSpan) []byte {
 		edits = append(edits, edit{ds, de, nil})
 	}
 	if t, ok := have["thinking"]; ok {
-		edits = append(edits, edit{t.valStart, t.valEnd, []byte(`{"type":"disabled"}`)})
+		edits = append(edits, edit{t.ValStart, t.ValEnd, []byte(`{"type":"disabled"}`)})
 	}
 	if re, ok := have["reasoning_effort"]; ok {
-		edits = append(edits, edit{re.valStart, re.valEnd, []byte(`"none"`)})
+		edits = append(edits, edit{re.ValStart, re.ValEnd, []byte(`"none"`)})
 	}
 
 	// Append fields absent from the original body: inserted before the top-level closing } (original field order preserved, new fields at the end)
@@ -2316,12 +2223,12 @@ func isFastRequest(body []byte, r *http.Request) bool {
 // Upstreams don't support the speed field; passing it through could cause rejection or undefined behavior. Uses streaming field locating,
 // unaffected by field order or whitespace.
 func removeSpeedField(body []byte) []byte {
-	spans, ok := locateTopFields(body)
+	spans, ok := jsonutil.LocateTopFields(body)
 	if !ok {
 		return body
 	}
 	for i, s := range spans {
-		if s.name != "speed" {
+		if s.Name != "speed" {
 			continue
 		}
 		return deleteFieldSpan(body, spans, i)
@@ -2331,16 +2238,16 @@ func removeSpeedField(body []byte) []byte {
 
 // getStringField reads a field's string value from the body's top-level JSON object; missing or non-string returns empty.
 func getStringField(body []byte, key string) string {
-	spans, ok := locateTopFields(body)
+	spans, ok := jsonutil.LocateTopFields(body)
 	if !ok {
 		return ""
 	}
 	for _, s := range spans {
-		if s.name != key {
+		if s.Name != key {
 			continue
 		}
 		var v string
-		if err := json.Unmarshal(body[s.valStart:s.valEnd], &v); err != nil {
+		if err := json.Unmarshal(body[s.ValStart:s.ValEnd], &v); err != nil {
 			return ""
 		}
 		return v
@@ -2350,16 +2257,16 @@ func getStringField(body []byte, key string) string {
 
 // getBoolField reads a field's boolean value from the body's top-level JSON object; missing or non-boolean returns ok=false.
 func getBoolField(body []byte, key string) (val bool, ok bool) {
-	spans, ok2 := locateTopFields(body)
+	spans, ok2 := jsonutil.LocateTopFields(body)
 	if !ok2 {
 		return false, false
 	}
 	for _, s := range spans {
-		if s.name != key {
+		if s.Name != key {
 			continue
 		}
 		var b bool
-		if err := json.Unmarshal(body[s.valStart:s.valEnd], &b); err != nil {
+		if err := json.Unmarshal(body[s.ValStart:s.ValEnd], &b); err != nil {
 			return false, false
 		}
 		return b, true
@@ -2371,22 +2278,22 @@ func getBoolField(body []byte, key string) (val bool, ok bool) {
 // Uses streaming field locating + text replacement without wholesale re-serialization; untouched fields keep their exact bytes (key order and formatting included),
 // preserving upstream cache hits. body: the original request body. Returns the rewritten body.
 func forceStreamTrue(body []byte) []byte {
-	spans, ok := locateTopFields(body)
+	spans, ok := jsonutil.LocateTopFields(body)
 	if !ok {
 		return body
 	}
 	for _, s := range spans {
-		if s.name != "stream" {
+		if s.Name != "stream" {
 			continue
 		}
 		// Already true: return the original body, avoiding a pointless rewrite.
-		if bytes.Equal(bytes.TrimSpace(body[s.valStart:s.valEnd]), []byte("true")) {
+		if bytes.Equal(bytes.TrimSpace(body[s.ValStart:s.ValEnd]), []byte("true")) {
 			return body
 		}
 		out := make([]byte, 0, len(body))
-		out = append(out, body[:s.valStart]...)
+		out = append(out, body[:s.ValStart]...)
 		out = append(out, "true"...)
-		out = append(out, body[s.valEnd:]...)
+		out = append(out, body[s.ValEnd:]...)
 		return out
 	}
 	// stream field missing: append ,"stream":true before the object's closing } (no comma for an empty object).
@@ -2405,15 +2312,15 @@ func forceStreamTrue(body []byte) []byte {
 }
 
 // deleteFieldSpan deletes the idx-th field of a top-level JSON object, keeping the other fields' order and formatting.
-func deleteFieldSpan(body []byte, spans []fieldSpan, idx int) []byte {
+func deleteFieldSpan(body []byte, spans []jsonutil.FieldSpan, idx int) []byte {
 	if len(spans) == 0 || idx < 0 || idx >= len(spans) {
 		return body
 	}
 	s := spans[idx]
 	// Span to delete: from this field's keyStart to its valEnd.
 	// The surrounding commas are handled afterwards to keep the JSON legal.
-	start := s.keyStart
-	end := s.valEnd
+	start := s.KeyStart
+	end := s.ValEnd
 
 	if idx == 0 {
 		// First field: after deletion, drop the immediately following comma (if any).
@@ -2431,124 +2338,15 @@ func deleteFieldSpan(body []byte, spans []fieldSpan, idx int) []byte {
 	return out
 }
 
-// setTopLevelJSONValue precisely sets one key's value at the top level of a JSON text (rawValue is complete JSON
-// value text, e.g. `"en"`, `{"type":"disabled"}`); rawValue=nil deletes the key.
-// Fields are located via locateTopFields (same-named nested keys untouched), and all editing is text-level: every other field's
-// content, order, indentation, and newline style is preserved byte for byte. Returns a new slice; the input is not modified.
-// ok=false when the top level is not a legal JSON object; the caller should abandon the write.
-func setTopLevelJSONValue(body []byte, key string, rawValue []byte) ([]byte, bool) {
-	spans, ok := locateTopFields(body)
-	if !ok {
-		return nil, false
-	}
-	idx := -1
-	for i := range spans {
-		if spans[i].name == key {
-			idx = i
-			break
-		}
-	}
-	if idx >= 0 {
-		s := spans[idx]
-		if rawValue != nil {
-			// Set value: replace only the [valStart,valEnd) span; the key name and all other bytes are preserved
-			out := make([]byte, 0, len(body)-(s.valEnd-s.valStart)+len(rawValue))
-			out = append(out, body[:s.valStart]...)
-			out = append(out, rawValue...)
-			out = append(out, body[s.valEnd:]...)
-			return out, true
-		}
-		// Delete key: clean up the separating comma along with it, leaving no blank line or dangling comma
-		start, end := s.keyStart, s.valEnd
-		if idx == 0 {
-			// First field: first back off the key's own line indentation, then consume the comma right after the value plus one following newline
-			for start > 0 && (body[start-1] == ' ' || body[start-1] == '\t') {
-				start--
-			}
-			for end < len(body) && (body[end] == ' ' || body[end] == '\t') {
-				end++
-			}
-			if end < len(body) && body[end] == ',' {
-				end++
-			}
-			for end < len(body) && (body[end] == ' ' || body[end] == '\t') {
-				end++
-			}
-			if end < len(body) && body[end] == '\r' {
-				end++
-			}
-			if end < len(body) && body[end] == '\n' {
-				end++
-			}
-		} else {
-			// Non-first field: consume the whitespace/newline before the key plus the preceding comma (the key's whole line disappears with it)
-			for start > 0 && (body[start-1] == ' ' || body[start-1] == '\t' || body[start-1] == '\r' || body[start-1] == '\n') {
-				start--
-			}
-			if start > 0 && body[start-1] == ',' {
-				start--
-			}
-		}
-		out := make([]byte, 0, len(body)-(end-start))
-		out = append(out, body[:start]...)
-		out = append(out, body[end:]...)
-		return out, true
-	}
-	if rawValue == nil {
-		return body, true // The key to delete doesn't exist; nothing to do
-	}
-	// Append a new key: insert before the top-level closing '}', following the first top-level key's line indentation and the file's newline style
-	closePos := len(bytes.TrimRight(body, " \t\r\n")) - 1
-	if closePos < 0 || body[closePos] != '}' {
-		return nil, false
-	}
-	indent := "  "
-	if len(spans) > 0 {
-		lineStart := bytes.LastIndexByte(body[:spans[0].keyStart], '\n') + 1
-		ind := body[lineStart:spans[0].keyStart]
-		allWS := len(ind) > 0
-		for _, c := range ind {
-			if c != ' ' && c != '\t' {
-				allWS = false
-				break
-			}
-		}
-		if allWS {
-			indent = string(ind)
-		}
-	}
-	nl := "\n"
-	if bytes.Contains(body, []byte("\r\n")) {
-		nl = "\r\n"
-	}
-	out := make([]byte, 0, len(body)+len(key)+len(rawValue)+16)
-	// The comma must follow the last non-whitespace byte (the previous field's line end); the new key gets its own line;
-	// the whitespace before the original closing '}' is replaced by the unified nl below
-	trimEnd := len(bytes.TrimRight(body[:closePos], " \t\r\n"))
-	out = append(out, body[:trimEnd]...)
-	if len(spans) > 0 {
-		out = append(out, ',')
-	}
-	out = append(out, nl...)
-	out = append(out, indent...)
-	out = append(out, '"')
-	out = append(out, key...)
-	out = append(out, []byte(`": `)...)
-	out = append(out, rawValue...)
-	out = append(out, nl...)
-	out = append(out, body[closePos:]...) // The closing '}' and the original trailing whitespace
-	return out, true
-}
-
 // disableThinkingInBody rewrites the request body's top-level thinking to {"type":"disabled"} and deletes
 // output_config: the one-shot fallback surgery after a convertOff2Low upgrade is rejected by an upstream 400
 // (the downstream wanted thinking off anyway, so the fallback is semantically lossless). Text-level editing; all other fields preserved.
 func disableThinkingInBody(body []byte) ([]byte, bool) {
-	nb, ok := setTopLevelJSONValue(body, "thinking", []byte(`{"type":"disabled"}`))
+	nb, ok := jsonutil.SetTopLevelJSONValue(body, "thinking", []byte(`{"type":"disabled"}`))
 	if !ok {
 		return nil, false
 	}
-	return setTopLevelJSONValue(nb, "output_config", nil)
+	return jsonutil.SetTopLevelJSONValue(nb, "output_config", nil)
 }
 
 // detectClassifier reports which classifier signature the body's system field matches (prefix at the very start of the system text).
@@ -2560,7 +2358,7 @@ func detectClassifier(body []byte) config.ClassifierSource {
 	if !hasCC && !hasCodex {
 		return config.ClassifierNone
 	}
-	spans, ok := locateTopFields(body)
+	spans, ok := jsonutil.LocateTopFields(body)
 	if !ok {
 		return config.ClassifierNone
 	}
@@ -2598,15 +2396,15 @@ func effortWordOf(v []byte) string {
 // thinking absent — adaptive models think by default, and an effort word alone does not enforce a mode upstream).
 // The belt-and-braces fields the proxy itself would add when forcing a mode (reasoning_effort, reasoning) are never
 // read here: their presence or absence doesn't change what the request's thinking mode already is.
-func classifierThinkingShape(body []byte, spans []fieldSpan) string {
+func classifierThinkingShape(body []byte, spans []jsonutil.FieldSpan) string {
 	var thinkVal, ocVal []byte
 	for i := range spans {
 		s := &spans[i]
-		switch s.name {
+		switch s.Name {
 		case "thinking":
-			thinkVal = body[s.valStart:s.valEnd]
+			thinkVal = body[s.ValStart:s.ValEnd]
 		case "output_config":
-			ocVal = body[s.valStart:s.valEnd]
+			ocVal = body[s.ValStart:s.ValEnd]
 		}
 	}
 	if len(thinkVal) == 0 {
@@ -2664,7 +2462,7 @@ func maybeRewriteClassifier(body []byte) (newBody []byte, rewritten bool) {
 	if mode == "" {
 		return body, false
 	}
-	spans, ok := locateTopFields(body)
+	spans, ok := jsonutil.LocateTopFields(body)
 	if !ok {
 		return body, false
 	}
@@ -2783,20 +2581,20 @@ func extractModel(body []byte) string {
 // Claude Code always carries a top-level metadata.user_id whose value is a JSON string
 // ({"device_id":"...","account_uuid":"...","session_id":"<uuid>"}); the session_id inside is used.
 // Free text stuffed by a bare API caller is used as-is (stability is enough for correlation). No metadata → empty.
-// locateTopFields locates the top-level metadata and only that small object is unmarshaled — the body is never fully parsed; read-only.
+// jsonutil.LocateTopFields locates the top-level metadata and only that small object is unmarshaled — the body is never fully parsed; read-only.
 func extractConvID(body []byte) string {
-	spans, ok := locateTopFields(body)
+	spans, ok := jsonutil.LocateTopFields(body)
 	if !ok {
 		return ""
 	}
 	for _, s := range spans {
-		if s.name != "metadata" {
+		if s.Name != "metadata" {
 			continue
 		}
 		var md struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.Unmarshal(body[s.valStart:s.valEnd], &md); err != nil || md.UserID == "" {
+		if err := json.Unmarshal(body[s.ValStart:s.ValEnd], &md); err != nil || md.UserID == "" {
 			return ""
 		}
 		if strings.HasPrefix(md.UserID, "{") {
@@ -2902,16 +2700,16 @@ func stripCacheControl(b []byte) []byte {
 // so normalized raw bytes are a stable element identity; the body is never fully decoded. Returns the normalized
 // elements and their hashes (nil for non-JSON bodies or bodies without a message array).
 func hashLineage(body []byte) ([][]byte, []uint64) {
-	spans, ok := locateTopFields(body)
+	spans, ok := jsonutil.LocateTopFields(body)
 	if !ok {
 		return nil, nil
 	}
 	for _, s := range spans {
-		if s.name != "messages" && s.name != "input" {
+		if s.Name != "messages" && s.Name != "input" {
 			continue
 		}
 		var raw []json.RawMessage
-		if json.Unmarshal(body[s.valStart:s.valEnd], &raw) != nil || len(raw) == 0 {
+		if json.Unmarshal(body[s.ValStart:s.ValEnd], &raw) != nil || len(raw) == 0 {
 			return nil, nil
 		}
 		n := min(len(raw), lineageHashCap)
@@ -3013,22 +2811,22 @@ func computeLineage(f *flight, body []byte) {
 // adaptive without effort → "adaptive"; with output_config.effort → just the effort word ("high"/"max"…);
 // output_config.effort without thinking → likewise just the effort word; unknown types display as-is.
 // No thinking/output_config field → empty (column shows -).
-// locateTopFields locates the relevant small objects for unmarshaling; the body is never fully parsed; read-only.
+// jsonutil.LocateTopFields locates the relevant small objects for unmarshaling; the body is never fully parsed; read-only.
 func extractThinkMode(body []byte) string {
-	spans, ok := locateTopFields(body)
+	spans, ok := jsonutil.LocateTopFields(body)
 	if !ok {
 		return ""
 	}
 	mode := ""
 	effort := ""
 	for _, s := range spans {
-		switch s.name {
+		switch s.Name {
 		case "thinking":
 			var t struct {
 				Type   string `json:"type"`
 				Budget int64  `json:"budget_tokens"`
 			}
-			if err := json.Unmarshal(body[s.valStart:s.valEnd], &t); err != nil {
+			if err := json.Unmarshal(body[s.ValStart:s.ValEnd], &t); err != nil {
 				continue
 			}
 			switch t.Type {
@@ -3047,7 +2845,7 @@ func extractThinkMode(body []byte) string {
 			var oc struct {
 				Effort string `json:"effort"`
 			}
-			if err := json.Unmarshal(body[s.valStart:s.valEnd], &oc); err == nil {
+			if err := json.Unmarshal(body[s.ValStart:s.ValEnd], &oc); err == nil {
 				effort = oc.Effort
 			}
 		}
@@ -3204,18 +3002,18 @@ func injectAfterMarker(body []byte, instruction string) ([]byte, bool) {
 // deleting temperature/top_p (thinking-on forbids sampling knobs, same rule as maybeUpgradeOffToLow). The
 // response side lives with the caller: when the client never asked for thinking it flags stripThinking so the
 // returning thinking blocks are stripped and the client keeps seeing a thinking-off response. All edits are
-// positional via setTopLevelJSONValue.
+// positional via jsonutil.SetTopLevelJSONValue.
 // body: the request body; level: the effective level. Returns (newBody, rewritten).
 func rewriteSearchThinking(body []byte, level string) ([]byte, bool) {
 	if level == "" {
 		return body, false
 	}
 	if level == "off" {
-		nb, ok := setTopLevelJSONValue(body, "thinking", []byte(`{"type":"disabled"}`))
+		nb, ok := jsonutil.SetTopLevelJSONValue(body, "thinking", []byte(`{"type":"disabled"}`))
 		if !ok {
 			return body, false
 		}
-		nb, _ = setTopLevelJSONValue(nb, "output_config", nil)
+		nb, _ = jsonutil.SetTopLevelJSONValue(nb, "output_config", nil)
 		return nb, true
 	}
 	if level == "mid" { // The user-facing enum says mid; the effort tables say medium.
@@ -3225,13 +3023,13 @@ func rewriteSearchThinking(body []byte, level string) ([]byte, bool) {
 	if effort == "" {
 		return body, false // Unknown level (config validation should have caught it): leave the body alone
 	}
-	nb, ok := setTopLevelJSONValue(body, "thinking", []byte(`{"type":"adaptive"}`))
+	nb, ok := jsonutil.SetTopLevelJSONValue(body, "thinking", []byte(`{"type":"adaptive"}`))
 	if !ok {
 		return body, false
 	}
-	nb, _ = setTopLevelJSONValue(nb, "output_config", []byte(fmt.Sprintf(`{"effort":%q}`, effort)))
-	nb, _ = setTopLevelJSONValue(nb, "temperature", nil) // Thinking-on forbids sampling knobs upstream-side
-	nb, _ = setTopLevelJSONValue(nb, "top_p", nil)
+	nb, _ = jsonutil.SetTopLevelJSONValue(nb, "output_config", []byte(fmt.Sprintf(`{"effort":%q}`, effort)))
+	nb, _ = jsonutil.SetTopLevelJSONValue(nb, "temperature", nil) // Thinking-on forbids sampling knobs upstream-side
+	nb, _ = jsonutil.SetTopLevelJSONValue(nb, "top_p", nil)
 	return nb, true
 }
 
@@ -3746,13 +3544,13 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 				}
 			case "content_block_start":
 				if cb, ok := ev["content_block"].(map[string]interface{}); ok {
-					blocks[int(toInt64(ev["index"]))] = cb
+					blocks[int(jsonutil.ToInt64(ev["index"]))] = cb
 					if t, _ := cb["type"].(string); t == "tool_use" || t == "server_tool_use" {
 						f.noteToolCall(strVal(cb, "name")) // Tool-call counting (the JSON-assembly path doesn't go through writeAndCount)
 					}
 				}
 			case "content_block_delta":
-				b := blocks[int(toInt64(ev["index"]))]
+				b := blocks[int(jsonutil.ToInt64(ev["index"]))]
 				d, _ := ev["delta"].(map[string]interface{})
 				if b == nil || d == nil {
 					continue
@@ -4529,8 +4327,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					stats.addModelRetry(f.realModel())
 					body = nb
 					// A native-port upgrade may also have set reasoning_effort:"low"; the belt-and-braces off form is "none"
-					// (setTopLevelJSONValue appends the key when absent — harmless, same shape as the classifier rewrite).
-					if nb2, ok2 := setTopLevelJSONValue(body, "reasoning_effort", []byte(`"none"`)); ok2 {
+					// (jsonutil.SetTopLevelJSONValue appends the key when absent — harmless, same shape as the classifier rewrite).
+					if nb2, ok2 := jsonutil.SetTopLevelJSONValue(body, "reasoning_effort", []byte(`"none"`)); ok2 {
 						body = nb2
 					}
 					n2lMode = n2lNone

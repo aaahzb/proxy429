@@ -4,6 +4,7 @@ package main
 // and transform_codex_anthropic.rs 312-425).
 
 import (
+	"proxy429/internal/jsonutil"
 	"testing"
 )
 
@@ -187,7 +188,7 @@ func TestThinkingHistoryInvalid(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 	th := asObj(out2["thinking"])
-	if objStr(th, "type") != "enabled" || toInt64(th["budget_tokens"]) != 16000 {
+	if objStr(th, "type") != "enabled" || jsonutil.ToInt64(th["budget_tokens"]) != 16000 {
 		t.Errorf("thinking=%v, want enabled/16000（默认先试所请 budget）", out2["thinking"])
 	}
 }
