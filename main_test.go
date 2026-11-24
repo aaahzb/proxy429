@@ -79,6 +79,11 @@ func resetStats() {
 	logBuf.head = 0
 	logBuf.len = 0
 	logBuf.mu.Unlock()
+
+	finishedMu.Lock()
+	finished = nil
+	cacheObsMap = map[string]*cacheObsEntry{}
+	finishedMu.Unlock()
 }
 
 func TestParseSSEStatsMessageStart(t *testing.T) {
