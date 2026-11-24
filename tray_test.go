@@ -1,6 +1,8 @@
 package main
 
 import (
+	"proxy429/internal/platform"
+
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -34,9 +36,9 @@ func TestTrayState(t *testing.T) {
 // TestTrayTip verifies the multi-line tooltip: idle / single state / both states coexisting, plus the per-problem
 // lines (removed config keys; loopback-hijack trap) prepended before the activity lines.
 func TestTrayTip(t *testing.T) {
-	prev := currentUILang()
-	applyUILang("zh") // Pin the language so the problem-line assertion is deterministic
-	defer applyUILang(prev)
+	prev := platform.CurrentUILang()
+	platform.ApplyUILang("zh") // Pin the language so the problem-line assertion is deterministic
+	defer platform.ApplyUILang(prev)
 	cases := []struct {
 		active, waiting int
 		problem, hijack bool

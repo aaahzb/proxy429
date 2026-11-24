@@ -1,4 +1,4 @@
-package main
+package platform
 
 // Unit tests for proxycheck's pure parsers: scutil output, reg query output, NO_PROXY/ProxyOverride
 // loopback coverage, and detectHijackRisk's gate (no probing, no alarm when responses_listen is unset).
@@ -97,10 +97,7 @@ func TestProxyOverrideCoversLoopback(t *testing.T) {
 
 // With responses_listen unset the gate passes quietly (no alarm): no Responses port means no Codex to hijack.
 func TestDetectHijackRiskGatedWithoutResponsesListen(t *testing.T) {
-	prev := cfg.Load()
-	cfg.Store(&Config{})
-	defer cfg.Store(prev)
-	if risk, _ := detectHijackRisk(); risk {
+	if risk, _ := detectHijackRisk(""); risk {
 		t.Error("no alarm expected when responses_listen is empty")
 	}
 }

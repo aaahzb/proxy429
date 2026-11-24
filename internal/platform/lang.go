@@ -5,7 +5,7 @@
 // launch until changed again (choosing "follow system" deletes the key from
 // program-settings.txt and restores auto-detection).
 // A legacy ui_lang key in config files is migrated once at startup by resolveProgramUILang.
-package main
+package platform
 
 import (
 	"sync/atomic"
@@ -14,8 +14,8 @@ import (
 // uiLang is the active UI language ("zh"/"en"); written only via applyUILang, read by page handlers.
 var uiLang atomic.Value
 
-// applyUILang applies the configured language choice; an empty value falls back to OS language detection.
-func applyUILang(cfgLang string) {
+// ApplyUILang applies the configured language choice; an empty value falls back to OS language detection.
+func ApplyUILang(cfgLang string) {
 	if cfgLang == "zh" || cfgLang == "en" {
 		uiLang.Store(cfgLang)
 		return
@@ -23,8 +23,8 @@ func applyUILang(cfgLang string) {
 	uiLang.Store(detectSystemLang())
 }
 
-// currentUILang returns the active UI language (always initialized at main startup; English as fallback).
-func currentUILang() string {
+// CurrentUILang returns the active UI language (always initialized at main startup; English as fallback).
+func CurrentUILang() string {
 	if v := uiLang.Load(); v != nil {
 		return v.(string)
 	}

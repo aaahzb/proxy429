@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"fyne.io/systray"
+
+	"proxy429/internal/platform"
 )
 
 // Config is the proxy's configuration, mirroring config.json.
@@ -979,7 +981,7 @@ func writeProgramSetting(key, value string) error {
 // After migration, no code path writes to existing config files programmatically (the config editor saves the user's verbatim text).
 func resolveProgramUILang() {
 	if l := readProgramSetting("ui-lang"); l == "zh" || l == "en" {
-		applyUILang(l)
+		platform.ApplyUILang(l)
 		return
 	}
 	if data, err := os.ReadFile(currentConfigPath()); err == nil {
@@ -996,11 +998,11 @@ func resolveProgramUILang() {
 				}
 			}
 			log.Printf("[lang] migrated ui_lang=%q from %s to %s", probe.UILang, filepath.Base(currentConfigPath()), programSettingsFile)
-			applyUILang(probe.UILang)
+			platform.ApplyUILang(probe.UILang)
 			return
 		}
 	}
-	applyUILang("")
+	platform.ApplyUILang("")
 }
 
 // resolveConfigPath decides the config file path, by priority:
@@ -5778,7 +5780,12 @@ func main() {
 	reconcileResponsesServer(c.ResponsesListen)
 	// Loopback-hijack watchdog (read-only): system proxy on + NO_PROXY missing -> red tray light + console banner,
 	// so a silently-vanished codex NO_PROXY fix is noticed before Codex 503s, not after.
-	go watchProxyHijack()
+	go platform.WatchProxyHijack(func() string {
+		if c := cfg.Load(); c != nil {
+			return c.ResponsesListen
+		}
+		return ""
+	})
 	if *noTrayFlag {
 		// Headless: no tray event loop to occupy the main thread; block here and let
 		// Ctrl+C / SIGTERM end the process with their default behavior.

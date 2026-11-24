@@ -2,6 +2,8 @@
 package main
 
 import (
+	"proxy429/internal/platform"
+
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -28,17 +30,17 @@ func TestLoadConfigUILangIgnored(t *testing.T) {
 
 // TestApplyUILangFallback: when the config doesn't specify a language, fall back to system detection (the result is always zh or en).
 func TestApplyUILangFallback(t *testing.T) {
-	applyUILang("")
-	if got := currentUILang(); got != "zh" && got != "en" {
+	platform.ApplyUILang("")
+	if got := platform.CurrentUILang(); got != "zh" && got != "en" {
 		t.Errorf("currentUILang=%q, want zh 或 en", got)
 	}
-	applyUILang("en")
-	if got := currentUILang(); got != "en" {
-		t.Errorf("applyUILang(en) 后 currentUILang=%q", got)
+	platform.ApplyUILang("en")
+	if got := platform.CurrentUILang(); got != "en" {
+		t.Errorf("platform.ApplyUILang(en) 后 currentUILang=%q", got)
 	}
-	applyUILang("zh")
-	if got := currentUILang(); got != "zh" {
-		t.Errorf("applyUILang(zh) 后 currentUILang=%q", got)
+	platform.ApplyUILang("zh")
+	if got := platform.CurrentUILang(); got != "zh" {
+		t.Errorf("platform.ApplyUILang(zh) 后 currentUILang=%q", got)
 	}
 }
 
@@ -61,8 +63,8 @@ func TestUILangHandlerWritesProgramSettings(t *testing.T) {
 		configFilePath = oldPath
 		configMu.Unlock()
 	}()
-	oldLang := currentUILang()
-	defer applyUILang(oldLang)
+	oldLang := platform.CurrentUILang()
+	defer platform.ApplyUILang(oldLang)
 
 	post := func(body string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(http.MethodPost, "/__uilang", strings.NewReader(body))
@@ -82,7 +84,7 @@ func TestUILangHandlerWritesProgramSettings(t *testing.T) {
 	if data, _ := os.ReadFile(path); string(data) != orig {
 		t.Errorf("配置文件被改动:\n%q", data)
 	}
-	if got := currentUILang(); got != "en" {
+	if got := platform.CurrentUILang(); got != "en" {
 		t.Errorf("切换后 currentUILang=%q, want en", got)
 	}
 
@@ -137,9 +139,9 @@ func TestRenderLogViewerEN(t *testing.T) {
 // beta builds show "beta <hash>-<HHMM>", release builds "release vX.Y.Z.N" (the stamp comes from build.sh
 // via -ldflags). The __VERSION__ placeholder must always be substituted in the served page.
 func TestLogViewerVersionBadge(t *testing.T) {
-	old := currentUILang()
-	applyUILang("zh")
-	defer applyUILang(old)
+	old := platform.CurrentUILang()
+	platform.ApplyUILang("zh")
+	defer platform.ApplyUILang(old)
 	oldV := Version
 	defer func() { Version = oldV }()
 	for _, v := range []string{"beta cd66927-2100", "release v2026.10.12.1"} {
@@ -275,9 +277,9 @@ func TestSetTopLevelJSONValue(t *testing.T) {
 // TestLogViewerHandlerZHDocBody: in the Chinese UI the doc popup body must be replaced by logViewerDocZH,
 // with no __DOC_BODY__ placeholder left (regression of 00c08ab: the zh branch missed the replacement).
 func TestLogViewerHandlerZHDocBody(t *testing.T) {
-	old := currentUILang()
-	applyUILang("zh")
-	defer applyUILang(old)
+	old := platform.CurrentUILang()
+	platform.ApplyUILang("zh")
+	defer platform.ApplyUILang(old)
 	r := httptest.NewRequest(http.MethodGet, "/__logs", nil)
 	r.RemoteAddr = "127.0.0.1:12345"
 	w := httptest.NewRecorder()
@@ -310,11 +312,11 @@ func TestResolveProgramUILangMigration(t *testing.T) {
 		configFilePath = oldPath
 		configMu.Unlock()
 	}()
-	oldLang := currentUILang()
-	defer applyUILang(oldLang)
+	oldLang := platform.CurrentUILang()
+	defer platform.ApplyUILang(oldLang)
 
 	resolveProgramUILang()
-	if got := currentUILang(); got != "zh" {
+	if got := platform.CurrentUILang(); got != "zh" {
 		t.Errorf("迁移后 currentUILang=%q, want zh", got)
 	}
 	if got := readProgramSetting("ui-lang"); got != "zh" {
@@ -333,7 +335,7 @@ func TestResolveProgramUILangMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolveProgramUILang()
-	if got := currentUILang(); got != "en" {
+	if got := platform.CurrentUILang(); got != "en" {
 		t.Errorf("program-settings 优先: currentUILang=%q, want en", got)
 	}
 	if data, _ := os.ReadFile(path); string(data) != orig {

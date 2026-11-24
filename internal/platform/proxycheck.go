@@ -1,4 +1,4 @@
-package main
+package platform
 
 // proxycheck.go — loopback-hijack watchdog (READ-ONLY: never writes to the system).
 //
@@ -27,14 +27,16 @@ import (
 var hijackRiskFlag atomic.Bool
 var hijackDetail atomic.Value // string: proxy address/source, for log lines
 
-// proxyHijackRisk reports the latest watchdog verdict (read by the tray poll and /__logs/data).
-func proxyHijackRisk() bool { return hijackRiskFlag.Load() }
+// ProxyHijackRisk reports the latest watchdog verdict (read by the tray poll and /__logs/data).
+func ProxyHijackRisk() bool { return hijackRiskFlag.Load() }
 
-// watchProxyHijack checks the trap at startup and then every 30s; transitions log one line.
-func watchProxyHijack() {
+// WatchProxyHijack checks the trap at startup and then every 30s; transitions log one line.
+// responsesListen returns the currently configured Responses listen address (injected by the
+// caller so this package stays free of any config dependency).
+func WatchProxyHijack(responsesListen func() string) {
 	prev := false
 	for {
-		risk, detail := detectHijackRisk()
+		risk, detail := detectHijackRisk(responsesListen())
 		hijackRiskFlag.Store(risk)
 		if risk {
 			hijackDetail.Store(detail)
@@ -51,9 +53,8 @@ func watchProxyHijack() {
 }
 
 // detectHijackRisk = system proxy enabled AND no working loopback bypass in sight.
-func detectHijackRisk() (bool, string) {
-	c := cfg.Load()
-	if c == nil || strings.TrimSpace(c.ResponsesListen) == "" {
+func detectHijackRisk(responsesListen string) (bool, string) {
+	if strings.TrimSpace(responsesListen) == "" {
 		return false, ""
 	}
 	switch runtime.GOOS {

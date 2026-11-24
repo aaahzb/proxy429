@@ -1,6 +1,8 @@
 package main
 
 import (
+	"proxy429/internal/platform"
+
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -59,7 +61,7 @@ func logViewerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page := logViewerHTML
-	if currentUILang() == "en" {
+	if platform.CurrentUILang() == "en" {
 		page = renderLogViewerEN(page)
 	} else {
 		page = strings.Replace(page, "__DOC_BODY__", logViewerDocZH, 1)
@@ -88,7 +90,7 @@ func uiLangHandler(w http.ResponseWriter, r *http.Request) {
 		if l := readProgramSetting("ui-lang"); l == "zh" || l == "en" {
 			source = "program"
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "lang": currentUILang(), "source": source})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "lang": platform.CurrentUILang(), "source": source})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -110,9 +112,9 @@ func uiLangHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to write program settings: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	applyUILang(b.Lang) // Effective hot; no reloadConfig — language and routing config don't entangle
-	log.Printf("[lang] UI language switched to %s (%s)", currentUILang(), programSettingsFile)
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "lang": currentUILang()})
+	platform.ApplyUILang(b.Lang) // Effective hot; no reloadConfig — language and routing config don't entangle
+	log.Printf("[lang] UI language switched to %s (%s)", platform.CurrentUILang(), programSettingsFile)
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "lang": platform.CurrentUILang()})
 }
 
 // flightInfo is one in-flight stream's display info (for the web 「状态」 tab's table).
@@ -189,7 +191,7 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
-	d := logData{Lines: logBuf.window(0, maxLogBuf), Version: Version, CurrentCfg: filepath.Base(currentConfigPath()), FinishedCap: finishedCap.Load(), FullStore: fullStore.Load(), HijackRisk: proxyHijackRisk()}
+	d := logData{Lines: logBuf.window(0, maxLogBuf), Version: Version, CurrentCfg: filepath.Base(currentConfigPath()), FinishedCap: finishedCap.Load(), FullStore: fullStore.Load(), HijackRisk: platform.ProxyHijackRisk()}
 	stats.mu.Lock()
 	d.Active = stats.active
 	d.Waiting = stats.waiting

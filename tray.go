@@ -1,6 +1,8 @@
 package main
 
 import (
+	"proxy429/internal/platform"
+
 	"bytes"
 	"encoding/binary"
 	"image"
@@ -45,7 +47,7 @@ func setupTray() {
 // onReady is the tray-ready callback: sets the initial icon/tooltip, builds the menu, starts status polling.
 func onReady() {
 	problem := len(getConfigWarnings()) > 0 // Startup may already carry removed-key warnings (main loads config before the tray)
-	hijack := proxyHijackRisk()             // Or the loopback-hijack trap (system proxy on, NO_PROXY missing)
+	hijack := platform.ProxyHijackRisk()    // Or the loopback-hijack trap (system proxy on, NO_PROXY missing)
 	initial := 0
 	if problem || hijack {
 		initial = 3 // Red: config problem / hijack risk
@@ -144,7 +146,7 @@ func pollTrayColor() {
 		}
 		state, active, waiting := trayInfo()
 		cfgWarn := len(getConfigWarnings()) > 0 // Red: config contains removed keys (the console Logs tab names them; the Docs describe the migration)
-		hijack := proxyHijackRisk()             // Red: system proxy would hijack loopback clients (banner on the console Status tab)
+		hijack := platform.ProxyHijackRisk()    // Red: system proxy would hijack loopback clients (banner on the console Status tab)
 		if cfgWarn || hijack {
 			state = 3
 		}
@@ -228,7 +230,7 @@ func trayTip(active, waiting int, cfgProblem, hijack bool) string {
 
 // trayText picks tray-menu copy per the current UI language (same uiLang switch as the web console).
 func trayText(zh, en string) string {
-	if currentUILang() == "en" {
+	if platform.CurrentUILang() == "en" {
 		return en
 	}
 	return zh
