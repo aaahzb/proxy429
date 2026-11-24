@@ -1,0 +1,442 @@
+<div class="docHead">
+  <div class="docTitle">Usage Docs</div>
+  <input id="docSearch" class="docSearch" type="search" placeholder="Search parameters or features (429, cache, thinking…)" oninput="docFilter(this.value)" onkeydown="docSearchKey(event)">
+  <span id="docSearchInfo" class="docSearchInfo" data-label="sections"></span>
+  <button class="ghost" type="button" onclick="docClose()">Close</button>
+</div>
+<div class="docMain">
+  <nav class="docNav" id="docNav"></nav>
+  <div class="docBody doc" id="docBody">
+    <div class="docNoResult" id="docNoResult">No matching sections. Try a shorter keyword.</div>
+
+    <section class="docSec" id="doc-what" data-group="Getting Started">
+      <h3>What this is</h3>
+      <p>Proxy429 is an Anthropic-compatible proxy that runs on your machine. AI clients send requests to it, it forwards them to one or more upstreams, and the whole exchange is visible in a web console.</p>
+      <p>It does three things.</p>
+      <ul>
+        <li><b>Absorbs 429s and 5xx</b>: exponential-backoff retries, so the client usually never notices upstream hiccups.</li>
+        <li><b>Routes by model name</b>: <code>routes</code> sends different model names to different upstreams and keys.</li>
+        <li><b>Translates protocols</b>: turns Codex CLI's OpenAI Responses requests into Anthropic Messages, so Codex can use Anthropic upstreams.</li>
+      </ul>
+      <pre data-copy="Copy" data-done="Copied">Claude Code ── Anthropic ──▶ 127.0.0.1:8080 ┐
+Codex CLI   ── Responses ──▶ 127.0.0.1:8081 ┴─▶ routes / fallback ──▶ upstream</pre>
+      <p>The console lives at <code>http://127.0.0.1:8080/__logs</code>: status, logs and config all live there. Every listener accepts loopback connections only.</p>
+    </section>
+
+    <section class="docSec" id="doc-quickstart" data-group="Getting Started">
+      <h3>Quick start</h3>
+      <ol class="docSteps">
+        <li><b>Start the proxy</b>. On Windows double-click <code>proxy429.exe</code>; on macOS double-click <code>Proxy429.app</code> (if Gatekeeper blocks the first launch, right-click and choose Open); on Linux run <code>./proxy429</code>. After launch there is only a tray or menu-bar icon, no window.</li>
+        <li><b>Open the console</b>. Use the tray menu item "View logs", or open <code>http://127.0.0.1:8080/__logs</code> directly.</li>
+        <li><b>Hook up Claude Code</b>. In the same terminal that runs <code>claude</code>:
+          <pre data-copy="Copy" data-done="Copied">export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
+export ANTHROPIC_AUTH_TOKEN="your API key"
+claude</pre>
+          When the route entry carries <code>api</code>, the token here can be any non-empty string; the proxy injects the real key. Upstreams that only honor a real <code>Authorization: Bearer</code> (e.g. Volcengine ARK) must use <code>ANTHROPIC_AUTH_TOKEN</code>, not <code>ANTHROPIC_API_KEY</code>, or you get a 401.</li>
+        <li><b>Hook up Codex CLI</b>. First make sure <code>responses_listen</code> is enabled on the Config tab, then use "Codex one-line setup" at the bottom of the Config tab: copy the command for your OS, run it, and restart Codex. Details in "Codex &amp; Responses translation".</li>
+      </ol>
+      <p><b>Verify</b>: a request appears under In-flight on the Status tab and a <code>[route]</code> line appears on the Logs tab — the chain works.</p>
+      <p><b>Where the config file lives</b>: the first launch generates one with placeholder keys in your user directory.</p>
+      <div class="docTableWrap"><table>
+        <tr><th>Platform</th><th>Path</th></tr>
+        <tr><td>Windows</td><td><code>%AppData%\proxy429\config.json</code></td></tr>
+        <tr><td>macOS</td><td><code>~/Library/Application Support/proxy429/config.json</code></td></tr>
+        <tr><td>Linux</td><td><code>~/.config/proxy429/config.json</code></td></tr>
+      </table></div>
+      <p>If <code>./config.json</code> exists in the launch directory it wins — handy for debugging. You can also pass <code>-config &lt;path&gt;</code> at launch. For day-to-day changes, use the Config tab.</p>
+    </section>
+
+    <section class="docSec" id="doc-console" data-group="Getting Started">
+      <h3>Console tour</h3>
+      <p>The top bar has three tabs — Status, Logs, Config — plus the Docs button and the language switch on the right. Closing the browser tab only hides the console; the proxy keeps running.</p>
+      <ul>
+        <li><b>Status</b>: stat cards, in-flight streams, recently finished streams. Click any row to inspect that stream's request body and output. Card and badge meanings are in "Status tab &amp; stats" and "Badge dictionary".</li>
+        <li><b>Logs</b>: live scrolling log. Memory keeps only the latest 500 lines; configure <code>log_file</code> to keep more.</li>
+        <li><b>Config</b>: edit <code>config.json</code> directly; saving takes effect immediately. See "Editing config".</li>
+      </ul>
+    </section>
+
+    <section class="docSec" id="doc-config-edit" data-group="Config &amp; Routing">
+      <h3>Editing config</h3>
+      <p>The Config tab can create, rename, delete and switch config files; the list refreshes every 3 seconds. The active config cannot be deleted. <button class="ghost" type="button" style="padding:2px 10px;font-size:12px" onclick="docOpenConfig()">Open Config tab</button></p>
+      <p><b>Save &amp; reload</b> validates the JSON, writes the file, and applies it immediately. <b>Reload only</b> re-reads the file from disk without writing. Invalid JSON is never written; the error points at the exact spot.</p>
+      <p><code>listen</code> binds at startup only. After changing the main port, exit and restart the proxy. <code>responses_listen</code> is the exception: the listener starts and stops with each save.</p>
+      <h4>Shared variables: vars</h4>
+      <p>When several routes share one key, put the key in the top-level <code>vars</code> and reference it from routes as <code>$NAME</code> or <code>${NAME}</code>. Rotating a key touches one place.</p>
+      <pre data-copy="Copy" data-done="Copied">"vars": { "DEEPSEEK_KEY": "sk-..." },
+"routes": [
+  { "pattern": "*opus*", "url": "https://api.deepseek.com", "api": "$DEEPSEEK_KEY", "model": "deepseek-v4-pro" }
+]</pre>
+      <ul>
+        <li>Any string value in the file can reference a variable, <code>api</code> and <code>url</code> included. The file keeps the reference verbatim; it is resolved on load.</li>
+        <li>Referencing an undefined variable rejects load or save with a path, e.g. <code>routes[0].api</code>.</li>
+        <li>Variable values must be strings; an empty string counts. Variables may reference other variables, one level deep.</li>
+        <li>A <code>$</code> not followed by a valid name is left alone, e.g. <code>$5</code>.</li>
+      </ul>
+      <h4>Previewing lazyApply</h4>
+      <p>"Preview JSON after lazyApply" shows the config with defaults filled in, read-only, never written. "Copy to editor" puts the result back into the editor; you still save it yourself. Rules are in "Global defaults: lazyApply".</p>
+      <p><b>Access control</b>: the forwarding port and the admin endpoints (<code>/__*</code>) always accept loopback connections only. Even if you write <code>listen</code> as <code>0.0.0.0</code>, LAN devices cannot connect and cannot see the console.</p>
+    </section>
+
+    <section class="docSec" id="doc-routes" data-group="Config &amp; Routing">
+      <h3>Routing basics</h3>
+      <p><code>routes</code> wildcard-matches the model name. <code>*</code> matches any run of characters, including none. On a hit, <code>url</code>, <code>api</code> and <code>model</code> override the request.</p>
+      <pre data-copy="Copy" data-done="Copied">"routes": [
+  { "pattern": "*opus*",  "url": "https://upstream-a", "api": "sk-aaa", "model": "strong-model" },
+  { "pattern": "*haiku*", "url": "https://upstream-b", "api": "sk-bbb", "model": "cheap-model" },
+  { "pattern": "*",       "url": "https://upstream-a", "api": "sk-aaa", "model": "strong-model" }
+]</pre>
+      <ul>
+        <li><b>Order decides</b>: entries match in array order and the first hit wins — there is no "more specific wins". If <code>*opus*</code> comes before <code>*opus-4*</code>, <code>claude-opus-4-8</code> only ever hits the former. Put specific rules first and the <code>*</code> catch-all last.</li>
+        <li><b>pattern can be an array</b>: <code>"pattern": ["*fable*", "*opus*"]</code> equals copying the route once per pattern. All other fields are shared; position and array order are the match order. An empty array or a non-string member fails the load.</li>
+        <li><b>Reserved names</b>: the pure <code>*</code> catch-all route is always called <code>Fallback</code> in the Codex menu, and the fast lane is <code>fast_route</code>. No pattern may be exactly one of these names; a colliding route neither takes effect nor enters the menu, and when pattern is an array only the colliding member is disabled. Wildcards like <code>Fall*</code> are unaffected.</li>
+        <li><b>effort pins the thinking level</b>: when a route sets <code>effort</code> (<code>low</code>/<code>mid</code>/<code>high</code>/<code>max</code>; <code>mid</code> goes upstream as <code>medium</code>), a request whose body at the pin point (after routing, before the search rewrite and the native off-&gt;low upgrades) carries adaptive thinking gets its top-level <code>output_config.effort</code> forced to that level, ignoring what the client asked for; a body already at that level is left untouched with no badge. Non-adaptive bodies (budget, thinking off, no thinking field) stay byte-for-byte untouched, explicit thinking-off is never pinned (the convertOff2Low quiet upgrade keeps its own low on both ports), and an unset <code>effort</code> never touches anything. Only the route that actually serves the request counts: classifier, fast, image/search fallback and Responses-passthrough lanes use their own paths. The API column shows the last rewrite as a teal <code>[from-&gt;to]</code> badge (a later search rewrite re-badges; the 400 fallback back to thinking-off clears it). The model column also shows the configured level as <code>origModel -&gt; [level] targetModel</code> (appended as <code>origModel [level]</code> when routing didn't rewrite the model), in wire vocabulary (<code>mid</code> shows as <code>medium</code>), even when the body-side rewrite didn't apply; the badge remains the proof of an actual rewrite. The top-level <code>compactEffort</code> (<code>low</code>/<code>mid</code>/<code>high</code>/<code>max</code>) pins context-compaction requests (Claude Code compact, Codex CLI checkpoint compaction) the same way and beats every route <code>effort</code> pin on them; unset it and behavior stays exactly as before. Their model-column badge upgrades to <code>[Compact-level]</code>, the overridden route <code>[level]</code> tag is suppressed on that row, and an actual rewrite still shows the API column's <code>[from-&gt;to]</code> badge.</li>
+      </ul>
+      <p>To see which route won, read the <code>[route]</code> line in the log, or the <code>[Pattern]</code>, <code>[Classifier]</code>, <code>[Fast]</code>, <code>[Multimodal]</code>, <code>[Search]</code> prefix on the model column of the Status tab.</p>
+    </section>
+
+    <section class="docSec" id="doc-fallback" data-group="Config &amp; Routing">
+      <h3>Capability fallbacks</h3>
+      <p>After a route matches, if the upstream lacks a capability the request needs, the proxy swaps to a fallback upstream. Search and images are handled in a fixed order.</p>
+      <ul>
+        <li><b>Search requests</b> (carrying the <code>web_search</code> tool): when the matched route is marked <code>no_search</code>, the whole request goes to <code>search_fallback</code> and that upstream searches and answers on its own. Without a <code>search_fallback</code>, the request passes to the original route, which may error.</li>
+        <li><b>Image requests</b> (without search): when the matched route is marked <code>text_only</code> and the request carries images, it goes to <code>multimodal_fallback</code>. Without one, it passes to the original route, which may reject images.</li>
+        <li><b>Search wins</b>: a request carrying both search and images is treated as search and goes to <code>search_fallback</code>.</li>
+      </ul>
+      <p>Fallback routes use the same <code>url</code>/<code>api</code>/<code>model</code> shape and support some behavior fields, e.g. <code>thinking</code> and <code>convertOff2Low</code>. Once a fallback kicks in, its own fields apply; search-specific fields follow the per-field rules in "Parameter reference".</p>
+      <p>To let a search-capable upstream write its own summaries, see "Search enhancement &amp; empty-search guard". To split classifier or fast requests onto their own upstream, see "Dedicated routes".</p>
+    </section>
+
+    <section class="docSec" id="doc-special" data-group="Config &amp; Routing">
+      <h3>Dedicated routes</h3>
+      <h4>classifier_route</h4>
+      <p>Claude Code's security checks and Codex's approval evaluations send signature requests. A matching request ignores its model and goes straight to <code>classifier_route</code> — a good place for a cheap model, sparing your main quota.</p>
+      <ul>
+        <li><code>classifier_thinking</code> takes <code>off</code>, <code>low</code>, or nothing. Unset leaves the request untouched. <code>off</code> rewrites the request to thinking-off for faster verdicts. <code>low</code> turns thinking off first, then quietly upgrades it to low through the <code>convertOff2Low</code> machinery upstream-side, stripping thinking blocks on the way back — the client notices nothing.</li>
+        <li><code>classifier_thinking_cc</code> and <code>classifier_thinking_codex</code> override the shared value per source.</li>
+        <li>Classifier requests carry tiny max_tokens (guardian can send as little as 64). When the <code>low</code> policy needs the 1024-token floor, the proxy raises max_tokens by 1024 upstream-side, invisibly to the client.</li>
+      </ul>
+      <p>Overall order: classifier signature requests go to <code>classifier_route</code> first, requests carrying <code>"speed":"fast"</code> go to <code>fast_route</code> next, everything else wildcard-matches <code>routes</code> and finally falls back to <code>upstream</code>.</p>
+      <p>The Classifier card on the Status tab counts hits; hover for the per-source split and click to enlarge.</p>
+      <h4>fast_route</h4>
+      <p>Requests carrying <code>"speed":"fast"</code> take <code>fast_route</code>. Claude Code's <code>/fast</code> and the <code>fast_route</code> entry in the Codex menu both trigger it. On a hit the proxy adds the fast-lane rate-limit headers to the response, keeping the client in fast mode.</p>
+    </section>
+
+    <section class="docSec" id="doc-lazyapply" data-group="Config &amp; Routing">
+      <h3>Global defaults: lazyApply</h3>
+      <p><code>lazyApply</code> is a global default bundle. It only fills fields that a route-like object already supports, exactly as if you wrote the key into every object that does not set it explicitly. It never invents fields and never creates unconfigured optional routes.</p>
+      <ul>
+        <li><b>Per-field precedence</b>: explicit local value (including <code>false</code> and empty strings) &gt; <code>lazyApply</code> &gt; built-in default.</li>
+        <li><b>Connection trio is inherited</b>: <code>url</code>, <code>api</code> and <code>model</code> come from lazyApply too (written into every object that omits the key, at load time), so the upstream is written once and a route can shrink to <code>{"pattern": "*sonnet*", "effort": "high"}</code>; <code>fast_route</code> may even be <code>{}</code>. A locally written connection key still wins; writing an empty string stops inheritance: <code>"api": ""</code> passes the client's token through, <code>"model": ""</code> keeps the client's model, and <code>"url": ""</code> means no reroute (a routes[] entry still applies its other fields and forwards to the default upstream, classifier_route keeps only its thinking rewrite, and fast_route / multimodal_fallback / search_fallback are not engaged, so the request follows normal routing). <code>pattern</code> and <code>url_response_api</code> are never inherited and stay per object.</li>
+        <li><b>effort is written per route only</b>: a route's <code>effort</code> pin is never inherited; lazyApply does not offer the field, so a global default can never pin every route's level at once. The top-level <code>compactEffort</code> is the one global effort knob, but it only affects context-compaction requests, never normal traffic.</li>
+        <li><b>enhance_search replaces whole</b>: a local value replaces the lazyApply object entirely; the two are never merged.</li>
+        <li><b>Objects can opt out</b>: <code>"noLazyApply": true</code> inside an object stops all inheritance; its own explicit fields still apply.</li>
+        <li><b>Inherited values join the precedence chain</b>: an inherited <code>claudeSearch*</code> counts as locally written and beats <code>search_fallback</code>'s own value. To use the fallback's value, write <code>noLazyApply</code> on that route.</li>
+      </ul>
+      <p>Supported fields are listed under lazyApply in "Parameter reference". The Config tab's preview button shows the expanded result read-only.</p>
+    </section>
+
+    <section class="docSec" id="doc-retry" data-group="Config &amp; Routing">
+      <h3>Connection &amp; retries</h3>
+      <ul>
+        <li><b>listen</b>: the main Anthropic listener address; the template uses <code>127.0.0.1:8080</code>. Binds at startup only.</li>
+        <li><b>upstream</b>: the default upstream, used when no route matches. Omit it if you configure a pure <code>*</code> catch-all route.</li>
+        <li><b>responses_listen</b>: the OpenAI Responses listener address; empty means off. Starts and stops on save.</li>
+        <li><b>Retry parameters</b>: <code>max_retries</code> is the maximum number of retries, excluding the first attempt. <code>base_delay_s</code> is the first backoff in seconds; later waits double, plus up to 30% random jitter. <code>max_delay_s</code> caps a single wait; 0 clips every wait to 0, i.e. no waiting. <code>total_budget_s</code> is the retry budget for the whole request. <code>retry_status_codes</code> lists the upstream status codes that trigger a retry; an empty array means no status-code retries.</li>
+        <li><b>respect_retry_after</b>: when the upstream returns a <code>Retry-After</code> header, wait by it first.</li>
+        <li><b>upstream_header_timeout_s</b>: how long to wait for the upstream's first byte. A timeout is handled as an internal resend; unset means 70 seconds.</li>
+        <li><b>ping_interval_s</b>: SSE keep-alive interval sent to the client during retry waits; unset means 5 seconds. Non-streaming requests get no keep-alive.</li>
+      </ul>
+      <p>When retries run out, the proxy sends the client an <code>overloaded_error</code> event. The status column shows <code>[retries exhausted]</code>; streams that went through backoff retries show <code>[retried Nx]</code>.</p>
+      <p>Logging: <code>log_request_detail</code> records request-body detail; <code>log_file</code> appends the log to a file; <code>recent_sample_window</code> is the recent-sample window for the TTFT and tok/s stats, unset means 20.</p>
+    </section>
+
+    <section class="docSec" id="doc-codex" data-group="Advanced">
+      <h3>Codex &amp; Responses translation</h3>
+      <p>Set the top-level <code>responses_listen</code> to <code>127.0.0.1:8081</code> and the proxy additionally serves <code>/v1/responses</code> at that address. Codex CLI only speaks OpenAI Responses; requests are translated to Anthropic Messages, travel the exact same main pipeline as Claude Code, and the response is translated back to Responses.</p>
+      <h4>Hooking up Codex</h4>
+      <p>The easiest path is "Codex one-line setup" at the bottom of the Config tab. Two commands are generated live from the editor above; they back up and rewrite <code>~/.codex/config.toml</code> and write the model catalog. Choosing "(Restore default Codex config)" in the dropdown yields a command that fully undoes it. Restart Codex afterwards.</p>
+      <p>Manual configuration below.</p>
+      <pre data-copy="Copy" data-done="Copied">model_provider = "proxy429"
+model = "gpt-5-codex"
+forced_login_method = "api"
+
+[model_providers.proxy429]
+name = "Proxy429 Local Proxy"
+base_url = "http://127.0.0.1:8081/v1"
+wire_api = "responses"
+experimental_bearer_token = "proxy429"</pre>
+      <p><code>base_url</code> must include <code>/v1</code> and <code>wire_api</code> must be <code>responses</code>. The token is a placeholder the proxy never checks; the real key is injected by the matched route's <code>api</code>.</p>
+      <p><b>Codex reports 503 and the proxy sees nothing</b>: a system proxy is hijacking requests to 127.0.0.1. Put <code>127.0.0.1</code> into <code>NO_PROXY</code> and restart Codex. The Windows and macOS one-line scripts write and persist it automatically; the Linux script prints a hint.</p>
+      <h4>Model names and thinking mapping</h4>
+      <p>The model name Codex sends participates in routes matching as usual. The thinking-shape lookup uses the client's original model name and happens before route rewriting. For the mapping table to apply, set Codex's model to the target model name itself.</p>
+      <p>Models come in two classes. Adaptive models express thinking as <code>thinking:adaptive</code> plus <code>output_config.effort</code>: <code>fable-5</code>, <code>mythos-5</code>, <code>mythos-preview</code>, <code>sonnet-5</code>, <code>opus-4-8</code>, <code>opus-4-7</code>, <code>opus-4-6</code>, <code>sonnet-4-6</code>. All others express it as <code>budget_tokens</code>.</p>
+      <div class="docTableWrap"><table>
+        <tr><th>Codex reasoning.effort</th><th>Regular model → budget_tokens</th><th>Adaptive model → effort</th></tr>
+        <tr><td>minimal / low</td><td>2048</td><td>low</td></tr>
+        <tr><td>medium</td><td>8192</td><td>medium</td></tr>
+        <tr><td>high</td><td>16384</td><td>high</td></tr>
+        <tr><td>xhigh / max / ultra</td><td>24576</td><td>max</td></tr>
+        <tr><td>none / off / disabled</td><td>thinking off</td><td>off when the model allows it; fable-5 and mythos-5 become adaptive + low</td></tr>
+        <tr><td>field absent</td><td>thinking off</td><td>on by default for fable-5, mythos-5, mythos-preview, sonnet-5; off for the rest</td></tr>
+      </table></div>
+      <p>Unrecognized values are treated as "field absent". budget_tokens has two guards: never more than half of <code>max_tokens</code>, and if the clamped value is under 1024, thinking is not opened. <code>max_output_tokens</code> defaults to 32000.</p>
+      <p>When an alias hits the adaptive table but the actual routed target only supports budget (e.g. the alias is <code>claude-fable-5</code> while traffic lands on Kimi), write <code>"thinking": "budget"</code> or <code>"adaptive"</code> on that route entry to correct it. The field only affects translated streams.</p>
+      <h4>Tool mapping</h4>
+      <div class="docTableWrap"><table>
+        <tr><th>Responses side</th><th>Anthropic side</th></tr>
+        <tr><td>function tools</td><td>tools[], keeping name, description, input_schema</td></tr>
+        <tr><td>custom or string tools</td><td>wrapped as a single-parameter {input:string}; the definition is inlined into the description; replayed as custom_tool_call</td></tr>
+        <tr><td>namespace (MCP) tools</td><td>split into ns__name sub-tools, truncated with a hash when overlong; restored on replay</td></tr>
+        <tr><td>tool_search</td><td>the proxy's fixed tool (query, limit)</td></tr>
+        <tr><td>web_search / web_search_preview</td><td>web_search_20250305</td></tr>
+        <tr><td>input_file</td><td>document blocks (URL or base64)</td></tr>
+        <tr><td>input_image</td><td>image blocks (base64 or URL)</td></tr>
+        <tr><td>function_call_output and other tool results</td><td>tool_result blocks; images split into native image blocks; overlong base64 truncated</td></tr>
+        <tr><td>parallel_tool_calls: false</td><td>tool_choice.disable_parallel_tool_use</td></tr>
+      </table></div>
+      <h4>Thinking, history and the envelope</h4>
+      <ul>
+        <li>With thinking on, tool-continuation history must carry replayable signed thinking blocks. <code>allowNoThinkBlock4Anthropic</code> defaults to true: send at the requested level first, and only if the upstream returns 400 turn thinking off and retry once, without stripping thinking blocks so the next round's history heals itself. Set it to false to turn thinking off from the start.</li>
+        <li>A forced <code>tool_choice</code> conflicts with thinking. Models that can turn thinking off get thinking disabled for this request while keeping the tool constraint; <code>fable-5</code> and <code>mythos-5</code> cannot, so the request errors.</li>
+        <li>Thinking blocks and each search's full results are sealed into an envelope inside the response, restored when the client replays it next round, so the thinking chain and search bodies keep working. Search envelopes are obfuscated per upstream and key; after a key or upstream change they expire automatically, and plaintext URLs or keys never appear in client history.</li>
+        <li>When an old conversation's search blocks have expired upstream, the proxy strips the replayed blocks and retries once, degrading invisibly to a fresh search. The strip count shows as <code>[strip N]</code>.</li>
+      </ul>
+    </section>
+
+    <section class="docSec" id="doc-search" data-group="Advanced">
+      <h3>Search enhancement &amp; empty-search guard</h3>
+      <p>Every Claude Code web search runs as its own sub-agent request. A <b>standalone search request</b> is recognized by its final user message starting with <code>Perform a web search for the query</code>. Only the final message counts; the same phrase quoted in history does not. Recognized requests show a teal-green <code>[Search]</code> on the model column.</p>
+      <h4>Let the upstream write summaries: enhance_search and claudeSearchSummary</h4>
+      <p><code>enhance_search</code> lives on a routes entry and applies when that route is not marked <code>no_search</code>. The proxy injects the summary instruction into the search request itself, still on the route's own upstream, so one request does the search and per-result summaries, and the response passes through unchanged. The legacy <code>summary_level</code> controls detail (low, mid, high, max), and <code>summary_thinking: true</code> turns thinking into low.</p>
+      <p>The newer fields are more flexible and can sit on a routes entry or on <code>search_fallback</code>.</p>
+      <ul>
+        <li><code>claudeSearchSummary</code>: <code>forceLow</code>, <code>forceMid</code>, <code>forceHigh</code> inject the summary instruction at that level; <code>noForce</code> injects nothing. Once set, it beats the legacy <code>enhance_search</code> fields.</li>
+        <li><code>claudeSearchThinking</code>: <code>off</code>, <code>low</code>, <code>mid</code>, <code>high</code>, <code>max</code> rewrite thinking for this search request. If the client never asked for thinking, returned thinking blocks are stripped and the client sees its original shape.</li>
+      </ul>
+      <p>After a summary injection the badge upgrades from <code>[Search]</code> to <code>[SearchSummary-level]</code>. When thinking was rewritten, the API column additionally shows <code>[from-&gt;to]</code>.</p>
+      <p><code>search_fallback</code> also keeps its own legacy fields: <code>summary_mode: true</code> injects the summary instruction for standalone search requests on that fallback, at <code>summary_level</code> (low by default); <code>summary_thinking: true</code> turns thinking into low. When <code>claudeSearchSummary</code> or <code>claudeSearchThinking</code> is set, the newer field wins.</p>
+      <p><b>Precedence</b>: when a route serves the request itself, its own values apply. When the whole request diverts to <code>search_fallback</code>, fields the route set explicitly beat the fallback per field, and unset fields take the fallback's value.</p>
+      <h4>Empty-search guard: noBullshitOnEmptyClaudeSearch</h4>
+      <p>Configured on a routes entry or on <code>search_fallback</code>; off by default. When on, a standalone search request that returned search-result blocks whose every result body is an empty array makes the proxy discard the upstream's entire answer (thinking and fabricated prose included) and send a fixed "nothing was found, try other keywords" stream instead. Non-empty results, or shapes it does not recognize, pass through conservatively.</p>
+      <p>It only applies to standalone search requests on the native Anthropic port and never touches Responses traffic. Once on, even a healthy upstream 200 stream is buffered until the upstream finishes before forwarding. Triggers log <code>[search-guard]</code> and mark the status column of the finished row with a red <code>[empty-search]</code>.</p>
+    </section>
+
+    <section class="docSec" id="doc-thinking" data-group="Advanced">
+      <h3>Thinking rewrite: convertOff2Low</h3>
+      <p>Some upstreams switch to a non-thinking older model when thinking is off, e.g. K2.8 Preview in Kimi's docs. Quietly upgrading "off" to low keeps the request on the strong model. <code>convertOff2Low</code> is that switch.</p>
+      <ul>
+        <li>Values: <code>"translate"</code> applies to the Responses translation port only; <code>"all"</code> covers both the translation port and the native Anthropic port; unset means off.</li>
+        <li>How it works: when the client explicitly turns thinking off, the proxy sends low upstream. Adaptive models get <code>adaptive</code> plus <code>effort: low</code>; budget models get <code>budget_tokens: 2048</code>, subject to the half-of-max_tokens cap and the 1024 floor. Thinking blocks are stripped on the way back — the client still sees thinking off, while usage passes through truthfully.</li>
+        <li>The upgrade is abandoned when a budget model cannot fit even 1024, or when the request forces a <code>tool_choice</code> that conflicts with thinking.</li>
+        <li>If the upstream rejects thinking, the proxy falls back to thinking-off and retries once.</li>
+        <li>Which route applies: the translation port pre-matches routes by the client's model name; the native port uses the finally effective route, taking the fallback route's value after an image or search fallback swap.</li>
+      </ul>
+      <p>The <code>[off-&gt;low]</code> badge shows two colors in the API column: the first part is the client-side vocabulary, the second the upstream-side one. History fallbacks are shown honestly at the requested level and carry no badge.</p>
+      <p><code>allowNoThinkBlock4Anthropic</code> decides the strategy when tool-continuation history lacks signed thinking blocks: true (default) sends first and turns thinking off only after a 400; false turns it off from the start. Requests that explicitly turn thinking off are unaffected and stay governed by <code>convertOff2Low</code>.</p>
+    </section>
+
+    <section class="docSec" id="doc-streamify" data-group="Advanced">
+      <h3>Global stream-ification: convertAlltoStream</h3>
+      <p>With <code>convertAlltoStream</code> on (default false), every non-streaming Anthropic Messages request is quietly turned into a streaming request upstream. The proxy reads the whole stream, reassembles the content blocks into the non-streaming JSON, and returns it in one shot. The caller still gets the non-streaming response it expects.</p>
+      <p>The benefit: one-shot requests like classifiers now show live token output, TTFT and tok/s in the console.</p>
+      <ul>
+        <li>Applies to <code>/v1/messages</code> only; requests already streaming are untouched.</li>
+        <li>If the stream breaks mid-way (no <code>message_stop</code>), the proxy has not written anything to the client yet, so it can retry wholesale.</li>
+        <li>No SSE keep-alive is sent during retry waits, avoiding pollution of the non-streaming response.</li>
+      </ul>
+    </section>
+
+    <section class="docSec" id="doc-params" data-group="Reference">
+      <h3>Parameter reference</h3>
+      <p>Every key, grouped by config object. Type "number" means a JSON number, integer or decimal. The default column lists built-in defaults only; keys without one are explained by the template's example value.</p>
+      <h4>Top level</h4>
+      <div class="docTableWrap"><table>
+        <tr><th>Key</th><th>Type</th><th>Default</th><th>Meaning</th></tr>
+        <tr><td><code>listen</code></td><td>string</td><td>127.0.0.1:8080 (template)</td><td>Main listener address. Binds at startup only</td></tr>
+        <tr><td><code>upstream</code></td><td>string</td><td>empty</td><td>Default upstream when no route matches</td></tr>
+        <tr><td><code>vars</code></td><td>object</td><td>none</td><td>Named string variables for $NAME and ${NAME} references</td></tr>
+        <tr><td><code>max_retries</code></td><td>number</td><td>0</td><td>Max retries excluding the first attempt; 0 means try once</td></tr>
+        <tr><td><code>base_delay_s</code></td><td>number</td><td>0</td><td>First backoff in seconds; later waits double</td></tr>
+        <tr><td><code>max_delay_s</code></td><td>number</td><td>0</td><td>Cap on a single wait; 0 means no waiting</td></tr>
+        <tr><td><code>total_budget_s</code></td><td>number</td><td>0</td><td>Retry budget for the whole request, in seconds</td></tr>
+        <tr><td><code>retry_status_codes</code></td><td>number[]</td><td>empty</td><td>Upstream status codes that trigger a retry; empty disables them</td></tr>
+        <tr><td><code>respect_retry_after</code></td><td>bool</td><td>false</td><td>Honor the upstream's Retry-After header first</td></tr>
+        <tr><td><code>upstream_header_timeout_s</code></td><td>number</td><td>70</td><td>Wait limit for the upstream's first byte; 0 also means 70</td></tr>
+        <tr><td><code>ping_interval_s</code></td><td>number</td><td>5</td><td>SSE keep-alive interval during retries; 0 also means 5</td></tr>
+        <tr><td><code>log_request_detail</code></td><td>bool</td><td>false</td><td>Log request-body detail</td></tr>
+        <tr><td><code>log_file</code></td><td>string</td><td>empty</td><td>Append the log to this file</td></tr>
+        <tr><td><code>recent_sample_window</code></td><td>number</td><td>20</td><td>Recent samples behind TTFT and tok/s; 0 also means 20</td></tr>
+        <tr><td><code>convertAlltoStream</code></td><td>bool</td><td>false</td><td>Global stream-ification, see the section above</td></tr>
+        <tr><td><code>compactEffort</code></td><td>string</td><td>empty</td><td>low, mid, high or max: thinking level for context-compaction requests, beating route effort; the model column shows [Compact-level], see the effort notes under "Routing"</td></tr>
+        <tr><td><code>responses_listen</code></td><td>string</td><td>empty</td><td>Responses listener; empty means off</td></tr>
+        <tr><td><code>allowNoThinkBlock4Anthropic</code></td><td>bool</td><td>true</td><td>Send history lacking signed thinking blocks first, fall back on 400</td></tr>
+        <tr><td><code>routes</code></td><td>array</td><td>empty</td><td>Model-name wildcard routing table; entry fields in the next table</td></tr>
+        <tr><td><code>fast_route</code></td><td>object</td><td>empty</td><td>Fast-lane route; fields in its table below</td></tr>
+        <tr><td><code>classifier_route</code></td><td>object</td><td>empty</td><td>Classifier route; fields in its table below</td></tr>
+        <tr><td><code>multimodal_fallback</code></td><td>object</td><td>empty</td><td>Image fallback route; same fields as fast_route</td></tr>
+        <tr><td><code>search_fallback</code></td><td>object</td><td>empty</td><td>Search fallback route; fields in its table below</td></tr>
+        <tr><td><code>lazyApply</code></td><td>object</td><td>none</td><td>Shared defaults; fields in its table below</td></tr>
+      </table></div>
+      <h4>routes[] entry</h4>
+      <div class="docTableWrap"><table>
+        <tr><th>Key</th><th>Type</th><th>Default</th><th>Meaning</th></tr>
+        <tr><td><code>pattern</code></td><td>string or string[]</td><td>required</td><td>Model-name wildcard, * matches any run; an array means OR</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>empty</td><td>Upstream base URL; omitted it inherits lazyApply.url, and still empty = no reroute: the entry's other fields still apply and the request forwards to the default upstream</td></tr>
+        <tr><td><code>api</code></td><td>string</td><td>empty</td><td>Upstream key sent as Authorization: Bearer; empty passes the client token through</td></tr>
+        <tr><td><code>model</code></td><td>string</td><td>empty</td><td>Rewritten model name; empty leaves it unchanged</td></tr>
+        <tr><td><code>text_only</code></td><td>bool</td><td>false</td><td>Upstream cannot take images; image requests divert to multimodal_fallback</td></tr>
+        <tr><td><code>no_search</code></td><td>bool</td><td>false</td><td>Upstream cannot search; search requests divert to search_fallback</td></tr>
+        <tr><td><code>thinking</code></td><td>string</td><td>auto</td><td>auto, adaptive or budget; affects the Responses translation port only</td></tr>
+        <tr><td><code>effort</code></td><td>string</td><td>empty</td><td>low, mid, high or max; forces output_config.effort for adaptive requests (a body already at the level is left alone), empty leaves the body untouched; the status page's model column shows the configured level as a [level] tag</td></tr>
+        <tr><td><code>convertOff2Low</code></td><td>string</td><td>empty</td><td>Empty, translate or all</td></tr>
+        <tr><td><code>enhance_search</code></td><td>object</td><td>none</td><td>Summary injection; subfields summary_thinking and summary_level</td></tr>
+        <tr><td><code>claudeSearchSummary</code></td><td>string</td><td>empty</td><td>forceLow, forceMid, forceHigh or noForce</td></tr>
+        <tr><td><code>claudeSearchThinking</code></td><td>string</td><td>empty</td><td>off, low, mid, high or max</td></tr>
+        <tr><td><code>noBullshitOnEmptyClaudeSearch</code></td><td>bool</td><td>false</td><td>Empty-search guard</td></tr>
+        <tr><td><code>noLazyApply</code></td><td>bool</td><td>false</td><td>Do not inherit lazyApply</td></tr>
+      </table></div>
+      <h4>classifier_route</h4>
+      <div class="docTableWrap"><table>
+        <tr><th>Key</th><th>Type</th><th>Default</th><th>Meaning</th></tr>
+        <tr><td><code>url</code></td><td>string</td><td>empty</td><td>Upstream base URL; omitted it inherits lazyApply.url, and still empty = no reroute (thinking rewrite only)</td></tr>
+        <tr><td><code>api</code></td><td>string</td><td>empty</td><td>Upstream key; empty passes the client token through</td></tr>
+        <tr><td><code>model</code></td><td>string</td><td>empty</td><td>Rewritten model name</td></tr>
+        <tr><td><code>classifier_thinking</code></td><td>string</td><td>empty</td><td>Empty, off or low; see "Dedicated routes"</td></tr>
+        <tr><td><code>classifier_thinking_cc</code></td><td>string</td><td>empty</td><td>Override for the Claude Code source</td></tr>
+        <tr><td><code>classifier_thinking_codex</code></td><td>string</td><td>empty</td><td>Override for the Codex source</td></tr>
+        <tr><td><code>noLazyApply</code></td><td>bool</td><td>false</td><td>Do not inherit lazyApply</td></tr>
+      </table></div>
+      <h4>fast_route and multimodal_fallback</h4>
+      <div class="docTableWrap"><table>
+        <tr><th>Key</th><th>Type</th><th>Default</th><th>Meaning</th></tr>
+        <tr><td><code>url</code></td><td>string</td><td>empty</td><td>Upstream base URL; omitted it inherits lazyApply.url, and still empty = the lane stays disengaged and the request follows normal routing</td></tr>
+        <tr><td><code>api</code></td><td>string</td><td>empty</td><td>Upstream key; empty passes the client token through</td></tr>
+        <tr><td><code>model</code></td><td>string</td><td>empty</td><td>Rewritten model name</td></tr>
+        <tr><td><code>convertOff2Low</code></td><td>string</td><td>empty</td><td>Empty, translate or all</td></tr>
+        <tr><td><code>noLazyApply</code></td><td>bool</td><td>false</td><td>Do not inherit lazyApply</td></tr>
+      </table></div>
+      <h4>search_fallback</h4>
+      <div class="docTableWrap"><table>
+        <tr><th>Key</th><th>Type</th><th>Default</th><th>Meaning</th></tr>
+        <tr><td><code>url</code></td><td>string</td><td>empty</td><td>Upstream base URL; omitted it inherits lazyApply.url, and still empty = not engaged, diverted requests fall back to the original route</td></tr>
+        <tr><td><code>api</code></td><td>string</td><td>empty</td><td>Upstream key; empty passes the client token through</td></tr>
+        <tr><td><code>model</code></td><td>string</td><td>empty</td><td>Rewritten model name</td></tr>
+        <tr><td><code>thinking</code></td><td>string</td><td>auto</td><td>auto, adaptive or budget; affects the Responses translation port only</td></tr>
+        <tr><td><code>convertOff2Low</code></td><td>string</td><td>empty</td><td>Empty, translate or all</td></tr>
+        <tr><td><code>summary_mode</code></td><td>bool</td><td>false</td><td>Legacy: inject the summary instruction</td></tr>
+        <tr><td><code>summary_thinking</code></td><td>bool</td><td>false</td><td>Legacy: turn the search request's thinking into low</td></tr>
+        <tr><td><code>summary_level</code></td><td>string</td><td>low</td><td>Legacy: summary detail, low / mid / high / max</td></tr>
+        <tr><td><code>claudeSearchThinking</code></td><td>string</td><td>empty</td><td>off, low, mid, high or max</td></tr>
+        <tr><td><code>claudeSearchSummary</code></td><td>string</td><td>empty</td><td>forceLow, forceMid, forceHigh or noForce</td></tr>
+        <tr><td><code>noBullshitOnEmptyClaudeSearch</code></td><td>bool</td><td>false</td><td>Empty-search guard</td></tr>
+        <tr><td><code>noLazyApply</code></td><td>bool</td><td>false</td><td>Do not inherit lazyApply</td></tr>
+      </table></div>
+      <h4>lazyApply</h4>
+      <div class="docTableWrap"><table>
+        <tr><th>Key</th><th>Type</th><th>Applies to</th></tr>
+        <tr><td><code>text_only</code></td><td>bool</td><td>routes[]</td></tr>
+        <tr><td><code>no_search</code></td><td>bool</td><td>routes[]</td></tr>
+        <tr><td><code>thinking</code></td><td>string</td><td>routes[] and search_fallback</td></tr>
+        <tr><td><code>convertOff2Low</code></td><td>string</td><td>Every route-like object that supports it</td></tr>
+        <tr><td><code>enhance_search</code></td><td>object</td><td>routes[]</td></tr>
+        <tr><td><code>summary_mode</code></td><td>bool</td><td>search_fallback</td></tr>
+        <tr><td><code>summary_thinking</code></td><td>bool</td><td>search_fallback</td></tr>
+        <tr><td><code>summary_level</code></td><td>string</td><td>search_fallback</td></tr>
+        <tr><td><code>claudeSearchThinking</code></td><td>string</td><td>routes[] and search_fallback</td></tr>
+        <tr><td><code>claudeSearchSummary</code></td><td>string</td><td>routes[] and search_fallback</td></tr>
+        <tr><td><code>noBullshitOnEmptyClaudeSearch</code></td><td>bool</td><td>routes[] and search_fallback</td></tr>
+        <tr><td><code>classifier_thinking</code></td><td>string</td><td>classifier_route</td></tr>
+        <tr><td><code>classifier_thinking_cc</code></td><td>string</td><td>classifier_route</td></tr>
+        <tr><td><code>classifier_thinking_codex</code></td><td>string</td><td>classifier_route</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>routes[], classifier_route, fast_route, multimodal_fallback and search_fallback</td></tr>
+        <tr><td><code>api</code></td><td>string</td><td>routes[], classifier_route, fast_route, multimodal_fallback and search_fallback</td></tr>
+        <tr><td><code>model</code></td><td>string</td><td>routes[], classifier_route, fast_route, multimodal_fallback and search_fallback</td></tr>
+      </table></div>
+    </section>
+
+    <section class="docSec" id="doc-status" data-group="Console Reference">
+      <h3>Status tab &amp; stats</h3>
+      <p>The Status tab opens with stat cards: Active/Waiting, To upstream, From upstream, Cache hit, Input, Output, Retries, Classifier, TTFT, tok/s. In-flight and recently finished streams each get a table; click a row to inspect it.</p>
+      <h4>Metric definitions</h4>
+      <ul>
+        <li><b>Total</b>: from the proxy receiving the downstream request to the full response being sent back. Includes internal handling, first-byte wait, streaming and wrap-up.</li>
+        <li><b>TTFT</b>: from sending the request to receiving the first output byte.</li>
+        <li><b>tok/s</b>: output tokens divided by streaming time.</li>
+        <li><b>Cache hit</b>: <code>cache_read / (input + cache_read + cache_creation)</code>. Cache writes do not count as hits but do count as input. A high hit rate comes mostly from the upstream model's native context cache; the proxy only passes usage through. Interrupted streams are excluded from the cache-hit aggregate so a half-finished context is not counted as a low hit.</li>
+        <li><b>Cache age</b>: anchored per session and route, showing how long ago the latest cache write happened. While a stream of the same session and route is streaming, the newest finished row freezes into brackets, meaning the cache was just refreshed. A newest row that started within the last 5 minutes is protected from the "Keep finished N" trim. Requests without a session marker always show <code>-</code>.</li>
+        <li><b># column</b>: <code>#80&lt;-73</code> means stream 80 continues from stream 73. It is annotated only when the session matches and stream 73's message chain is a prefix of stream 80's. A bare <code>#N</code> means no parent, e.g. a sub-agent's first round or right after <code>/clear</code>.</li>
+      </ul>
+      <p>Clicking the Cache hit card opens a per-real-upstream-model breakdown. The "Measured cache lifetime" table at the bottom groups by URL and model and gives the lower bound (≥), upper bound (&lt;), how long each bound has stood, and observation counts. Streams with under 1024 input tokens are not sampled.</p>
+      <p>Clicking the Classifier card shows hits and rewrite details, split by Claude Code and Codex.</p>
+      <p>Activity opens a heatmap of the last 48 hours, one cell per 15 minutes, colorable by request count, input+output, or output. It is stored in <code>heatmap.dat</code> next to the config file and survives restarts.</p>
+      <p>Clear stats zeroes the cumulative stats, the finished-streams list and the activity heatmap; in-flight streams, stream numbering and the log are untouched. "Keep finished" controls the list length, default 10, maximum 200.</p>
+    </section>
+
+    <section class="docSec" id="doc-badges" data-group="Console Reference">
+      <h3>Badge dictionary</h3>
+      <div class="docTableWrap"><table>
+        <tr><th>Badge</th><th>Where</th><th>Meaning</th></tr>
+        <tr><td><code>[Anthropic]</code> / <code>[translate]</code></td><td>API column</td><td>Protocol source: native Anthropic port / Responses port translated</td></tr>
+        <tr><td><code>off</code> / <code>on N</code> / <code>adaptive</code> / <code>low</code> etc</td><td>API column</td><td>The thinking shape actually sent upstream. The name is the protocol source; the value's color is the Anthropic vocabulary</td></tr>
+        <tr><td><code>[off-&gt;low]</code></td><td>API column</td><td>Thinking-off quietly upgraded to low, see "Thinking rewrite"</td></tr>
+        <tr><td><code>[level]</code></td><td>model column</td><td>The route-configured <code>effort</code> pin, shown as <code>origModel -&gt; [level] targetModel</code> (<code>origModel [level]</code> when the model wasn't rewritten), in wire vocabulary (<code>mid</code> shows as <code>medium</code>); shown even when the body-side rewrite didn't apply — the API column badge proves an actual rewrite; suppressed on compaction rows pinned by <code>compactEffort</code>, whose <code>[Compact-level]</code> badge carries the level</td></tr>
+        <tr><td><code>[from-&gt;to]</code></td><td>API column</td><td>Teal body-side thinking rewrite: a route <code>effort</code> pin, the <code>compactEffort</code> pin on a compaction request or a search sub-agent rewrite, showing the value before the last rewrite and the one sent upstream; an empty <code>from</code> means the request had no thinking field (shown as auto)</td></tr>
+        <tr><td><code>[Search]</code> / <code>[SearchSummary-level]</code></td><td>model column</td><td>Standalone search request / summary injected</td></tr>
+        <tr><td><code>[Compact]</code> / <code>[Compact-level]</code></td><td>model column</td><td>Context-compaction badge for client compaction requests: marked when the request's final user message opens with a client compaction prompt (Claude Code compact, Codex CLI checkpoint compaction); prompts merely quoted in history do not count. A finished row appends <code>[170k-&gt;20k, 88%]</code>: left is the pre-compaction total input context (input + cache_read + cache_creation), right is the summary's output tokens, and the percentage is the share compressed away; when usage was not parsed, the badge shows without numbers. With the top-level compactEffort set the badge carries the pinned level (wire vocabulary, mid reads medium), and an actually rewritten body also shows the API column's [from-&gt;to] badge</td></tr>
+        <tr><td><code>[Read*1]</code> <code>[Edit*3]</code></td><td>model column</td><td>Tool-call counts in this response, in first-appearance order. A single call with empty arguments shows *0</td></tr>
+        <tr><td><code>[count_tokens]</code></td><td>model column</td><td>Claude Code's token-count probe. Its response carries only input_tokens; the badge keeps it from looking like an empty response, and it is excluded from the activity heatmap</td></tr>
+        <tr><td><code>[strip N]</code></td><td>model or cache-hit column</td><td>Number of replayed search blocks stripped</td></tr>
+        <tr><td><code>[retried Nx]</code></td><td>after the status</td><td>Went through N backoff retries</td></tr>
+        <tr><td><code>[retries exhausted]</code></td><td>status column</td><td>Retries or budget ran out; overloaded_error was sent downstream</td></tr>
+        <tr><td><code>[no-stop]</code></td><td>after the status</td><td>The upstream 200 stream ended early without a terminal event</td></tr>
+        <tr><td><code>[empty-search]</code></td><td>status column</td><td>The empty-search guard triggered</td></tr>
+        <tr><td><code>[attempt N: Xs]</code> / <code>[backing off]</code></td><td>in-flight row</td><td>Time the current attempt has waited / backing off right now</td></tr>
+        <tr><td>Status light ⚪🟡🟢</td><td>first in-flight column</td><td>Requesting / waiting for first byte / relaying. The seconds beside it reset only when the color changes</td></tr>
+      </table></div>
+      <p>Non-200 status codes show in brackets, e.g. <code>[499]</code>, <code>[400]</code>. 499 means the upstream connection ended before it finished sending — most often the client cancelled; an upstream that finished and then saw the client leave still counts as 200.</p>
+    </section>
+
+    <section class="docSec" id="doc-viewer" data-group="Console Reference">
+      <h3>Stream viewer</h3>
+      <p>Clicking any in-flight or finished row opens the stream viewer below. The content button cycles four states: Request body → Output [rendered] → Output [raw stream] → Output [non-stream].</p>
+      <ul>
+        <li><b>Rendered</b>: the SSE event stream parsed into readable text.</li>
+        <li><b>Raw stream</b>: the verbatim SSE bytes.</li>
+        <li><b>Non-stream</b>: the events assembled into the final JSON. An incomplete stream is labeled as a partial snapshot. In this state Interactive JSON builds its tree directly from the assembled object.</li>
+        <li><b>Request body</b>: the request that produced this stream, pretty-printed JSON.</li>
+      </ul>
+      <p><b>Both link sides</b>: the Link button toggles between proxy↔upstream and client↔proxy. The default shows what the proxy actually sent upstream and what came back. Both sides are stored only when they differ, e.g. translated streams and model-rewritten streams. Switching to a side with no recording falls back automatically with a note beside the button.</p>
+      <p>Browsing shows at most the first 256KB. With "Store full payloads" on, newly started requests additionally record the full request body and output (no cap, memory cost), and the viewer shows download buttons. Turning it off immediately purges stored full copies. The switch resets to off after a restart.</p>
+      <p>Interactive JSON is always available and needs no storage switch. It turns the current content into a collapsible JSON tree: the first level is expanded, deeper levels lazily expand on click, and it follows link-side switches. A stream with incomplete data is never passed off as complete — download buttons grey out with the reason.</p>
+      <p>With "Auto-track latest" on, the viewer follows the newest in-flight stream. "Show at most" controls how many in-flight streams are shown side by side.</p>
+    </section>
+
+    <section class="docSec" id="doc-faq" data-group="Troubleshooting">
+      <h3>FAQ</h3>
+      <ul>
+        <li><b>Claude Code bypasses the proxy</b>: the environment variables must be exported in the same terminal that runs <code>claude</code>. Check with <code>echo $ANTHROPIC_BASE_URL</code> — it must print <code>http://127.0.0.1:8080</code>.</li>
+        <li><b>A port change does not take effect</b>: <code>listen</code> binds at startup only — exit the proxy and start it again. <code>responses_listen</code> hot-starts and hot-stops.</li>
+        <li><b>The console will not open</b>: usually the main port is taken or the config is broken. Fix <code>listen</code> by editing the config file directly and restart. To chase startup errors, temporarily set <code>"log_file": "proxy.log"</code>.</li>
+        <li><b>No retries visible</b>: the Logs tab should show <code>[attempt N] upstream response status: 429</code> and <code>[retry]</code> lines. If they are missing, the status code is not in <code>retry_status_codes</code>, or the retry budget is already spent. A deterministic 4xx (e.g. a 400 <code>invalid_request_error</code>: malformed JSON, unsigned thinking history) is not retried — after the semantic fallbacks get their one shot, the upstream error passes through with its body intact (when a keepalive stream is already open, the detail rides inside the SSE error event and the status column records the real code, not [retries exhausted]); 408/425/429 and every 5xx keep the in-body retry even when not listed.</li>
+        <li><b>No window after launch</b>: normal. The program lives in the tray or menu bar; open the console from the icon's menu.</li>
+        <li><b>Codex reports 503 with zero proxy log</b>: a system proxy hijacked 127.0.0.1. Add <code>127.0.0.1</code> to <code>NO_PROXY</code> and restart Codex. The Windows one-line script writes a user-level variable; the macOS script persists it into launchd.</li>
+        <li><b>macOS will not open the app the first time</b>: the app is ad-hoc signed. Right-click it in Finder and choose Open once.</li>
+        <li><b>A config save is rejected</b>: read the on-page error. Common causes are JSON syntax errors, undefined variable references, wrong enum values, or removed keys left in the config.</li>
+        <li><b>A request returns 502</b>: no route matched and <code>upstream</code> is empty, or the upstream address is unreachable. Check the <code>[route]</code> line in the log to see where it went.</li>
+        <li><b>Keep logs</b>: set <code>log_file</code>. By default logs stay in memory only, feeding the console's latest 500 lines.</li>
+      </ul>
+    </section>
+
+    <section class="docSec" id="doc-removed" data-group="Troubleshooting">
+      <h3>Removed config keys</h3>
+      <p>These old top-level keys are gone. A config carrying them still starts and runs normally, but the behavior stays inactive: the tray icon turns red, and startup warnings on the Logs tab explain each key's replacement. Saving a config that still contains a removed key is rejected on the Config tab.</p>
+      <div class="docTableWrap"><table>
+        <tr><th>Old key</th><th>Replacement</th></tr>
+        <tr><td><code>classifier_thinking_disabled</code></td><td>Write <code>"classifier_thinking": "off"</code> inside <code>classifier_route</code></td></tr>
+        <tr><td><code>classifier_max_tokens</code></td><td>Just delete it. Classifier-request max_tokens is no longer modified</td></tr>
+        <tr><td><code>translateNone2Low</code></td><td>Write <code>"convertOff2Low": "translate"</code> or <code>"all"</code> on routes entries, fast_route, multimodal_fallback or search_fallback</td></tr>
+      </table></div>
+    </section>
+  </div>
+</div>

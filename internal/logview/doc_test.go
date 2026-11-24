@@ -123,7 +123,8 @@ func equalInts(a, b []int) bool {
 }
 
 // TestDocCoversConfigExampleKeys guards completeness: every key the shipped config example uses must
-// be documented as a <code> key in both languages, so adding a config key without docs fails the build.
+// appear as a spec-shaped reference row (<tr><td><code>key</code></td><td>type</td>...) in both
+// languages, so adding a config key without a documented type and description fails the build.
 func TestDocCoversConfigExampleKeys(t *testing.T) {
 	var example any
 	if err := json.Unmarshal(config.ConfigExampleBytes, &example); err != nil {
@@ -153,8 +154,8 @@ func TestDocCoversConfigExampleKeys(t *testing.T) {
 	}
 	for _, side := range []struct{ name, doc string }{{"ZH", logViewerDocZH}, {"EN", logViewerDocEN}} {
 		for k := range keys {
-			if !strings.Contains(side.doc, "<code>"+k+"</code>") {
-				t.Errorf("%s doc does not document config key %q", side.name, k)
+			if !strings.Contains(side.doc, "<tr><td><code>"+k+"</code></td>") {
+				t.Errorf("%s doc has no reference-table row for config key %q", side.name, k)
 			}
 		}
 	}

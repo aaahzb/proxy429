@@ -1,2 +1,3 @@
 # bash scripts must check out as LF (this repo has autocrlf=true; CRLF makes bash fail with "\r: command not found")
 codex-setup.sh text eol=lf
+docs/console-doc/*.html text eol=lf

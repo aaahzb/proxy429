@@ -1,8 +1,9 @@
 package logview
 
-// logViewerDocZH is the Chinese usage-doc body. The Chinese page render replaces the doc placeholder
-// with it wholesale. Section ids, data-group boundaries and structure must stay in lockstep with
-// logViewerDocEN; doc_test.go enforces the parity and the config-example key coverage.
+// logViewerDocZH is the Chinese usage-doc body, rendered from docs/console-doc/doc-zh.html by
+// tools/docgen (go run ./tools/docgen); edit the HTML fragment, not this file, and keep section
+// ids and data-group boundaries in lockstep with logViewerDocEN. doc_test.go enforces that
+// parity, the fragment/generated sync and the config-example key coverage.
 const logViewerDocZH = `<div class="docHead">
   <div class="docTitle">使用文档</div>
   <input id="docSearch" class="docSearch" type="search" placeholder="搜索参数或功能（429、缓存、thinking…）" oninput="docFilter(this.value)" onkeydown="docSearchKey(event)">
@@ -276,6 +277,12 @@ experimental_bearer_token = "proxy429"</pre>
         <tr><td><code>compactEffort</code></td><td>string</td><td>空</td><td>low、mid、high 或 max：上下文压缩请求的思考档位，优先级高于路由 effort；模型列显示 [Compact-档位]，见「路由」一节的 effort 说明</td></tr>
         <tr><td><code>responses_listen</code></td><td>string</td><td>空</td><td>Responses 监听口；空等于关闭</td></tr>
         <tr><td><code>allowNoThinkBlock4Anthropic</code></td><td>bool</td><td>true</td><td>历史缺签名思考块时，先照发再兜底</td></tr>
+        <tr><td><code>routes</code></td><td>array</td><td>空</td><td>模型名通配的路由表，条目字段见下节</td></tr>
+        <tr><td><code>fast_route</code></td><td>object</td><td>空</td><td>快速通道路由，字段见后文同名表格</td></tr>
+        <tr><td><code>classifier_route</code></td><td>object</td><td>空</td><td>分类器专用路由，字段见后文同名表格</td></tr>
+        <tr><td><code>multimodal_fallback</code></td><td>object</td><td>空</td><td>图片兜底路由，字段与 fast_route 相同</td></tr>
+        <tr><td><code>search_fallback</code></td><td>object</td><td>空</td><td>搜索兜底路由，字段见后文同名表格</td></tr>
+        <tr><td><code>lazyApply</code></td><td>object</td><td>无</td><td>共享默认值，字段见后文同名表格</td></tr>
       </table></div>
       <h4>routes[] 条目</h4>
       <div class="docTableWrap"><table>
@@ -440,8 +447,9 @@ experimental_bearer_token = "proxy429"</pre>
   </div>
 </div>`
 
-// logViewerDocEN is the English usage-doc body. The English page render replaces the doc placeholder
-// with it before the static-copy replacer runs, so this fragment must contain no Chinese characters.
+// logViewerDocEN is the English usage-doc body, rendered from docs/console-doc/doc-en.html by
+// tools/docgen. The English page render replaces the doc placeholder with it before the
+// static-copy replacer runs, so this fragment must contain no Chinese characters.
 const logViewerDocEN = `<div class="docHead">
   <div class="docTitle">Usage Docs</div>
   <input id="docSearch" class="docSearch" type="search" placeholder="Search parameters or features (429, cache, thinking…)" oninput="docFilter(this.value)" onkeydown="docSearchKey(event)">
@@ -715,6 +723,12 @@ experimental_bearer_token = "proxy429"</pre>
         <tr><td><code>compactEffort</code></td><td>string</td><td>empty</td><td>low, mid, high or max: thinking level for context-compaction requests, beating route effort; the model column shows [Compact-level], see the effort notes under "Routing"</td></tr>
         <tr><td><code>responses_listen</code></td><td>string</td><td>empty</td><td>Responses listener; empty means off</td></tr>
         <tr><td><code>allowNoThinkBlock4Anthropic</code></td><td>bool</td><td>true</td><td>Send history lacking signed thinking blocks first, fall back on 400</td></tr>
+        <tr><td><code>routes</code></td><td>array</td><td>empty</td><td>Model-name wildcard routing table; entry fields in the next table</td></tr>
+        <tr><td><code>fast_route</code></td><td>object</td><td>empty</td><td>Fast-lane route; fields in its table below</td></tr>
+        <tr><td><code>classifier_route</code></td><td>object</td><td>empty</td><td>Classifier route; fields in its table below</td></tr>
+        <tr><td><code>multimodal_fallback</code></td><td>object</td><td>empty</td><td>Image fallback route; same fields as fast_route</td></tr>
+        <tr><td><code>search_fallback</code></td><td>object</td><td>empty</td><td>Search fallback route; fields in its table below</td></tr>
+        <tr><td><code>lazyApply</code></td><td>object</td><td>none</td><td>Shared defaults; fields in its table below</td></tr>
       </table></div>
       <h4>routes[] entry</h4>
       <div class="docTableWrap"><table>
