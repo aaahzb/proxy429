@@ -134,7 +134,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// each attempt of the retry loop refreshes it with the body actually sent (after a fallback rewrite, the last one wins); streams that die young
 	// before dispatch (e.g. bad JSON) still have this entry body to inspect.
 	f.SetReqBody(body)
-	f.Compaction.Store(isCompactionRequest(body)) // Display-only: a client context-compaction request gets a [Comp] badge in the console
+	f.Compaction.Store(isCompactionRequest(body)) // Display-only: a client context-compaction request gets a [Compact] badge in the console
 	// The downstream-side (downstream→proxy) request body of dual-link recording: the translation port brings the Responses original via context
 	// (necessarily different from the translated body, so always stored); native streams defer to a comparison with the first upstream-bound body and are stored only on difference.
 	var downBody []byte

@@ -203,7 +203,7 @@ func TestCompactionBadgeEndToEnd(t *testing.T) {
 	}
 
 	// Live-bug regression: a normal request whose conversation history quotes the prompts must stay
-	// unflagged, so its console row carries neither the [Comp] badge nor a save result.
+	// unflagged, so its console row carries neither the [Compact] badge nor a save result.
 	historyRequest := `{"model":"claude-opus-4-8","stream":true,"max_tokens":32000,"messages":[{"role":"user","content":"The log quoted CRITICAL: Respond with TEXT ONLY and Your task is to create a detailed summary of the conversation so far."},{"role":"assistant","content":"noted"},{"role":"user","content":"normal follow-up question"}]}`
 	resp, err := http.Post(proxy.URL+"/v1/messages", "application/json", strings.NewReader(historyRequest))
 	if err != nil {

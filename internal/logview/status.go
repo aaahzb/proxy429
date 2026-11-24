@@ -28,7 +28,7 @@ type flightInfo struct {
 	CountTokens     bool   `json:"countTokens,omitempty"` // count_tokens probe stream; the model column shows a [count_tokens] prefix
 	SearchPrompt    string `json:"searchPrompt,omitempty"`
 	SearchMarker    bool   `json:"searchMarker,omitempty"`    // Standalone search sub-agent marker hit; the model column shows [Search]
-	Compaction      bool   `json:"compaction,omitempty"`      // Client context-compaction request; the model column shows [Comp]
+	Compaction      bool   `json:"compaction,omitempty"`      // Client context-compaction request; the model column shows [Compact]
 	SearchLevel     string `json:"searchLevel,omitempty"`     // Injected summary level; the badge upgrades to [SearchSummary-<level>]
 	SearchThinkFrom string `json:"searchThinkFrom,omitempty"` // Thinking value before the search rewrite (empty renders as auto)
 	SearchThinkTo   string `json:"searchThinkTo,omitempty"`   // Search rewrite target level (empty = none; the API column shows [from->to])

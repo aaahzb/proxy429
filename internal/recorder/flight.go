@@ -68,7 +68,7 @@ type Flight struct {
 	SearchGuard      bool                       // The upstream response was discarded and replaced with the fixed empty-search stream; the web status column shows [空搜]
 	Translated       string                     // Translation-port origin tag ("responses"=translated stream, "responses-raw"=native passthrough via a route with url_response_api); the web API column shows [translate]/[Response]
 	CountTokens      bool                       // count_tokens probe stream (countTokensPath); the response is just {"input_tokens":N}; the web model column shows a [count_tokens] prefix
-	Compaction       atomic.Bool                // The final user message opens with a known client context-compaction prompt (detected at body read); the web model column shows [Comp]. Atomic because logDataHandler reads it from another goroutine
+	Compaction       atomic.Bool                // The final user message opens with a known client context-compaction prompt (detected at body read); the web model column shows [Compact]. Atomic because logDataHandler reads it from another goroutine
 	SearchStripped   atomic.Int32               // Total replayed search blocks stripped (conversation-watermark strip + 400-fallback strip; the web shows a red [剥N] badge, the split only goes to the log)
 	StripThinking    atomic.Bool                // convertOff2Low upgrade (off->low): thinking blocks are stripped from the response before writing downstream (the client keeps seeing a thinking-off response)
 	NoStop           bool                       // Upstream 200 SSE stream ended without a terminal event (message_stop / response.completed|failed|incomplete) while the client stayed connected; the web status column shows a red [无stop] badge
@@ -501,7 +501,7 @@ type FinishedFlight struct {
 	TPS              float64 // This stream's streaming tok/s
 	SearchPrompt     string  // Summary instruction injected into a standalone search sub-agent request (empty when none)
 	SearchMarker     bool    // Standalone search marker hit on the final user message (the model column shows [Search])
-	Compaction       bool    // The final user message opened with a known client context-compaction prompt (the model column shows [Comp]); finished rows append the compact result via CompactSave
+	Compaction       bool    // The final user message opened with a known client context-compaction prompt (the model column shows [Compact]); finished rows append the compact result via CompactSave
 	SearchLevel      string  // Injected summary level (empty = none; the badge upgrades to [SearchSummary-<level>])
 	SearchThinkFrom  string  // Thinking value before the rewrite (empty = no thinking field, shown as auto)
 	SearchThinkTo    string  // Rewrite target level (empty = no rewrite; the API column shows [from->to])
