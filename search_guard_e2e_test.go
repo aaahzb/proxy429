@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/translate"
 	"strings"
 	"sync"
 	"testing"
@@ -283,8 +284,8 @@ func TestForwardSearchGuardSkipsNon200AndResponsesOrigin(t *testing.T) {
 		translated string
 	}{
 		{name: "non 200", status: http.StatusTooManyRequests},
-		{name: "Responses translation", status: http.StatusOK, translated: translatedResponses},
-		{name: "Responses native", status: http.StatusOK, translated: translatedResponsesRaw},
+		{name: "Responses translation", status: http.StatusOK, translated: translate.TranslatedResponses},
+		{name: "Responses native", status: http.StatusOK, translated: translate.TranslatedResponsesRaw},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetStats()

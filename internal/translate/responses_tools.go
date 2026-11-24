@@ -3,7 +3,7 @@
 // tool_media.rs (tool-result media stripping). Four tool kinds: function (ordinary functions),
 // namespace (MCP namespaces, flattened to ns__name), custom (Codex freeform tools,
 // wrapped into an {"input": string} JSON Schema), toolSearch (fixed proxy tool).
-package main
+package translate
 
 import (
 	"bytes"

@@ -1,7 +1,7 @@
 // responses_tools_test.go — tests for tool-system translation, porting cc-switch's key cases:
 // custom tool wrap/unwrap, namespace(MCP) flattening and restoration, tool_search, Read sanitize,
 // tool-result media stripping (MCP images / JSON-string nesting), error markers, input_file, usage.
-package main
+package translate
 
 // cc-switch: https://github.com/farion1231/cc-switch — MIT License, Copyright (c) 2025 Jason Young.
 

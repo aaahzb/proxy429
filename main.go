@@ -29,6 +29,7 @@ import (
 	"proxy429/internal/config"
 	"proxy429/internal/jsonutil"
 	"proxy429/internal/platform"
+	"proxy429/internal/translate"
 )
 
 // Version is the build stamp, injected by build.sh via -ldflags "-X main.Version=...": "release vX.Y.Z.N" when
@@ -131,7 +132,7 @@ func reloadConfig() error {
 	}
 	config.Store(c)
 	config.SetConfigWarnings(warns)
-	reconcileResponsesServer(c.ResponsesListen) // Responses port starts/stops dynamically with config reload
+	translate.ReconcileResponsesServer(c.ResponsesListen, handler) // Responses port starts/stops dynamically with config reload
 	log.Printf("[reload] config reloaded: http://%s -> %s (max retries %d, classifier thinking: cc=%q codex=%q, removed-key warnings=%d)",
 		c.Listen, c.Upstream, c.MaxRetries, config.ClassifierThinkingModeFor(c, config.ClassifierCC), config.ClassifierThinkingModeFor(c, config.ClassifierCodex), len(warns))
 	return nil
@@ -149,7 +150,7 @@ func switchConfig(newPath string) error {
 	config.WriteActiveConfigState(newPath)
 	config.Store(c)
 	config.SetConfigWarnings(warns)
-	reconcileResponsesServer(c.ResponsesListen) // Responses port starts/stops dynamically with the config
+	translate.ReconcileResponsesServer(c.ResponsesListen, handler) // Responses port starts/stops dynamically with the config
 	// Notify the tray to rebuild the "switch config" submenu and refresh checkmarks (web-initiated switches don't go through tray clicks)
 	notifyTrayCfgChanged()
 	log.Printf("[switch] switched to %s: http://%s -> %s (max retries %d)",
@@ -657,30 +658,30 @@ type flight struct {
 	// convertAlltoStream-rebuilt JSON streams store contentDown, native streams store reqDown only when rewritten
 	// (classifier thinking rewrite / routed model etc.); all empty means both sides identical, and endpoints fall back
 	// to the other side, reporting the actual side via the X-Proxy429-Side header. Guarded by contentMu.
-	reqDown          []byte           // Raw downstream→proxy request body (truncation/full rules same as reqBody)
-	reqDownTruncated bool             // Whether reqDown was truncated to just the head
-	contentDown      []byte           // Proxy→downstream response content (capped at flightContentCap, keeps the tail)
-	fullContentDown  []byte           // Proxy→downstream full response (recorded only with the 储存完整结构体 toggle on)
-	fullPartialDown  bool             // Downstream-side mirror of fullPartial: down bytes that flowed with the toggle off mean no complete down full copy (guarded by contentMu)
-	inTokens         int64            // This stream's cumulative input_tokens (stored from lastInput when forward ends)
-	cacheRead        int64            // This stream's cumulative cache_read
-	cacheCreation    int64            // This stream's cumulative cache_creation (cache writes; part of the hit-rate denominator)
-	outTokens        int64            // This stream's cumulative output_tokens
-	firstByteMs      int64            // This stream's first-byte latency (ms), recorded only on the normal response path
-	tps              float64          // This stream's streaming tok/s, recorded only on the normal response path
-	searchPrompt     string           // Summary instruction injected into a standalone search sub-agent request (empty when none), shown on the status page via the model cell's hover tooltip
-	searchMarker     bool             // Standalone search sub-agent marker hit (body carries "Perform a web search for the query"); the web model column shows a [Search] badge
-	searchLevel      string           // Summary level actually injected into the marker request (empty = none); upgrades the badge to [SearchSummary-<level>]
-	searchThinkFrom  string           // Thinking value before the search thinking rewrite (empty = no thinking field, shown as auto)
-	searchThinkTo    string           // Configured level the search thinking rewrite targeted (empty = no rewrite); the API column shows [from->to]
-	searchGuardArmed bool             // Marker request whose effective route enabled noBullshitOnEmptyClaudeSearch; only native Anthropic 200 SSE responses are buffered
-	searchGuard      bool             // The upstream response was discarded and replaced with the fixed empty-search stream; the web status column shows [空搜]
-	translated       string           // Translation-port origin tag ("responses"=translated stream, "responses-raw"=native passthrough via a route with url_response_api); the web API column shows [translate]/[Response]
-	countTokens      bool             // count_tokens probe stream (countTokensPath); the response is just {"input_tokens":N}; the web model column shows a [count_tokens] prefix
-	searchStripped   atomic.Int32     // Total replayed search blocks stripped (conversation-watermark strip + 400-fallback strip; the web shows a red [剥N] badge, the split only goes to the log)
-	stripThinking    atomic.Bool      // convertOff2Low upgrade (off->low): thinking blocks are stripped from the response before writing downstream (the client keeps seeing a thinking-off response)
-	noStop           bool             // Upstream 200 SSE stream ended without a terminal event (message_stop / response.completed|failed|incomplete) while the client stayed connected; the web status column shows a red [无stop] badge
-	searchReplay     *searchReplayCtx // Search-restore context of the Responses translation port (carried via ctx, read/written only by the handler goroutine); the 400-fallback strip learns the conversation watermark from restore timestamps
+	reqDown          []byte                     // Raw downstream→proxy request body (truncation/full rules same as reqBody)
+	reqDownTruncated bool                       // Whether reqDown was truncated to just the head
+	contentDown      []byte                     // Proxy→downstream response content (capped at flightContentCap, keeps the tail)
+	fullContentDown  []byte                     // Proxy→downstream full response (recorded only with the 储存完整结构体 toggle on)
+	fullPartialDown  bool                       // Downstream-side mirror of fullPartial: down bytes that flowed with the toggle off mean no complete down full copy (guarded by contentMu)
+	inTokens         int64                      // This stream's cumulative input_tokens (stored from lastInput when forward ends)
+	cacheRead        int64                      // This stream's cumulative cache_read
+	cacheCreation    int64                      // This stream's cumulative cache_creation (cache writes; part of the hit-rate denominator)
+	outTokens        int64                      // This stream's cumulative output_tokens
+	firstByteMs      int64                      // This stream's first-byte latency (ms), recorded only on the normal response path
+	tps              float64                    // This stream's streaming tok/s, recorded only on the normal response path
+	searchPrompt     string                     // Summary instruction injected into a standalone search sub-agent request (empty when none), shown on the status page via the model cell's hover tooltip
+	searchMarker     bool                       // Standalone search sub-agent marker hit (body carries "Perform a web search for the query"); the web model column shows a [Search] badge
+	searchLevel      string                     // Summary level actually injected into the marker request (empty = none); upgrades the badge to [SearchSummary-<level>]
+	searchThinkFrom  string                     // Thinking value before the search thinking rewrite (empty = no thinking field, shown as auto)
+	searchThinkTo    string                     // Configured level the search thinking rewrite targeted (empty = no rewrite); the API column shows [from->to]
+	searchGuardArmed bool                       // Marker request whose effective route enabled noBullshitOnEmptyClaudeSearch; only native Anthropic 200 SSE responses are buffered
+	searchGuard      bool                       // The upstream response was discarded and replaced with the fixed empty-search stream; the web status column shows [空搜]
+	translated       string                     // Translation-port origin tag ("responses"=translated stream, "responses-raw"=native passthrough via a route with url_response_api); the web API column shows [translate]/[Response]
+	countTokens      bool                       // count_tokens probe stream (countTokensPath); the response is just {"input_tokens":N}; the web model column shows a [count_tokens] prefix
+	searchStripped   atomic.Int32               // Total replayed search blocks stripped (conversation-watermark strip + 400-fallback strip; the web shows a red [剥N] badge, the split only goes to the log)
+	stripThinking    atomic.Bool                // convertOff2Low upgrade (off->low): thinking blocks are stripped from the response before writing downstream (the client keeps seeing a thinking-off response)
+	noStop           bool                       // Upstream 200 SSE stream ended without a terminal event (message_stop / response.completed|failed|incomplete) while the client stayed connected; the web status column shows a red [无stop] badge
+	searchReplay     *translate.SearchReplayCtx // Search-restore context of the Responses translation port (carried via ctx, read/written only by the handler goroutine); the 400-fallback strip learns the conversation watermark from restore timestamps
 
 	// Session cache tracking (the status page's "缓存年龄" column): written once during routing, read by addFinished in the same goroutine.
 	convID      string // Session identifier (Anthropic port: session_id inside metadata.user_id; Responses port: prompt_cache_key); empty = does not participate
@@ -720,7 +721,7 @@ func (f *flight) realModel() string {
 // responsesRaw reports whether this stream is a Responses native passthrough (the matched route has url_response_api):
 // a passthrough stream's response is Responses-protocol SSE — usage/tool counts/terminal markers are parsed by Responses semantics,
 // and the web API column shows [Response] instead of [translate].
-func (f *flight) responsesRaw() bool { return f.translated == translatedResponsesRaw }
+func (f *flight) responsesRaw() bool { return f.translated == translate.TranslatedResponsesRaw }
 
 // noteToolCall records one tool call (the name from a tool_use/server_tool_use in the response stream's
 // content_block_start). The web's 「最近完成的流」 appends [Read*1][Edit*3]-style tags after the model column.
@@ -1183,6 +1184,12 @@ func refreshArchivedDown(f *flight) {
 		}
 	}
 }
+
+// FlightTap implementation for the translate package's translating writer: exported names for the downstream-side
+// tee and the post-archive back-fill.
+func (f *flight) AppendContentDown(data []byte) { f.appendContentDown(data) }
+
+func (f *flight) RefreshArchivedDown() { refreshArchivedDown(f) }
 
 func addFinished(f *flight) {
 	content := f.snapshotContent()
@@ -2430,7 +2437,7 @@ func classifierThinkingShape(body []byte, spans []jsonutil.FieldSpan) string {
 		var th struct {
 			BudgetTokens int64 `json:"budget_tokens"`
 		}
-		if json.Unmarshal(thinkVal, &th) != nil || th.BudgetTokens <= 0 || th.BudgetTokens > effortToThinkingBudget("low") {
+		if json.Unmarshal(thinkVal, &th) != nil || th.BudgetTokens <= 0 || th.BudgetTokens > translate.EffortToThinkingBudget("low") {
 			return ""
 		}
 		return "low"
@@ -2999,7 +3006,7 @@ func injectAfterMarker(body []byte, instruction string) ([]byte, bool) {
 // convertOff2Low-style: whatever shape the request carried, the upstream gets the configured level in the
 // adaptive shape — "off" forces {"type":"disabled"} (output_config dropped, sampling knobs kept);
 // low/mid/high/max set {"type":"adaptive"} + output_config {"effort":low|medium|high|max} (mid=medium),
-// deleting temperature/top_p (thinking-on forbids sampling knobs, same rule as maybeUpgradeOffToLow). The
+// deleting temperature/top_p (thinking-on forbids sampling knobs, same rule as translate.MaybeUpgradeOffToLow). The
 // response side lives with the caller: when the client never asked for thinking it flags stripThinking so the
 // returning thinking blocks are stripped and the client keeps seeing a thinking-off response. All edits are
 // positional via jsonutil.SetTopLevelJSONValue.
@@ -3019,7 +3026,7 @@ func rewriteSearchThinking(body []byte, level string) ([]byte, bool) {
 	if level == "mid" { // The user-facing enum says mid; the effort tables say medium.
 		level = "medium"
 	}
-	effort := codexEffortToAnthropic(level)
+	effort := translate.CodexEffortToAnthropic(level)
 	if effort == "" {
 		return body, false // Unknown level (config validation should have caught it): leave the body alone
 	}
@@ -3057,24 +3064,6 @@ func rewriteResponseModel(line []byte, origModel string) ([]byte, string, bool) 
 	return out, curModel, true
 }
 
-// matchPassthroughResponsesRoute pre-checks whether a Responses-port request should pass through natively: the model matches
-// the route table's first ordered non-reserved pattern (same rule as the handler's routing loop), and the matched route has url_response_api.
-// Only for responsesHandler's "translate or passthrough" decision; the actual upstream switch happens again in the handler's routing loop.
-func matchPassthroughResponsesRoute(c *config.Config, model string) *config.RouteRule {
-	if model == "" {
-		return nil
-	}
-	for i := range c.Routes {
-		if config.IsReservedRoutePattern(c.Routes[i].Pattern) {
-			continue
-		}
-		if matchModel(c.Routes[i].Pattern, model) && c.Routes[i].URLResponseAPI != "" {
-			return &c.Routes[i]
-		}
-	}
-	return nil
-}
-
 // responsesAPIPath computes the join path for native passthrough: url_response_api may hold a base (…/coding),
 // one with /v1, or a full …/v1/responses; only the missing difference is appended, never doubled. Used with upstream+upPath in the handler.
 func responsesAPIPath(base string) string {
@@ -3086,30 +3075,6 @@ func responsesAPIPath(base string) string {
 		return "/responses"
 	}
 	return "/v1/responses"
-}
-
-// Split the pattern by *: the first segment must be a prefix of name, the last a suffix, and the middle segments must appear in order in what remains.
-// pattern: the *-containing pattern; name: the actual model name. Returns whether it matches.
-func matchModel(pattern, name string) bool {
-	parts := strings.Split(pattern, "*")
-	if len(parts) == 1 {
-		return pattern == name // No *: exact match
-	}
-	// First segment as prefix.
-	if !strings.HasPrefix(name, parts[0]) {
-		return false
-	}
-	name = name[len(parts[0]):]
-	// Middle segments in order.
-	for i := 1; i < len(parts)-1; i++ {
-		idx := strings.Index(name, parts[i])
-		if idx < 0 {
-			return false
-		}
-		name = name[idx+len(parts[i]):]
-	}
-	// Last segment as suffix.
-	return strings.HasSuffix(name, parts[len(parts)-1])
 }
 
 // writeSSEPing writes an Anthropic-standard SSE ping event to the client and flushes, keeping the connection alive during 429 retries.
@@ -3204,9 +3169,9 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 	defer resp.Body.Close()
 	// convertOff2Low native-port upgrade (off->low): strip thinking blocks from the response so the client keeps seeing the
 	// thinking-off shape it asked for. Only on a 200 (error bodies pass through untouched), never on Responses passthrough.
-	var stripper *thinkingStripper
+	var stripper *translate.ThinkingStripper
 	if f.stripThinking.Load() && !f.responsesRaw() && resp.StatusCode == http.StatusOK {
-		stripper = newThinkingStripper(resp.Header.Get("Content-Type"))
+		stripper = translate.NewThinkingStripper(resp.Header.Get("Content-Type"))
 	}
 
 	// SSE gate for the no-stop badge: only streamed responses carry terminal events (plain JSON has none by nature).
@@ -3220,7 +3185,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 	}
 	if !headersSent {
 		copyHeaders(w.Header(), resp.Header)
-		if stripper != nil && !stripper.sse {
+		if stripper != nil && !stripper.SSE {
 			// JSON-mode stripping changes the body length: drop the upstream's Content-Length, let net/http re-frame.
 			w.Header().Del("Content-Length")
 		}
@@ -3307,7 +3272,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 	// The downstream side gets its own tee whenever the client-bound bytes can differ from the upstream side — the route rewrote
 	// the model (response model names written back below) and/or the stripper is active — except when w is a translatingWriter:
 	// the translation port tees its own downstream side (the translated client-bound bytes) via its tap.
-	_, downstreamTapped := w.(interface{ setDownTap(*flight) })
+	_, downstreamTapped := w.(interface{ SetDownTap(translate.FlightTap) })
 	teeDown := !downstreamTapped && (guard != nil || stripper != nil || (f.targetModel != "" && f.targetModel != f.origModel))
 	writeAndCount := func(data []byte) {
 		if len(data) == 0 {
@@ -3343,7 +3308,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 			}
 		}
 		if stripper != nil {
-			out = stripper.feed(out) // convertOff2Low: thinking blocks dropped, kept block indexes renumbered (the client sees thinking-off)
+			out = stripper.Feed(out) // convertOff2Low: thinking blocks dropped, kept block indexes renumbered (the client sees thinking-off)
 		}
 		if len(out) > 0 {
 			w.Write(out)
@@ -3436,7 +3401,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 	}
 	if stripper != nil {
 		// Flush what the stripper still holds: a partial trailing line (SSE), or the whole transformed document (JSON mode).
-		if tail := stripper.flush(); len(tail) > 0 {
+		if tail := stripper.Flush(); len(tail) > 0 {
 			w.Write(tail)
 			if canFlush {
 				flusher.Flush()
@@ -3444,8 +3409,8 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 			f.bytes.Add(int64(len(tail)))
 			f.appendContentDown(tail)
 		}
-		if stripper.stripped > 0 {
-			log.Printf("[off->low] #%d stripped %d thinking block(s) from the response (client sees thinking-off)", f.id, stripper.stripped)
+		if stripper.Stripped > 0 {
+			log.Printf("[off->low] #%d stripped %d thinking block(s) from the response (client sees thinking-off)", f.id, stripper.Stripped)
 		}
 	}
 	// Tool calls still open at stream end (missing content_block_stop, e.g. a truncated stream) get their empty-args verdict from what was received,
@@ -3703,8 +3668,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	c := config.Current()
 
 	// Access control: the forwarding channel only ever allows localhost — even mistakenly setting listen to 0.0.0.0 won't
-	// let LAN devices freeload on the API keys configured in routes. The management endpoints (/__logs, /__config, /__reload) have their own isLocalRequest guard.
-	if !isLocalRequest(r) {
+	// let LAN devices freeload on the API keys configured in routes. The management endpoints (/__logs, /__config, /__reload) have their own platform.IsLocalRequest guard.
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -3756,38 +3721,38 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}()
 	// Internal requests from the Responses translation port carry a context marker tagging the flight's origin;
 	// the web API column shows [translate]/[Response] (alongside the route-reason tag).
-	if v, ok := r.Context().Value(ctxKeyTranslated).(string); ok {
+	if v, ok := r.Context().Value(translate.CtxKeyTranslated).(string); ok {
 		f.translated = v
 	}
 	// Internal requests from the Responses port carry the session identifier (prompt_cache_key) via context, anchoring the "缓存年龄" column per session.
-	if v, ok := r.Context().Value(ctxKeyConvID).(string); ok {
+	if v, ok := r.Context().Value(translate.CtxKeyConvID).(string); ok {
 		f.convID = v
 	}
 	// The responses-raw passthrough port carries the thinking mode via context (reasoning.effort verbatim — passthrough modifies nothing,
 	// so the upstream receives exactly it; the translation port's/direct port's thinking value is extracted from the Anthropic body after rewriting below).
-	if v, ok := r.Context().Value(ctxKeyThink).(string); ok {
+	if v, ok := r.Context().Value(translate.CtxKeyThink).(string); ok {
 		f.think = v
 	}
 	// convertOff2Low upgrade modes (the Responses translation port quietly upgrading off-thinking to low / sending the downstream's
 	// requested effort when history is unreplayable; see the n2l constants): the API column shows a two-tone [off->low] badge for implicit upgrades; in the forwarding loop,
 	// an upstream 400 rejecting thinking falls back to one retry with thinking off (both modes are covered). The Anthropic native port
 	// sets the same mode directly at its own upgrade point below (convFlag=="all"), no ctx involved.
-	n2lMode, _ := r.Context().Value(ctxKeyNone2Low).(int)
+	n2lMode, _ := r.Context().Value(translate.CtxKeyNone2Low).(int)
 	// Dual-link recording: the Responses translation port's downstream-side response (the bytes actually written proxy→client) is teed
 	// in full into contentDown via translatingWriter's tap; on the native port w is not a translatingWriter,
 	// so the type assertion skips naturally (native streams tee their own downstream side inside forward when the two sides can differ:
 	// route model write-back and/or thinking strip; identical sides aren't stored twice).
-	if t, ok := w.(interface{ setDownTap(*flight) }); ok {
-		t.setDownTap(f)
+	if t, ok := w.(interface{ SetDownTap(translate.FlightTap) }); ok {
+		t.SetDownTap(f)
 	}
 	// The search-restore context brought by the Responses translation port: proactive watermark strips count into the flight (shown as [剥N]);
 	// the replay pointer stays on the flight, and the 400-fallback strip learns the conversation watermark from restore timestamps
 	// (see the tool_call_id branch in the forwarding loop).
-	if v, ok := r.Context().Value(ctxKeySearchReplay).(*searchReplayCtx); ok && v != nil {
+	if v, ok := r.Context().Value(translate.CtxKeySearchReplay).(*translate.SearchReplayCtx); ok && v != nil {
 		f.searchReplay = v
-		if v.proactiveCutoff > 0 {
-			f.searchStripped.Store(int32(v.proactiveCutoff))
-			log.Printf("[strip] #%d conversation watermark stripped %d replayed search blocks", f.id, v.proactiveCutoff)
+		if v.ProactiveCutoff > 0 {
+			f.searchStripped.Store(int32(v.ProactiveCutoff))
+			log.Printf("[strip] #%d conversation watermark stripped %d replayed search blocks", f.id, v.ProactiveCutoff)
 		}
 	}
 	// Tag count_tokens probes: a finished stream's raw content is only {"input_tokens":N};
@@ -3818,7 +3783,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// The downstream-side (downstream→proxy) request body of dual-link recording: the translation port brings the Responses original via context
 	// (necessarily different from the translated body, so always stored); native streams defer to a comparison with the first upstream-bound body and are stored only on difference.
 	var downBody []byte
-	if v, ok := r.Context().Value(ctxKeyReqDown).([]byte); ok && len(v) > 0 {
+	if v, ok := r.Context().Value(translate.CtxKeyReqDown).([]byte); ok && len(v) > 0 {
 		f.setReqDown(v)
 	} else {
 		downBody = body
@@ -3840,7 +3805,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if origModel != "" {
 		modelPart = " model=" + origModel
 	}
-	if f.translated == translatedResponsesRaw {
+	if f.translated == translate.TranslatedResponsesRaw {
 		modelPart += " [direct:responses]"
 	} else if f.translated != "" {
 		modelPart += " [translate:" + f.translated + "]"
@@ -3870,7 +3835,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// Implicit-upgrade streams (downstream explicitly off → low) get their thinking value overwritten to [off->low] (extractThinkMode
 	// sees the upgraded low, which can't express the quiet "downstream off, upstream on" upgrade). History-fallback thinking-on
 	// (sent at the downstream's requested effort) is not overwritten: showing the requested effort is truthful (the downstream wanted thinking).
-	if n2lMode == n2lStealth {
+	if n2lMode == translate.N2LStealth {
 		f.think = "off->low"
 	}
 
@@ -3923,7 +3888,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			if config.IsReservedRoutePattern(c.Routes[i].Pattern) {
 				continue
 			}
-			if matchModel(c.Routes[i].Pattern, origModel) {
+			if config.MatchModel(c.Routes[i].Pattern, origModel) {
 				rr := &c.Routes[i]
 				// The cache anchor key is recorded once on the routing hit (the passthrough branch passes through here too, naturally covered):
 				// only same session + same route form one cache lineage, so utility hops (title generation etc.) can't steal the main conversation's anchor.
@@ -4079,12 +4044,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		// The search-envelope ownership triple is injected with the route's final values (only the Responses translation port's
 		// translatingWriter has this method; the Anthropic port's type assertion fails and skips naturally). The key uses the token actually in effect:
 		// when the route key is empty, the client's Authorization is what gets passed through — same semantics as the replay side's effectiveKey.
-		if t, ok := w.(interface{ setSearchTriple(string, string, string) }); ok {
+		if t, ok := w.(interface{ SetSearchTriple(string, string, string) }); ok {
 			effKey := authToken
 			if effKey == "" {
 				effKey = r.Header.Get("Authorization")
 			}
-			t.setSearchTriple(upstream, effKey, m)
+			t.SetSearchTriple(upstream, effKey, m)
 		}
 	}
 
@@ -4101,7 +4066,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if effModel == "" {
 			effModel = origModel
 		}
-		if nb, upgraded, abandoned, bumped := maybeUpgradeOffToLow(body, effModel, clsLow); upgraded {
+		if nb, upgraded, abandoned, bumped := translate.MaybeUpgradeOffToLow(body, effModel, clsLow); upgraded {
 			if clsLow && !clsRewrote {
 				// The off phase passed this already-off request through untouched: the upgrade here is the one real rewrite, so it counts here.
 				stats.classifierRewrites.Add(1)
@@ -4119,7 +4084,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[off->low] #%d explicit thinking-off quietly upgraded to low thinking (body %d->%d bytes); thinking blocks stripped on return", f.id, len(body), len(nb))
 			}
 			body = nb
-			n2lMode = n2lStealth // Reuses the one-shot 400 fallback below (retreat to thinking-off if the upstream rejects thinking)
+			n2lMode = translate.N2LStealth // Reuses the one-shot 400 fallback below (retreat to thinking-off if the upstream rejects thinking)
 			f.think = "off->low"
 			f.stripThinking.Store(true)
 		} else if abandoned {
@@ -4285,19 +4250,19 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			// No backoff budget is burned (attempt-- cancels the loop's increment, so it doesn't count as a retry and works even with MaxRetries=0),
 			// and this 400 must not be passed to the client.
 			if !searchStripped && bytes.Contains(head, []byte("tool_call_id")) {
-				if nb, n, ok := stripSearchBlocksInBody(body); ok {
+				if nb, n, ok := translate.StripSearchBlocksInBody(body); ok {
 					f.searchStripped.Add(int32(n))
 					// Learn the conversation watermark: take the oldest seal-in timestamp among the envelopes restored this round — the registry
 					// evicts by age, so if the oldest was rejected, everything older is dead too; strip by default from now on, no more 400s.
 					water := ""
-					if f.searchReplay != nil && len(f.searchReplay.restored) > 0 {
-						oldest := f.searchReplay.restored[0]
-						for _, ts := range f.searchReplay.restored[1:] {
+					if f.searchReplay != nil && len(f.searchReplay.Restored) > 0 {
+						oldest := f.searchReplay.Restored[0]
+						for _, ts := range f.searchReplay.Restored[1:] {
 							if ts.Before(oldest) {
 								oldest = ts
 							}
 						}
-						learnSearchCutoff(f.searchReplay.convID, oldest)
+						translate.LearnSearchCutoff(f.searchReplay.ConvID, oldest)
 						water = fmt.Sprintf(", conversation watermark learned as %s", oldest.Format("01-02 15:04:05"))
 					}
 					log.Printf("[fallback] #%d upstream rejected the replayed search id (HTTP %d); stripped %d search blocks and retried%s", f.id, resp.StatusCode, n, water)
@@ -4316,9 +4281,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			// most accepts it off), so it's semantically lossless; no backoff budget burned (attempt--, same as the search-strip fallback).
 			// After the fallback the upstream receives thinking-off, so the response carries no thinking blocks and response-side stripping has nothing to do;
 			// the badge falls back to truthful display as well.
-			if n2lMode != n2lNone && bytes.Contains(head, []byte("thinking")) {
+			if n2lMode != translate.N2LNone && bytes.Contains(head, []byte("thinking")) {
 				if nb, ok := disableThinkingInBody(body); ok {
-					if n2lMode == n2lTryOn {
+					if n2lMode == translate.N2LTryOn {
 						log.Printf("[fallback] #%d upstream rejected thinking over a no-thinking-block history (HTTP %d); reverted to thinking-off and retried", f.id, resp.StatusCode)
 					} else {
 						log.Printf("[fallback] #%d upstream rejected the low-thinking upgrade (HTTP %d); reverted to thinking-off and retried", f.id, resp.StatusCode)
@@ -4331,7 +4296,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					if nb2, ok2 := jsonutil.SetTopLevelJSONValue(body, "reasoning_effort", []byte(`"none"`)); ok2 {
 						body = nb2
 					}
-					n2lMode = n2lNone
+					n2lMode = translate.N2LNone
 					f.think = extractThinkMode(body)
 					f.stripThinking.Store(false) // The retried response is genuinely thinking-off; there is nothing left to strip
 					attempt--
@@ -4502,7 +4467,7 @@ func main() {
 	go runServer(c)
 	// Optional: the OpenAI Responses API listener (translates into Anthropic and feeds the main pipeline), independent of the main port.
 	// On config reload/switch, reconcileResponsesServer starts/stops it per the new config — no process restart needed.
-	reconcileResponsesServer(c.ResponsesListen)
+	translate.ReconcileResponsesServer(c.ResponsesListen, handler)
 	// Loopback-hijack watchdog (read-only): system proxy on + NO_PROXY missing -> red tray light + console banner,
 	// so a silently-vanished codex NO_PROXY fix is noticed before Codex 503s, not after.
 	go platform.WatchProxyHijack(func() string {

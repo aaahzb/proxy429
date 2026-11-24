@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"proxy429/internal/config"
 	"proxy429/internal/jsonutil"
+	"proxy429/internal/translate"
 	"reflect"
 	"strings"
 	"sync"
@@ -1638,12 +1639,12 @@ func TestParseConfigPatternArray(t *testing.T) {
 			t.Fatalf("parseConfig: %v", err)
 		}
 		for _, model := range []string{"claude-fable-5", "claude-opus-4-8"} {
-			rr := matchRouteRule(c, model)
+			rr := config.MatchRouteRule(c, model)
 			if rr == nil || rr.URL != "http://kimi" {
-				t.Errorf("matchRouteRule(%q) = %+v, want http://kimi route", model, rr)
+				t.Errorf("config.MatchRouteRule(%q) = %+v, want http://kimi route", model, rr)
 			}
 		}
-		if rr := matchRouteRule(c, "gpt-5"); rr != nil {
+		if rr := config.MatchRouteRule(c, "gpt-5"); rr != nil {
 			t.Errorf("unrelated model unexpectedly matched: %+v", rr)
 		}
 	})
@@ -1700,10 +1701,10 @@ func TestParseConfigPatternArray(t *testing.T) {
 		if len(c.Routes) != 2 {
 			t.Fatalf("want 2 copies, got %d", len(c.Routes))
 		}
-		if rr := matchRouteRule(c, "Fallback"); rr != nil {
+		if rr := config.MatchRouteRule(c, "Fallback"); rr != nil {
 			t.Errorf("reserved copy should be skipped, got %+v", rr)
 		}
-		if rr := matchRouteRule(c, "claude-opus-4"); rr == nil || rr.URL != "http://kimi" {
+		if rr := config.MatchRouteRule(c, "claude-opus-4"); rr == nil || rr.URL != "http://kimi" {
 			t.Errorf("sibling copy should still match, got %+v", rr)
 		}
 	})
@@ -1774,33 +1775,6 @@ func TestLoadConfigEnumValidation(t *testing.T) {
 	for _, body := range bad {
 		if _, _, err := config.LoadConfig(writeCfg(t, body)); err == nil {
 			t.Errorf("应报错拒载: %s", body)
-		}
-	}
-}
-
-// TestMatchModel verifies model-name * wildcard matching (leading/trailing/middle *, multiple *, exact).
-func TestMatchModel(t *testing.T) {
-	cases := []struct {
-		pattern, name string
-		want          bool
-	}{
-		{"claude-opus*", "claude-opus-4-8", true},
-		{"claude-opus*", "claude-opus", true},
-		{"claude-opus*", "claude-sonnet-5", false},
-		{"*opus", "claude-opus", true},
-		{"*opus", "claude-sonnet", false},
-		{"claude-*", "claude-opus", true},
-		{"claude-*", "glm-5.2", false},
-		{"a*b*c", "axxxbyyyc", true},
-		{"a*b*c", "abc", true},
-		{"a*b*c", "ac", false}, // The middle segment b must appear
-		{"*", "anything", true},
-		{"exact", "exact", true},
-		{"exact", "exact2", false},
-	}
-	for _, tc := range cases {
-		if got := matchModel(tc.pattern, tc.name); got != tc.want {
-			t.Errorf("matchModel(%q, %q) = %v, want %v", tc.pattern, tc.name, got, tc.want)
 		}
 	}
 }
@@ -3496,7 +3470,7 @@ func TestWriteSSEErrorGaveUp(t *testing.T) {
 		t.Errorf("Anthropic 兜底事件形态不对: %q", s)
 	}
 
-	f2 := &flight{translated: translatedResponsesRaw}
+	f2 := &flight{translated: translate.TranslatedResponsesRaw}
 	rec2 := httptest.NewRecorder()
 	writeSSEError(rec2, nil, "x", f2)
 	if !f2.gaveUp {

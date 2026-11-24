@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/translate"
 	"strings"
 	"testing"
 )
@@ -40,17 +41,17 @@ func TestMatchPassthroughResponsesRoute(t *testing.T) {
 		{Pattern: "k3*", URL: "https://a.example.com"},                   // No url_response_api, no passthrough
 		{Pattern: "k3-256k", URL: "https://b.example.com", URLResponseAPI: "https://b.example.com/coding"},
 	}}
-	if got := matchPassthroughResponsesRoute(c, "fast_route"); got != nil {
+	if got := translate.MatchPassthroughResponsesRoute(c, "fast_route"); got != nil {
 		t.Errorf("fast_route 保留名不应命中透传, got %+v", got)
 	}
-	if got := matchPassthroughResponsesRoute(c, "k3-other"); got != nil {
+	if got := translate.MatchPassthroughResponsesRoute(c, "k3-other"); got != nil {
 		t.Errorf("命中路由无 url_response_api 不应透传, got %+v", got)
 	}
-	got := matchPassthroughResponsesRoute(c, "k3-256k")
+	got := translate.MatchPassthroughResponsesRoute(c, "k3-256k")
 	if got == nil || got.URLResponseAPI != "https://b.example.com/coding" {
 		t.Errorf("k3-256k 应命中第二条路由的 url_response_api, got %+v", got)
 	}
-	if got := matchPassthroughResponsesRoute(c, ""); got != nil {
+	if got := translate.MatchPassthroughResponsesRoute(c, ""); got != nil {
 		t.Errorf("空 model 不应命中, got %+v", got)
 	}
 	// Ordering: a wide wildcard listed first with the passthrough field intercepts a narrower wildcard (same rule as the handler's route loop).
@@ -58,7 +59,7 @@ func TestMatchPassthroughResponsesRoute(t *testing.T) {
 		{Pattern: "k3*", URLResponseAPI: "https://wide.example.com"},
 		{Pattern: "k3-256k", URLResponseAPI: "https://narrow.example.com"},
 	}}
-	if got := matchPassthroughResponsesRoute(c2, "k3-256k"); got == nil || got.URLResponseAPI != "https://wide.example.com" {
+	if got := translate.MatchPassthroughResponsesRoute(c2, "k3-256k"); got == nil || got.URLResponseAPI != "https://wide.example.com" {
 		t.Errorf("有序首个命中应截胡, got %+v", got)
 	}
 }
@@ -140,12 +141,12 @@ func TestParseNonStreamUsageResponses(t *testing.T) {
 // translated/Anthropic streams keep the Anthropic ping event.
 func TestWriteSSEPingRawShape(t *testing.T) {
 	rec := httptest.NewRecorder()
-	writeSSEPing(rec, nil, &flight{translated: translatedResponsesRaw})
+	writeSSEPing(rec, nil, &flight{translated: translate.TranslatedResponsesRaw})
 	if rec.Body.String() != ": ping\n\n" {
 		t.Errorf("透传流 ping=%q, want SSE 注释行", rec.Body.String())
 	}
 	rec2 := httptest.NewRecorder()
-	writeSSEPing(rec2, nil, &flight{translated: translatedResponses})
+	writeSSEPing(rec2, nil, &flight{translated: translate.TranslatedResponses})
 	if !strings.Contains(rec2.Body.String(), `"type":"ping"`) {
 		t.Errorf("翻译流 ping=%q, want Anthropic ping 事件", rec2.Body.String())
 	}
@@ -154,7 +155,7 @@ func TestWriteSSEPingRawShape(t *testing.T) {
 // TestWriteSSEErrorRawShape verifies the SSE error protocol split at retry exhaustion: a passthrough stream gets a response.failed event.
 func TestWriteSSEErrorRawShape(t *testing.T) {
 	rec := httptest.NewRecorder()
-	writeSSEError(rec, nil, "upstream status 429", &flight{translated: translatedResponsesRaw})
+	writeSSEError(rec, nil, "upstream status 429", &flight{translated: translate.TranslatedResponsesRaw})
 	s := rec.Body.String()
 	if !strings.HasPrefix(s, "event: response.failed\n") || !strings.Contains(s, `"type":"response.failed"`) || !strings.Contains(s, "upstream status 429") {
 		t.Errorf("透传流 error=%q, want response.failed 事件含消息", s)
@@ -223,7 +224,7 @@ func TestResponsesRawPassthrough(t *testing.T) {
 	})
 	defer config.Store(&config.Config{})
 
-	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
+	proxy := httptest.NewServer(http.HandlerFunc(translate.ResponsesHandler(handler)))
 	defer proxy.Close()
 
 	reqBody := `{"model":"k3-coding","instructions":"Be helpful.","input":"hi","stream":true}`
@@ -284,8 +285,8 @@ func TestResponsesRawPassthrough(t *testing.T) {
 	}
 	ff := finished[len(finished)-1]
 	finishedMu.Unlock()
-	if ff.translated != translatedResponsesRaw {
-		t.Errorf("translated=%q, want %q（网页 API 列显示 [Response]）", ff.translated, translatedResponsesRaw)
+	if ff.translated != translate.TranslatedResponsesRaw {
+		t.Errorf("translated=%q, want %q（网页 API 列显示 [Response]）", ff.translated, translate.TranslatedResponsesRaw)
 	}
 	if ff.inTokens != 10 || ff.cacheRead != 100 || ff.outTokens != 7 {
 		t.Errorf("完成流 token in=%d cr=%d out=%d, want 10/100/7", ff.inTokens, ff.cacheRead, ff.outTokens)
@@ -317,7 +318,7 @@ func TestResponsesRawPassthroughNonStream(t *testing.T) {
 	})
 	defer config.Store(&config.Config{})
 
-	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
+	proxy := httptest.NewServer(http.HandlerFunc(translate.ResponsesHandler(handler)))
 	defer proxy.Close()
 
 	resp, err := http.Post(proxy.URL+"/v1/responses", "application/json",
@@ -355,7 +356,7 @@ func TestResponsesRawRouteLost(t *testing.T) {
 	defer config.Store(&config.Config{})
 
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r2 := r.WithContext(context.WithValue(r.Context(), ctxKeyTranslated, translatedResponsesRaw))
+		r2 := r.WithContext(context.WithValue(r.Context(), translate.CtxKeyTranslated, translate.TranslatedResponsesRaw))
 		handler(w, r2)
 	}))
 	defer proxy.Close()

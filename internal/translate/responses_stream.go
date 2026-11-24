@@ -1,4 +1,4 @@
-package main
+package translate
 
 // responses_stream.go — real-time Anthropic Messages SSE → OpenAI Responses SSE translation.
 // Mirrors cc-switch streaming_codex_anthropic.rs's state machine and codex_responses_sse.rs's event shapes.
@@ -103,7 +103,7 @@ type anthToRespStream struct {
 	items           []map[string]interface{} // Completed output items (in completion order)
 	usage           map[string]interface{}
 	stopReason      string
-	triple          *searchTriple          // Search-envelope attribution triple (injected by translatingWriter after routing is settled; nil = no envelopes)
+	triple          *SearchTriple          // Search-envelope attribution triple (injected by translatingWriter after routing is settled; nil = no envelopes)
 	lastSearchUse   map[string]interface{} // The most recent server_tool_use block (paired into an envelope when the result block arrives)
 	stripThinking   bool                   // convertOff2Low: strip thinking/redacted_thinking blocks (the downstream sees a thinking-off response)
 }
@@ -547,7 +547,7 @@ type translatingWriter struct {
 	clientStream  bool
 	model         string
 	reg           *toolRegistry
-	triple        *searchTriple // Search-envelope attribution triple (injected by the main handler via setSearchTriple after routing is settled)
+	triple        *SearchTriple // Search-envelope attribution triple (injected by the main handler via SetSearchTriple after routing is settled)
 	stripThinking bool          // convertOff2Low upgrade stream: non-streaming wholesale conversion (finishBuffered) strips thinking blocks; streaming is handled by conv.stripThinking
 
 	header http.Header
@@ -560,7 +560,14 @@ type translatingWriter struct {
 
 	headWritten bool // Whether the streaming client's response headers have been sent
 
-	downFlight *flight // flight reference for dual-link recording (injected by the main handler via setDownTap), for back-flushing the downstream-side archive after archiving
+	downFlight FlightTap // downstream-side recording hooks (injected by the main handler via SetDownTap), for back-flushing the downstream-side archive after archiving
+}
+
+// FlightTap is the downstream-side recording surface the main proxy injects into the translating writer:
+// the tee for client-bound bytes plus the post-archive back-fill of the downstream-side content.
+type FlightTap interface {
+	AppendContentDown(data []byte)
+	RefreshArchivedDown()
 }
 
 const (
@@ -616,20 +623,20 @@ func (t tapResponseWriter) Flush() {
 	}
 }
 
-// setDownTap is injected by the main handler after flight creation as the downstream-side record point: with dst swapped for the tap wrapper,
+// SetDownTap is injected by the main handler after flight creation as the downstream-side record point: with dst swapped for the tap wrapper,
 // all dst.Write paths — emit/finish/finishBuffered/error writes — are naturally teed
-// (same type-assertion injection as setSearchTriple; the Anthropic port's writer lacks this method and is naturally skipped).
-func (tw *translatingWriter) setDownTap(f *flight) {
-	tw.dst = tapResponseWriter{ResponseWriter: tw.dst, tap: f.appendContentDown}
+// (same type-assertion injection as SetSearchTriple; the Anthropic port's writer lacks this method and is naturally skipped).
+func (tw *translatingWriter) SetDownTap(f FlightTap) {
+	tw.dst = tapResponseWriter{ResponseWriter: tw.dst, tap: f.AppendContentDown}
 	tw.downFlight = f // For the handler's post-archive tail back-fill (flushing finish's downstream-side bytes into the archive)
 }
 
-// setSearchTriple is injected by the main handler after routing is settled with the search envelope's attribution triple (Responses
+// SetSearchTriple is injected by the main handler after routing is settled with the search envelope's attribution triple (Responses
 // translation port only; the Anthropic port's ResponseWriter lacks this method, so the handler's type assertion naturally skips).
 // The api parameter is the actually-effective auth token (same semantics as effectiveKey); only its hash and
 // derived mask are stored, never the plaintext.
-func (tw *translatingWriter) setSearchTriple(url, api, model string) {
-	tw.triple = newSearchTriple(url, model, api)
+func (tw *translatingWriter) SetSearchTriple(url, api, model string) {
+	tw.triple = NewSearchTriple(url, model, api)
 	tw.conv.triple = tw.triple
 }
 

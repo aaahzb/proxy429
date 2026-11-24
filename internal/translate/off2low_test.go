@@ -1,7 +1,7 @@
-package main
+package translate
 
-// off2low_test.go: unit tests for the convertOff2Low native-port half — maybeUpgradeOffToLow (detection, shapes,
-// guards, key-order preservation) and thinkingStripper (SSE drop/renumber, JSON filtering, byte-exact fallbacks).
+// off2low_test.go: unit tests for the convertOff2Low native-port half — MaybeUpgradeOffToLow (detection, shapes,
+// guards, key-order preservation) and ThinkingStripper (SSE drop/renumber, JSON filtering, byte-exact fallbacks).
 
 import (
 	"encoding/json"
@@ -30,7 +30,7 @@ func TestLowThinkingBudget(t *testing.T) {
 // max_tokens/2), adaptive models get adaptive+output_config.effort:"low".
 func TestUpgradeOffToLowShapes(t *testing.T) {
 	// Budget shape.
-	nb, up, ab, _ := maybeUpgradeOffToLow([]byte(`{"model":"m","max_tokens":8192,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", false)
+	nb, up, ab, _ := MaybeUpgradeOffToLow([]byte(`{"model":"m","max_tokens":8192,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", false)
 	if !up || ab {
 		t.Fatalf("budget 模型应升级: up=%v ab=%v", up, ab)
 	}
@@ -50,7 +50,7 @@ func TestUpgradeOffToLowShapes(t *testing.T) {
 	}
 
 	// Budget cap: 3000/2=1500.
-	nb, up, _, _ = maybeUpgradeOffToLow([]byte(`{"max_tokens":3000,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", false)
+	nb, up, _, _ = MaybeUpgradeOffToLow([]byte(`{"max_tokens":3000,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", false)
 	if !up {
 		t.Fatal("应升级")
 	}
@@ -60,7 +60,7 @@ func TestUpgradeOffToLowShapes(t *testing.T) {
 	}
 
 	// Adaptive shape: output_config is replaced in place with effort:"low".
-	nb, up, _, _ = maybeUpgradeOffToLow([]byte(`{"max_tokens":8192,"thinking":{"type":"disabled"},"output_config":{"effort":"high"}}`), "claude-sonnet-5", false)
+	nb, up, _, _ = MaybeUpgradeOffToLow([]byte(`{"max_tokens":8192,"thinking":{"type":"disabled"},"output_config":{"effort":"high"}}`), "claude-sonnet-5", false)
 	if !up {
 		t.Fatal("adaptive 模型应升级")
 	}
@@ -92,7 +92,7 @@ func TestUpgradeOffToLowDetection(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			nb, up, ab, _ := maybeUpgradeOffToLow([]byte(tc.body), "deepseek-v4-flash", false)
+			nb, up, ab, _ := MaybeUpgradeOffToLow([]byte(tc.body), "deepseek-v4-flash", false)
 			if up != tc.wantUp || ab {
 				t.Errorf("up=%v ab=%v, want up=%v ab=false", up, ab, tc.wantUp)
 			}
@@ -107,7 +107,7 @@ func TestUpgradeOffToLowDetection(t *testing.T) {
 // upgrade (max_tokens too small), body byte-untouched.
 func TestUpgradeOffToLowGuard(t *testing.T) {
 	body := `{"max_tokens":1500,"thinking":{"type":"disabled"}}`
-	nb, up, ab, _ := maybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash", false)
+	nb, up, ab, _ := MaybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash", false)
 	if up || !ab || string(nb) != body {
 		t.Errorf("up=%v ab=%v body=%s; want up=false ab=true body 原样", up, ab, nb)
 	}
@@ -129,7 +129,7 @@ func TestUpgradeOffToLowFloorBump(t *testing.T) {
 	}
 
 	// Budget class: 64 -> 1088, budget exactly 1024.
-	nb, up, ab, bp := maybeUpgradeOffToLow([]byte(`{"model":"m","max_tokens":64,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
+	nb, up, ab, bp := MaybeUpgradeOffToLow([]byte(`{"model":"m","max_tokens":64,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
 	if !up || ab || !bp {
 		t.Fatalf("应升级并托底: up=%v ab=%v bp=%v", up, ab, bp)
 	}
@@ -142,7 +142,7 @@ func TestUpgradeOffToLowFloorBump(t *testing.T) {
 	}
 
 	// 1500 -> 2524, budget still exactly 1024 (not the half-cap 1262).
-	nb, _, _, bp = maybeUpgradeOffToLow([]byte(`{"max_tokens":1500,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
+	nb, _, _, bp = MaybeUpgradeOffToLow([]byte(`{"max_tokens":1500,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
 	p = mustObj(nb)
 	if !bp || p["max_tokens"].(float64) != 2524 {
 		t.Errorf("max_tokens=%v bp=%v, want 2524/true", p["max_tokens"], bp)
@@ -152,7 +152,7 @@ func TestUpgradeOffToLowFloorBump(t *testing.T) {
 	}
 
 	// 2048 fits the floor under the half rule: upgrade without bumping.
-	nb, up, ab, bp = maybeUpgradeOffToLow([]byte(`{"max_tokens":2048,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
+	nb, up, ab, bp = MaybeUpgradeOffToLow([]byte(`{"max_tokens":2048,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
 	if !up || ab || bp {
 		t.Fatalf("2048 恰好踩线应直接升级不托底: up=%v ab=%v bp=%v", up, ab, bp)
 	}
@@ -165,7 +165,7 @@ func TestUpgradeOffToLowFloorBump(t *testing.T) {
 	}
 
 	// No max_tokens: no ceiling, no bump, no field invented.
-	nb, up, _, bp = maybeUpgradeOffToLow([]byte(`{"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
+	nb, up, _, bp = MaybeUpgradeOffToLow([]byte(`{"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
 	if !up || bp {
 		t.Fatalf("无 max_tokens 应升级不托底: up=%v bp=%v", up, bp)
 	}
@@ -175,7 +175,7 @@ func TestUpgradeOffToLowFloorBump(t *testing.T) {
 	}
 
 	// Adaptive class: same +1024 raise, shape untouched (adaptive + effort low, no budget).
-	nb, up, _, bp = maybeUpgradeOffToLow([]byte(`{"max_tokens":64,"thinking":{"type":"disabled"}}`), "claude-sonnet-5", true)
+	nb, up, _, bp = MaybeUpgradeOffToLow([]byte(`{"max_tokens":64,"thinking":{"type":"disabled"}}`), "claude-sonnet-5", true)
 	if !up || !bp {
 		t.Fatalf("adaptive 应升级并托底: up=%v bp=%v", up, bp)
 	}
@@ -191,20 +191,20 @@ func TestUpgradeOffToLowFloorBump(t *testing.T) {
 	}
 
 	// Adaptive with a roomy max_tokens: untouched.
-	_, up, _, bp = maybeUpgradeOffToLow([]byte(`{"max_tokens":8192,"thinking":{"type":"disabled"}}`), "claude-sonnet-5", true)
+	_, up, _, bp = MaybeUpgradeOffToLow([]byte(`{"max_tokens":8192,"thinking":{"type":"disabled"}}`), "claude-sonnet-5", true)
 	if !up || bp {
 		t.Errorf("adaptive 8192 不应托底: up=%v bp=%v", up, bp)
 	}
 
 	// The bump is a positional edit: max_tokens keeps its slot, reasoning_effort still appended at the end.
-	nb, _, _, _ = maybeUpgradeOffToLow([]byte(`{"model":"m","max_tokens":64,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
+	nb, _, _, _ = MaybeUpgradeOffToLow([]byte(`{"model":"m","max_tokens":64,"thinking":{"type":"disabled"}}`), "deepseek-v4-flash", true)
 	if got, want := strings.Join(topLevelKeys(t, nb), ","), "model,max_tokens,thinking,reasoning_effort"; got != want {
 		t.Errorf("key 序 %q, want %q", got, want)
 	}
 
 	// floorBump off (convertOff2Low path): the abandon behavior is unchanged.
 	body := `{"max_tokens":64,"thinking":{"type":"disabled"}}`
-	nb, up, ab, _ = maybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash", false)
+	nb, up, ab, _ = MaybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash", false)
 	if up || !ab || string(nb) != body {
 		t.Errorf("不开托底应维持放弃: up=%v ab=%v body=%s", up, ab, nb)
 	}
@@ -213,7 +213,7 @@ func TestUpgradeOffToLowFloorBump(t *testing.T) {
 // TestUpgradeOffToLowKeyOrder: positional edits — original key order kept, deletions clean, appended keys land at the end.
 func TestUpgradeOffToLowKeyOrder(t *testing.T) {
 	body := `{"model":"m","max_tokens":8192,"thinking":{"type":"disabled"},"temperature":0.7,"top_p":0.9,"reasoning":{"effort":"none"}}`
-	nb, up, _, _ := maybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash", false)
+	nb, up, _, _ := MaybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash", false)
 	if !up {
 		t.Fatal("应升级")
 	}
@@ -232,7 +232,7 @@ func TestUpgradeOffToLowKeyOrder(t *testing.T) {
 // TestUpgradeOffToLowEffortOnlyOff: detection via reasoning_effort with no thinking field — thinking gets appended at the end.
 func TestUpgradeOffToLowEffortOnlyOff(t *testing.T) {
 	body := `{"model":"gpt-5-codex","max_tokens":8192,"reasoning_effort":"none"}`
-	nb, up, _, _ := maybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash", false)
+	nb, up, _, _ := MaybeUpgradeOffToLow([]byte(body), "deepseek-v4-flash", false)
 	if !up {
 		t.Fatal("应升级")
 	}
@@ -269,8 +269,8 @@ const stripSSEInput = "event: message_start\n" +
 // TestStripperSSEDropAndRenumber: the thinking block (start/deltas/stop) vanishes wholesale, the text block is
 // renumbered 1->0 (re-marshaled with alphabetical keys), and all other lines pass through byte-exact.
 func TestStripperSSEDropAndRenumber(t *testing.T) {
-	s := newThinkingStripper("text/event-stream; charset=utf-8")
-	out := string(s.feed([]byte(stripSSEInput))) + string(s.flush())
+	s := NewThinkingStripper("text/event-stream; charset=utf-8")
+	out := string(s.Feed([]byte(stripSSEInput))) + string(s.Flush())
 	for _, gone := range []string{"thinking_delta", "signature_delta", `"thinking":"hmm"`, `"content_block\":{\"type\":\"thinking\"`} {
 		if strings.Contains(out, gone) {
 			t.Errorf("应剥离 %q: %s", gone, out)
@@ -288,18 +288,18 @@ func TestStripperSSEDropAndRenumber(t *testing.T) {
 			t.Errorf("应原样保留 %q: %s", keep, out)
 		}
 	}
-	if s.stripped != 1 {
-		t.Errorf("stripped=%d, want 1", s.stripped)
+	if s.Stripped != 1 {
+		t.Errorf("stripped=%d, want 1", s.Stripped)
 	}
 }
 
 // TestStripperSSEChunkSplit: a data: line split across two chunks is processed exactly as if fed in one piece.
 func TestStripperSSEChunkSplit(t *testing.T) {
-	one := newThinkingStripper("text/event-stream")
-	want := string(one.feed([]byte(stripSSEInput))) + string(one.flush())
-	two := newThinkingStripper("text/event-stream")
+	one := NewThinkingStripper("text/event-stream")
+	want := string(one.Feed([]byte(stripSSEInput))) + string(one.Flush())
+	two := NewThinkingStripper("text/event-stream")
 	cut := 117 // deliberately mid-line
-	got := string(two.feed([]byte(stripSSEInput[:cut]))) + string(two.feed([]byte(stripSSEInput[cut:]))) + string(two.flush())
+	got := string(two.Feed([]byte(stripSSEInput[:cut]))) + string(two.Feed([]byte(stripSSEInput[cut:]))) + string(two.Flush())
 	if got != want {
 		t.Errorf("分块喂入结果应与一次性一致:\n%q\n---\n%q", got, want)
 	}
@@ -312,13 +312,13 @@ func TestStripperSSEByteExactNoThinking(t *testing.T) {
 		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n" +
 		"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
 		"data: {\"type\":\"message_stop\"}\n\n"
-	s := newThinkingStripper("text/event-stream")
-	out := string(s.feed([]byte(in))) + string(s.flush())
+	s := NewThinkingStripper("text/event-stream")
+	out := string(s.Feed([]byte(in))) + string(s.Flush())
 	if out != in {
 		t.Errorf("无思考块应字节不动:\n%q\n---\n%q", out, in)
 	}
-	if s.stripped != 0 {
-		t.Errorf("stripped=%d, want 0", s.stripped)
+	if s.Stripped != 0 {
+		t.Errorf("stripped=%d, want 0", s.Stripped)
 	}
 }
 
@@ -327,8 +327,8 @@ func TestStripperSSERedacted(t *testing.T) {
 	in := "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"xyz\"}}\n\n" +
 		"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
 		"data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Read\"}}\n\n"
-	s := newThinkingStripper("text/event-stream")
-	out := string(s.feed([]byte(in)))
+	s := NewThinkingStripper("text/event-stream")
+	out := string(s.Feed([]byte(in)))
 	if strings.Contains(out, "redacted_thinking") || strings.Contains(out, "xyz") {
 		t.Errorf("redacted 块应剥离: %s", out)
 	}
@@ -339,12 +339,12 @@ func TestStripperSSERedacted(t *testing.T) {
 
 // TestStripperJSON: the buffered JSON document comes out at flush with thinking blocks filtered and usage kept.
 func TestStripperJSON(t *testing.T) {
-	s := newThinkingStripper("application/json")
+	s := NewThinkingStripper("application/json")
 	body := `{"id":"m1","content":[{"type":"thinking","thinking":"hmm","signature":"s"},{"type":"text","text":"hi"}],"usage":{"output_tokens":5}}`
-	if out := s.feed([]byte(body)); out != nil {
+	if out := s.Feed([]byte(body)); out != nil {
 		t.Errorf("JSON 模式应整段缓冲, got %q", out)
 	}
-	out := s.flush()
+	out := s.Flush()
 	var p map[string]interface{}
 	if err := json.Unmarshal(out, &p); err != nil {
 		t.Fatalf("剥离后不是合法 JSON: %v (%s)", err, out)
@@ -356,22 +356,22 @@ func TestStripperJSON(t *testing.T) {
 	if p["usage"].(map[string]interface{})["output_tokens"].(float64) != 5 {
 		t.Errorf("usage 应保留: %v", p["usage"])
 	}
-	if s.stripped != 1 {
-		t.Errorf("stripped=%d, want 1", s.stripped)
+	if s.Stripped != 1 {
+		t.Errorf("stripped=%d, want 1", s.Stripped)
 	}
 }
 
 // TestStripperJSONPassthrough: malformed JSON and thinking-free documents both come back byte-identical.
 func TestStripperJSONPassthrough(t *testing.T) {
-	s := newThinkingStripper("application/json")
-	s.feed([]byte("not json"))
-	if out := string(s.flush()); out != "not json" {
+	s := NewThinkingStripper("application/json")
+	s.Feed([]byte("not json"))
+	if out := string(s.Flush()); out != "not json" {
 		t.Errorf("坏 JSON 应原样返回: %q", out)
 	}
-	s2 := newThinkingStripper("application/json")
+	s2 := NewThinkingStripper("application/json")
 	body := `{"content":[{"type":"text","text":"hi"}]}`
-	s2.feed([]byte(body))
-	if out := string(s2.flush()); out != body {
+	s2.Feed([]byte(body))
+	if out := string(s2.Flush()); out != body {
 		t.Errorf("无思考块应原样返回: %q", out)
 	}
 }

@@ -32,6 +32,7 @@ Every Claude Code request goes to the local proxy (`127.0.0.1:8080`) first, and 
 | `internal/config/` | Configuration types, loading, path resolution, validation, lazyApply expansion, and active-config state |
 | `internal/config/config.example.json` | The embedded config template used to generate `config.json` on first start |
 | `internal/jsonutil/` | Byte-preserving top-level JSON field locating and editing shared by protocol translation and the main proxy |
+| `internal/translate/` | Responses protocol translation (request/stream/tools/search envelopes/off2low), the Responses listener port, and the thinking stripper; the main pipeline handler is injected as a parameter |
 | `go.mod` | Go module definition |
 | `README.md` | Documentation |
 | `test/mock_429.go` | Local mock server for testing (see "Local testing") |

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"proxy429/internal/config"
 	"proxy429/internal/jsonutil"
+	"proxy429/internal/translate"
 	"strings"
 	"sync"
 	"testing"
@@ -335,7 +336,7 @@ func TestLazyApplyResponsesThinkingE2E(t *testing.T) {
 				LazyApply:      tc.lazy,
 			})
 			defer config.Store(&config.Config{})
-			proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
+			proxy := httptest.NewServer(http.HandlerFunc(translate.ResponsesHandler(handler)))
 			defer proxy.Close()
 
 			resp, err := http.Post(proxy.URL+"/v1/responses", "application/json",
@@ -408,7 +409,7 @@ func TestLazyApplyResponsesConvertOff2LowE2E(t *testing.T) {
 				LazyApply:      tc.lazy,
 			})
 			defer config.Store(&config.Config{})
-			proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
+			proxy := httptest.NewServer(http.HandlerFunc(translate.ResponsesHandler(handler)))
 			defer proxy.Close()
 
 			model := "claude-opus-4-8"
@@ -519,7 +520,7 @@ func TestLazyApplyResponsesFallbackThinkingE2E(t *testing.T) {
 				LazyApply:      tc.lazy,
 			})
 			defer config.Store(&config.Config{})
-			proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
+			proxy := httptest.NewServer(http.HandlerFunc(translate.ResponsesHandler(handler)))
 			defer proxy.Close()
 
 			resp, err := http.Post(proxy.URL+"/v1/responses", "application/json",

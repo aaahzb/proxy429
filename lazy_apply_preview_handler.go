@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"proxy429/internal/config"
+	"proxy429/internal/platform"
 )
 
 // LazyApplyPreviewHandler renders the edited config with lazyApply materialized, for the console's
@@ -12,7 +13,7 @@ import (
 // editor's current text, and only the insertion-edited JSON is returned. Localhost only, like every
 // /__* route.
 func LazyApplyPreviewHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}

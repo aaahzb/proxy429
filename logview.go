@@ -1,15 +1,11 @@
 package main
 
 import (
-	"proxy429/internal/config"
-	"proxy429/internal/platform"
-
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,6 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"proxy429/internal/config"
+	"proxy429/internal/platform"
 )
 
 // Web console mount path (same port as the proxy, localhost only).
@@ -45,19 +44,9 @@ const (
 	uiLangPath        = "/__uilang"         // GET the current UI language / POST switches the language (writes program-settings.txt, effective hot)
 )
 
-// isLocalRequest restricts console access to local browsers.
-// Even with the proxy listening on 0.0.0.0 exposed to the LAN, remote requests to /__* get 403, keeping logs/configs from leaking.
-func isLocalRequest(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return false
-	}
-	return host == "127.0.0.1" || host == "::1" || host == "localhost" || strings.HasPrefix(host, "127.")
-}
-
 // logViewerHandler returns the console HTML page (status/logs/config tabs).
 func logViewerHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -81,7 +70,7 @@ func logViewerHandler(w http.ResponseWriter, r *http.Request) {
 // the key is deleted), effective hot — the next page refresh shows the new language. Language is a program-level preference, separate
 // from routing config: it doesn't write config*.json, nor trigger a config reload (program settings and upstream settings are maintained separately).
 func uiLangHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -188,7 +177,7 @@ type logData struct {
 
 // logDataHandler returns the most recent maxLogBuf log lines and the full status (JSON), polled by the page every 500ms.
 func logDataHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -262,7 +251,7 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 
 // configGetHandler returns the config file path and raw content (JSON), for the 「配置」 tab to load into the editor.
 func configGetHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -285,7 +274,7 @@ func configGetHandler(w http.ResponseWriter, r *http.Request) {
 // migration hints, enum values) — writing to disk only on success. A rejected config never reaches the file, so it
 // cannot brick the next startup. reloadConfig applies it after the write.
 func configPostHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -328,7 +317,7 @@ func configPostHandler(w http.ResponseWriter, r *http.Request) {
 
 // reloadHandler only reloads the config (without modifying the file), for the 「仅重载」 button.
 func reloadHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -343,7 +332,7 @@ func reloadHandler(w http.ResponseWriter, r *http.Request) {
 // configsHandler lists all .json files in the current config directory, for the web 「配置」 tab's dropdown switching.
 // Returns the current file name, the directory, and the available file list. Localhost only.
 func configsHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -360,7 +349,7 @@ func configsHandler(w http.ResponseWriter, r *http.Request) {
 // switchHandler switches to the given config file with immediate effect. body: {"name":"work.json"}.
 // name must be a bare file name (no path separators/..), preventing path traversal from switching to files outside the directory. Localhost only.
 func switchHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -440,7 +429,7 @@ var codexDigitsRE = regexp.MustCompile(`^[0-9]{1,7}$`)
 // Localhost only (same rule as the other /__* management endpoints).
 func codexScriptHandler(tpl []byte, anchors [5]string, isSH bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !isLocalRequest(r) {
+		if !platform.IsLocalRequest(r) {
 			http.Error(w, "forbidden (local only)", http.StatusForbidden)
 			return
 		}
@@ -507,7 +496,7 @@ func codexScriptHandler(tpl []byte, anchors [5]string, isSH bool) http.HandlerFu
 // newConfigHandler creates a new config file: writes config.example.json as the blank template under the given name,
 // switching to the new config immediately after creation. Refuses if the file already exists. Localhost only.
 func newConfigHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -548,7 +537,7 @@ func newConfigHandler(w http.ResponseWriter, r *http.Request) {
 // renameConfigHandler renames a config file. If the renamed file is the config currently in use, configFilePath is updated in sync,
 // so subsequent saves/reloads point at the new file. Refuses if the target name already exists. Localhost only.
 func renameConfigHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -604,7 +593,7 @@ func renameConfigHandler(w http.ResponseWriter, r *http.Request) {
 // delConfigHandler deletes a config file. Deleting the config currently in use is refused (switch away first).
 // Localhost only. The frontend double-confirms against accidents.
 func delConfigHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -647,7 +636,7 @@ func delConfigHandler(w http.ResponseWriter, r *http.Request) {
 // resetStatsHandler clears cumulative stats (bytes/tokens/retries/classifierRewrites/latency samples)
 // and the 「最近完成的流」 list. Switching configs no longer clears stats automatically; the 「清空统计」 button does it manually. Localhost only.
 func resetStatsHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -663,7 +652,7 @@ func resetStatsHandler(w http.ResponseWriter, r *http.Request) {
 
 // clearLogsHandler clears the in-memory log buffer (web viewing only; doesn't affect the log_file on-disk file). Localhost only.
 func clearLogsHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -695,7 +684,7 @@ func pickFlightSide(side string, up, down []byte) ([]byte, string) {
 }
 
 func flightHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -773,7 +762,7 @@ func flightHandler(w http.ResponseWriter, r *http.Request) {
 // flightReqHandler returns the given stream's downstream request body verbatim, so the web can show "which request caused this stream".
 // Both in-flight and finished are queried; 404 when the stream doesn't exist or wasn't recorded (search sub-streams, body-read failure). Localhost only.
 func flightReqHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -836,7 +825,7 @@ func fmtObsDur(d time.Duration) string {
 // older rows superseded by a newer same-key row and rows without a session identifier (count_tokens/bare API) show "-";
 // while a same-key in-flight stream is streaming, the display freezes as [m:ss] (the old anchor's age at the in-flight stream's start; the number doesn't change).
 func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -923,7 +912,7 @@ func recentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 
 // finishedCapHandler sets how many finished streams to keep, N (0..200), trimming finished immediately. Localhost only.
 func finishedCapHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -957,7 +946,7 @@ func finishedCapHandler(w http.ResponseWriter, r *http.Request) {
 // (no 256KB cap, for download); switching off immediately drops the full copies of in-flight/archived streams (reqBody cut back to cap),
 // and the web download button disappears accordingly. Localhost only.
 func fullStoreHandler(w http.ResponseWriter, r *http.Request) {
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}

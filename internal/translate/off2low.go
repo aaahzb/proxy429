@@ -1,8 +1,8 @@
-package main
+package translate
 
 // off2low.go: the Anthropic native-port half of convertOff2Low ("all"). An explicit downstream thinking-off is quietly
-// sent upstream as low thinking (maybeUpgradeOffToLow), and the response's thinking blocks are stripped on the way back
-// (thinkingStripper) so the client stays unaware — it asked for thinking off and sees a thinking-off response.
+// sent upstream as low thinking (MaybeUpgradeOffToLow), and the response's thinking blocks are stripped on the way back
+// (ThinkingStripper) so the client stays unaware — it asked for thinking off and sees a thinking-off response.
 // The translation-port half lives in responses.go (responsesToAnthropicTriple + the anthToRespStream/translatingWriter strip wiring).
 
 import (
@@ -16,7 +16,7 @@ import (
 
 // lowBudgetFloor is the Anthropic API's minimum budget_tokens; the budget counts inside max_tokens, so a budget
 // model needs max_tokens > 1024 to think at all. lowThinkingBudget refuses below it; the classifier-low path
-// (floorBump in maybeUpgradeOffToLow) instead raises max_tokens by exactly this much, the client's answer room
+// (floorBump in MaybeUpgradeOffToLow) instead raises max_tokens by exactly this much, the client's answer room
 // riding on top untouched.
 const lowBudgetFloor = 1024
 
@@ -24,9 +24,9 @@ const lowBudgetFloor = 1024
 // ok=false when even the 1024 floor doesn't fit (the caller keeps thinking off — or, on the classifier-low
 // path, raises max_tokens by the floor and upgrades anyway). maxTokens<=0 (field absent or unparseable)
 // means no ceiling. Shared by the translation port (upgradeNoneToLow) and the native port
-// (maybeUpgradeOffToLow) so both ports pick the same shape.
+// (MaybeUpgradeOffToLow) so both ports pick the same shape.
 func lowThinkingBudget(maxTokens int64) (budget int64, ok bool) {
-	b := effortToThinkingBudget("low")
+	b := EffortToThinkingBudget("low")
 	if maxTokens > 0 {
 		if ceiling := maxTokens / 2; b > ceiling {
 			b = ceiling
@@ -38,7 +38,7 @@ func lowThinkingBudget(maxTokens int64) (budget int64, ok bool) {
 	return b, true
 }
 
-// maybeUpgradeOffToLow rewrites an explicit downstream thinking-off into low thinking (native port, convertOff2Low:"all").
+// MaybeUpgradeOffToLow rewrites an explicit downstream thinking-off into low thinking (native port, convertOff2Low:"all").
 // Detection: the thinking value contains "disabled", or thinking is absent and reasoning_effort carries an explicit off
 // word (none/off/disabled). A request carrying no explicit off signal passes through untouched.
 // Shape: adaptive models (usesAdaptiveThinking) get thinking:{"type":"adaptive"}+output_config:{"effort":"low"};
@@ -53,7 +53,7 @@ func lowThinkingBudget(maxTokens int64) (budget int64, ok bool) {
 // (thinking-on forbids sampling knobs, same rule as the translation port). All edits go through
 // jsonutil.SetTopLevelJSONValue: positional, every other field's bytes and order preserved.
 // Returns (newBody, upgraded, abandoned, bumped); newBody is the original body when upgraded=false.
-func maybeUpgradeOffToLow(body []byte, effModel string, floorBump bool) (newBody []byte, upgraded, abandoned, bumped bool) {
+func MaybeUpgradeOffToLow(body []byte, effModel string, floorBump bool) (newBody []byte, upgraded, abandoned, bumped bool) {
 	spans, ok := jsonutil.LocateTopFields(body)
 	if !ok {
 		return body, false, false, false
@@ -123,7 +123,7 @@ func maybeUpgradeOffToLow(body []byte, effModel string, floorBump bool) (newBody
 	return nb, true, false, raisedMaxTokens > 0
 }
 
-// thinkingStripper removes thinking/redacted_thinking blocks from an Anthropic response (the response half of a
+// ThinkingStripper removes thinking/redacted_thinking blocks from an Anthropic response (the response half of a
 // convertOff2Low off->low upgrade: the upstream thought at low; the client asked for thinking off and must see exactly that).
 // Two modes, picked from the response Content-Type:
 //   - SSE (text/event-stream): line-wise. content_block_start/delta/stop events of thinking blocks are dropped (their
@@ -133,28 +133,28 @@ func maybeUpgradeOffToLow(body []byte, effModel string, floorBump bool) (newBody
 //     lines are re-marshaled (their key order inside that one event may change; semantics unchanged).
 //   - JSON (anything else): the whole body is buffered and stripped at flush (content[] filtered); malformed JSON
 //     passes through byte-identical.
-type thinkingStripper struct {
-	sse      bool
+type ThinkingStripper struct {
+	SSE      bool         // text/event-stream body: line-wise stripping (false: whole-document JSON mode)
 	pending  []byte       // SSE: an unterminated partial line carried over to the next chunk
 	dropped  map[int]bool // SSE: indexes of stripped thinking blocks
 	renum    map[int]int  // SSE: kept blocks, old index -> new index
 	nextNew  int          // SSE: next new index to assign
 	buf      []byte       // JSON: whole-body accumulation
-	stripped int          // Thinking blocks removed (for the log line at stream end)
+	Stripped int          // Thinking blocks removed (for the log line at stream end)
 }
 
-// newThinkingStripper picks the mode from the response Content-Type.
-func newThinkingStripper(contentType string) *thinkingStripper {
-	return &thinkingStripper{
-		sse:     strings.Contains(contentType, "text/event-stream"),
+// NewThinkingStripper picks the mode from the response Content-Type.
+func NewThinkingStripper(contentType string) *ThinkingStripper {
+	return &ThinkingStripper{
+		SSE:     strings.Contains(contentType, "text/event-stream"),
 		dropped: map[int]bool{},
 		renum:   map[int]int{},
 	}
 }
 
-// feed consumes one chunk and returns the bytes safe to write downstream right now (nil = fully buffered for now).
-func (s *thinkingStripper) feed(data []byte) []byte {
-	if !s.sse {
+// Feed consumes one chunk and returns the bytes safe to write downstream right now (nil = fully buffered for now).
+func (s *ThinkingStripper) Feed(data []byte) []byte {
+	if !s.SSE {
 		s.buf = append(s.buf, data...)
 		return nil
 	}
@@ -183,7 +183,7 @@ func (s *thinkingStripper) feed(data []byte) []byte {
 }
 
 // feedLine processes one complete SSE line (newline included); nil return = the line is dropped.
-func (s *thinkingStripper) feedLine(line []byte) []byte {
+func (s *ThinkingStripper) feedLine(line []byte) []byte {
 	// Cheap filter: only data: lines of the three content_block_* event types can carry a block index worth rewriting.
 	if !bytes.HasPrefix(line, []byte("data:")) || !bytes.Contains(line, []byte("content_block_")) {
 		return line
@@ -206,7 +206,7 @@ func (s *thinkingStripper) feedLine(line []byte) []byte {
 		idx := *ev.Index
 		if ev.ContentBlock.Type == "thinking" || ev.ContentBlock.Type == "redacted_thinking" {
 			s.dropped[idx] = true
-			s.stripped++
+			s.Stripped++
 			return nil // The block's start vanishes; its delta/stop lines drop on the dropped mark
 		}
 		s.renum[idx] = s.nextNew
@@ -254,10 +254,10 @@ func rewriteBlockIndex(line []byte, newIdx int) []byte {
 	return out
 }
 
-// flush returns what the stripper still holds at stream end: SSE mode yields the unterminated tail as-is;
+// Flush returns what the stripper still holds at stream end: SSE mode yields the unterminated tail as-is;
 // JSON mode strips the buffered document (malformed JSON passes through byte-identical).
-func (s *thinkingStripper) flush() []byte {
-	if s.sse {
+func (s *ThinkingStripper) Flush() []byte {
+	if s.SSE {
 		return s.pending
 	}
 	if len(s.buf) == 0 {
@@ -275,13 +275,13 @@ func (s *thinkingStripper) flush() []byte {
 	for _, b := range arr {
 		if m, ok := b.(map[string]interface{}); ok {
 			if t, _ := m["type"].(string); t == "thinking" || t == "redacted_thinking" {
-				s.stripped++
+				s.Stripped++
 				continue
 			}
 		}
 		kept = append(kept, b)
 	}
-	if s.stripped == 0 {
+	if s.Stripped == 0 {
 		return s.buf // Nothing stripped: byte-exact passthrough
 	}
 	obj["content"] = kept

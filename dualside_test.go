@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"proxy429/internal/config"
+	"proxy429/internal/translate"
 	"strconv"
 	"strings"
 	"testing"
@@ -175,48 +176,6 @@ func TestFlightSideFullDownload(t *testing.T) {
 	}
 }
 
-// TestTranslatingWriterDownTap verifies the downstream-side tap covers translatingWriter's write paths:
-// the bytes written to the client in both streaming (emit per event) and non-streaming (finish one-shot JSON) modes are teed in equal measure into
-// contentDown. The tap wraps dst itself, and emit/finish/finishBuffered/error writes all go through dst.Write,
-// so byte-for-byte equality in both modes proves full path coverage.
-func TestTranslatingWriterDownTap(t *testing.T) {
-	// Streaming client: SSE events pass through the tap one by one.
-	rec := httptest.NewRecorder()
-	tw := newTranslatingWriter(rec, true, "gpt-5-codex", nil)
-	var f flight
-	tw.setDownTap(&f)
-	tw.Header().Set("Content-Type", "text/event-stream")
-	tw.WriteHeader(200)
-	if _, err := tw.Write([]byte(testSSEAllBlocks())); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	tw.finish()
-	if got := f.snapshotContentDown(); string(got) != rec.Body.String() {
-		t.Errorf("流式 tap 与客户端实收不一致：tap=%d 字节, 客户端=%d 字节", len(got), rec.Body.Len())
-	}
-	if !strings.Contains(string(f.snapshotContentDown()), "response.completed") {
-		t.Errorf("流式 contentDown 应含 response.completed 事件")
-	}
-
-	// Non-streaming client: the one-shot Responses JSON produced by finish also passes through the tap.
-	rec2 := httptest.NewRecorder()
-	tw2 := newTranslatingWriter(rec2, false, "gpt-5-codex", nil)
-	var f2 flight
-	tw2.setDownTap(&f2)
-	tw2.Header().Set("Content-Type", "text/event-stream")
-	tw2.WriteHeader(200)
-	if _, err := tw2.Write([]byte(testSSEAllBlocks())); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	tw2.finish()
-	if got := f2.snapshotContentDown(); string(got) != rec2.Body.String() {
-		t.Errorf("非流式 tap 与客户端实收不一致：tap=%d 字节, 客户端=%d 字节", len(got), rec2.Body.Len())
-	}
-	if !strings.Contains(string(f2.snapshotContentDown()), `"object":"response"`) {
-		t.Errorf("非流式 contentDown 应含一次性 Responses JSON")
-	}
-}
-
 // TestDualSideTranslatedFlow end-to-end verifies dual-link recording of a translation stream: the downstream side stores the client's Responses original
 // and the Responses-shaped response actually received; the upstream side stores the translated Anthropic request body and the upstream's raw SSE stream.
 func TestDualSideTranslatedFlow(t *testing.T) {
@@ -240,7 +199,7 @@ func TestDualSideTranslatedFlow(t *testing.T) {
 	})
 	defer config.Store(&config.Config{})
 
-	proxy := httptest.NewServer(http.HandlerFunc(responsesHandler))
+	proxy := httptest.NewServer(http.HandlerFunc(translate.ResponsesHandler(handler)))
 	defer proxy.Close()
 
 	raw := `{"model":"gpt-5-codex","input":"hi"}`

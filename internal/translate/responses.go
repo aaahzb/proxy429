@@ -1,4 +1,4 @@
-package main
+package translate
 
 // responses.go — OpenAI Responses API listener port.
 // Translates Responses-protocol requests into the Anthropic Messages protocol, internally calls the main handler through the existing
@@ -20,65 +20,66 @@ import (
 	"net/http"
 	"proxy429/internal/config"
 	"proxy429/internal/jsonutil"
+	"proxy429/internal/platform"
 	"strings"
 	"sync"
 	"time"
 )
 
-// ctxKeyTranslated is the internal request context key: marks this request as coming from the Responses translation port.
+// CtxKeyTranslated is the internal request context key: marks this request as coming from the Responses translation port.
 // The main handler flags the flight's origin from it (the web API column shows [translate]/[Response]).
 // Context rather than a header — copyHeaders would pass a header through to the upstream; context never leaks.
 type ctxKeyTranslatedT struct{}
 
-var ctxKeyTranslated ctxKeyTranslatedT
+var CtxKeyTranslated ctxKeyTranslatedT
 
-// ctxKeyConvID is the internal request context key: hands the Responses request's session identifier
+// CtxKeyConvID is the internal request context key: hands the Responses request's session identifier
 // (prompt_cache_key, always present in Codex; second choice client_metadata.thread_id) to the main handler,
-// for the "cache age" column's per-session anchoring. Same rationale as ctxKeyTranslated: context, not headers, so nothing leaks upstream.
+// for the "cache age" column's per-session anchoring. Same rationale as CtxKeyTranslated: context, not headers, so nothing leaks upstream.
 type ctxKeyConvIDT struct{}
 
-var ctxKeyConvID ctxKeyConvIDT
+var CtxKeyConvID ctxKeyConvIDT
 
-// ctxKeyThink is the internal request context key: hands the passthrough branch's thinking mode (reasoning.effort as-is,
+// CtxKeyThink is the internal request context key: hands the passthrough branch's thinking mode (reasoning.effort as-is,
 // the status page's 「API」 column thinking value) to the main handler — a passthrough body is in Responses format, which the handler's
 // extractThinkMode can't read (no thinking field), so it's carried separately via context.
 // Not needed by the translation branch: the translated body's thinking is what actually goes upstream; the handler extracts it directly.
-// Same as ctxKeyTranslated: context, not headers, so nothing leaks upstream.
+// Same as CtxKeyTranslated: context, not headers, so nothing leaks upstream.
 type ctxKeyThinkT struct{}
 
-var ctxKeyThink ctxKeyThinkT
+var CtxKeyThink ctxKeyThinkT
 
-// ctxKeyNone2Low is the internal request context key: the convertOff2Low upgrade mode (int, see below).
-// The main handler badges the flight [off->low] from it (n2lStealth only) and falls back to a thinking-off
-// retry once when the upstream 400-rejects thinking (covers both n2lStealth and n2lTryOn).
+// CtxKeyNone2Low is the internal request context key: the convertOff2Low upgrade mode (int, see below).
+// The main handler badges the flight [off->low] from it (N2LStealth only) and falls back to a thinking-off
+// retry once when the upstream 400-rejects thinking (covers both N2LStealth and N2LTryOn).
 type ctxKeyNone2LowT struct{}
 
-var ctxKeyNone2Low ctxKeyNone2LowT
+var CtxKeyNone2Low ctxKeyNone2LowT
 
-// convertOff2Low upgrade modes (responsesToAnthropicTriple's 4th return value, passed through via ctxKeyNone2Low):
+// convertOff2Low upgrade modes (responsesToAnthropicTriple's 4th return value, passed through via CtxKeyNone2Low):
 const (
-	n2lNone    = 0 // Not upgraded
-	n2lStealth = 1 // Implicit upgrade: downstream explicitly disabled thinking → sent as low upstream; thinking blocks stripped on return (downstream unaware) + [off->low] badge
-	n2lTryOn   = 2 // Fallback thinking-on: tool-continuation history isn't replayable — send the requested thinking mode anyway (the default,
+	N2LNone    = 0 // Not upgraded
+	N2LStealth = 1 // Implicit upgrade: downstream explicitly disabled thinking → sent as low upstream; thinking blocks stripped on return (downstream unaware) + [off->low] badge
+	N2LTryOn   = 2 // Fallback thinking-on: tool-continuation history isn't replayable — send the requested thinking mode anyway (the default,
 	// allowNoThinkBlock4Anthropic=true) and arm the main handler's one-shot thinking-off retry for a real rejection; under route convertOff2Low the level
 	// gets a low floor (none/unknown → low, keeping K3 off the K2.8 no-thinking variant). Thinking blocks aren't stripped — the downstream
 	// asked for thinking, so blocks ride the return carrying signatures and next-turn history self-heals
 )
 
-// ctxKeyReqDown is the internal request context key: the Responses translation port hands the downstream request body's original text
+// CtxKeyReqDown is the internal request context key: the Responses translation port hands the downstream request body's original text
 // (Responses format, before translation) to the main handler, stored as the downstream side (downstream→proxy) of dual-link recording.
 // Not set by the passthrough branch — the body forwards verbatim; both sides identical, no double storage.
-// Same as ctxKeyTranslated: context, not headers, so nothing leaks upstream.
+// Same as CtxKeyTranslated: context, not headers, so nothing leaks upstream.
 type ctxKeyReqDownT struct{}
 
-var ctxKeyReqDown ctxKeyReqDownT
+var CtxKeyReqDown ctxKeyReqDownT
 
-// ctxKeyTranslated's values — the same three states as flight.translated:
-// translatedResponses means a Responses request was translated to Anthropic through the main pipeline (API column [translate]);
-// translatedResponsesRaw means the hit route has url_response_api, so the Responses original passes through untranslated (API column [Response]).
+// CtxKeyTranslated's values — the same three states as flight.translated:
+// TranslatedResponses means a Responses request was translated to Anthropic through the main pipeline (API column [translate]);
+// TranslatedResponsesRaw means the hit route has url_response_api, so the Responses original passes through untranslated (API column [Response]).
 const (
-	translatedResponses    = "responses"
-	translatedResponsesRaw = "responses-raw"
+	TranslatedResponses    = "responses"
+	TranslatedResponsesRaw = "responses-raw"
 )
 
 // thinkingEnvelopePrefix is the thinking-block envelope prefix: an Anthropic signed thinking block JSON is
@@ -98,10 +99,10 @@ var responsesSrv = struct {
 	srv  *http.Server // The running server, for shutdown
 }{}
 
-// reconcileResponsesServer aligns the Responses listener port to the configured address:
+// ReconcileResponsesServer aligns the Responses listener port to the configured address:
 // unchanged address → no-op; changed (including added/disabled/re-addressed) → close the old listener first, then start the new.
 // A listen failure only warns and disables; the main proxy is unaffected. Called from startup, config reload, and config switch.
-func reconcileResponsesServer(listen string) {
+func ReconcileResponsesServer(listen string, next http.HandlerFunc) {
 	responsesSrv.Lock()
 	defer responsesSrv.Unlock()
 	if listen == responsesSrv.addr {
@@ -118,8 +119,8 @@ func reconcileResponsesServer(listen string) {
 		return
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/responses", responsesHandler)
-	mux.HandleFunc("/responses", responsesHandler)
+	mux.HandleFunc("/v1/responses", ResponsesHandler(next))
+	mux.HandleFunc("/responses", ResponsesHandler(next))
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		log.Printf("[Responses] listen %s failed: %v (Responses API disabled; main proxy unaffected)", listen, err)
@@ -141,34 +142,35 @@ func reconcileResponsesServer(listen string) {
 // enhanced-search conditional branches aren't predicted — a prediction miss at worst makes a restored envelope hit a 400, and the main pipeline's fail-soft strips and
 // retries (see the handler's tool_call_id fallback); no wrong data is produced. When prediction is impossible (no route hit and
 // default upstream empty) returns nil = envelopes always pass.
-func predictSearchTriple(c *config.Config, r *http.Request, model string) *searchTriple {
+func predictSearchTriple(c *config.Config, r *http.Request, model string) *SearchTriple {
 	if fr := c.FastRoute; fr != nil && fr.URL != "" && fr.Model != "" && model == "fast_route" {
-		return newSearchTriple(fr.URL, fr.Model, effectiveKey(fr.API, r))
+		return NewSearchTriple(fr.URL, fr.Model, effectiveKey(fr.API, r))
 	}
-	if rr := matchRouteRule(c, model); rr != nil {
+	if rr := config.MatchRouteRule(c, model); rr != nil {
 		m := rr.Model
 		if m == "" {
 			m = model
 		}
-		return newSearchTriple(rr.URL, m, effectiveKey(rr.API, r))
+		return NewSearchTriple(rr.URL, m, effectiveKey(rr.API, r))
 	}
 	if c.Upstream == "" {
 		return nil
 	}
-	return newSearchTriple(c.Upstream, model, effectiveKey("", r))
+	return NewSearchTriple(c.Upstream, model, effectiveKey("", r))
 }
 
-// matchRouteRule returns the first route matching model (skipping reserved-name patterns), nil on no hit.
-// Translation-time prediction (search triple, route thinking shape) shares this single match point, same order
-// and rules as the main handler's route loop. Note the fast literal-name lane doesn't go through this match (callers check fast themselves first).
-func matchRouteRule(c *config.Config, model string) *config.RouteRule {
+// MatchPassthroughResponsesRoute pre-checks whether a Responses request should pass through natively: the model matches
+// the first ordered non-reserved route that has url_response_api configured.
+func MatchPassthroughResponsesRoute(c *config.Config, model string) *config.RouteRule {
+	if model == "" {
+		return nil
+	}
 	for i := range c.Routes {
-		rr := &c.Routes[i]
-		if config.IsReservedRoutePattern(rr.Pattern) {
+		if config.IsReservedRoutePattern(c.Routes[i].Pattern) {
 			continue
 		}
-		if matchModel(rr.Pattern, model) {
-			return rr
+		if config.MatchModel(c.Routes[i].Pattern, model) && c.Routes[i].URLResponseAPI != "" {
+			return &c.Routes[i]
 		}
 	}
 	return nil
@@ -207,10 +209,17 @@ func effectiveKey(routeAPI string, r *http.Request) string {
 }
 
 // responsesHandler handles a Responses API request: translated to Anthropic, then internally calls the main handler.
-func responsesHandler(w http.ResponseWriter, r *http.Request) {
+// ResponsesHandler returns the Responses listener port's entry point, with the main proxy pipeline injected as next.
+func ResponsesHandler(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		serveResponses(next, w, r)
+	}
+}
+
+func serveResponses(next http.HandlerFunc, w http.ResponseWriter, r *http.Request) {
 	c := config.Current()
 	// Same semantics as the main handler: the forwarding lane is always localhost-only.
-	if !isLocalRequest(r) {
+	if !platform.IsLocalRequest(r) {
 		http.Error(w, "forbidden (local only)", http.StatusForbidden)
 		return
 	}
@@ -254,34 +263,34 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	// and goes to the main handler as-is — the passthrough branch in the route loop switches the upstream to that route's url_response_api.
 	// Monitoring stream/stats/retry pipeline identical to translated streams (the main handler parses per Responses semantics per the ctx flag).
 	// The precheck only decides "translate or passthrough"; the real routing decision is the handler's (a 502 is reported if a config hot-reload removes the route).
-	if matchPassthroughResponsesRoute(c, origModel) != nil {
+	if MatchPassthroughResponsesRoute(c, origModel) != nil {
 		r2 := r.Clone(r.Context())
-		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyTranslated, translatedResponsesRaw))
+		r2 = r2.WithContext(context.WithValue(r2.Context(), CtxKeyTranslated, TranslatedResponsesRaw))
 		if convID != "" {
-			r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyConvID, convID))
+			r2 = r2.WithContext(context.WithValue(r2.Context(), CtxKeyConvID, convID))
 		}
 		if think != "" {
-			r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyThink, think))
+			r2 = r2.WithContext(context.WithValue(r2.Context(), CtxKeyThink, think))
 		}
 		r2.Method = http.MethodPost
 		r2.URL.Path = "/v1/responses"
 		r2.Body = io.NopCloser(bytes.NewReader(raw))
 		r2.ContentLength = int64(len(raw))
 		// Headers keep the client's originals: the upstream is a native Responses service; Authorization etc. are overridden by the target key on route hit.
-		handler(w, r2)
+		next(w, r2)
 		return
 	}
 
 	// Translation-time search-restoration context: time-rule strip counting / conversation watermark / restore-moment collection;
 	// handed down with the internal request; the main handler feeds the strip count into the flight ([剥N] display)
 	// and learns the conversation watermark from restore moments during 400-fallback stripping.
-	replay := &searchReplayCtx{convID: convID}
+	replay := &SearchReplayCtx{ConvID: convID}
 	// The route-declared thinking shape (thinking parameter) and the convertOff2Low scope: at translation time only the client model
 	// name is known; the adaptive/budget decision defaults to the client name's mapping table — when the target model's capability
 	// disagrees, the route config overrides. convertOff2Low likewise resolves by client model name pre-match ("translate"/"all" enable it here).
 	thinkStyle := ""
 	off2Low := ""
-	if rr := matchRouteRule(c, origModel); rr != nil {
+	if rr := config.MatchRouteRule(c, origModel); rr != nil {
 		thinkStyle = config.EffectiveRouteThinking(c, rr)
 		off2Low = config.EffectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.Presence.Written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
 		// search_fallback is a route too: when this request will be diverted there (effective no_search +
@@ -319,16 +328,16 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	// Building the internal request: path swapped to /v1/messages, only auth headers kept (overridden by the target key on route hit);
 	// Codex client's OpenAI-specific headers aren't taken along to bother the Anthropic upstream.
 	r2 := r.Clone(r.Context())
-	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyTranslated, translatedResponses))
-	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeySearchReplay, replay))
-	if n2l != n2lNone {
-		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyNone2Low, n2l))
+	r2 = r2.WithContext(context.WithValue(r2.Context(), CtxKeyTranslated, TranslatedResponses))
+	r2 = r2.WithContext(context.WithValue(r2.Context(), CtxKeySearchReplay, replay))
+	if n2l != N2LNone {
+		r2 = r2.WithContext(context.WithValue(r2.Context(), CtxKeyNone2Low, n2l))
 	}
 	// Dual-link recording: the downstream Responses original goes via context to the main handler for reqDown
 	// (necessarily different from the translated body, always stored; not set by the passthrough branch — body forwards verbatim, both sides identical).
-	r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyReqDown, raw))
+	r2 = r2.WithContext(context.WithValue(r2.Context(), CtxKeyReqDown, raw))
 	if convID != "" {
-		r2 = r2.WithContext(context.WithValue(r2.Context(), ctxKeyConvID, convID))
+		r2 = r2.WithContext(context.WithValue(r2.Context(), CtxKeyConvID, convID))
 	}
 	r2.Method = http.MethodPost
 	r2.URL.Path = "/v1/messages"
@@ -349,14 +358,14 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	// state machine, non-streaming by finishBuffered wholesale conversion); the downstream still sees a thinking-off response; usage
 	// untouched, passed through truthfully. History-fallback thinking-on (at the downstream-requested level) doesn't strip: the downstream asked for thinking; blocks ride the return
 	// carrying signatures.
-	tw.stripThinking = n2l == n2lStealth
-	tw.conv.stripThinking = n2l == n2lStealth
-	handler(tw, r2)
+	tw.stripThinking = n2l == N2LStealth
+	tw.conv.stripThinking = n2l == N2LStealth
+	next(tw, r2)
 	tw.finish()
 	// Dual-link recording tail back-fill: a non-streaming client's downstream-side return is produced by finish after the handler archives,
 	// so the downstream-side bytes tapped into the flight are flushed into the finished archive (streaming clients already fully recorded during forwarding; flushing the same value is harmless).
 	if tw.downFlight != nil {
-		refreshArchivedDown(tw.downFlight)
+		tw.downFlight.RefreshArchivedDown()
 	}
 }
 
@@ -390,18 +399,18 @@ func responsesToAnthropic(body map[string]interface{}) (map[string]interface{}, 
 // "budget"=force enabled+budget_tokens — the route thinking parameter, solving target-model vs client-alias
 // thinking-capability mismatches, e.g. the client says claude-fable-5 but actually routes to a budget-only Kimi).
 // none2Low=true (route convertOff2Low = "translate"/"all") upgrades in two places (4th return value n2l; three states see the constants):
-// ① downstream explicit thinking-off (effort none/off/disabled) → sent as low upstream, n2l=n2lStealth (thinking blocks stripped
+// ① downstream explicit thinking-off (effort none/off/disabled) → sent as low upstream, n2l=N2LStealth (thinking blocks stripped
 // on return, downstream unaware; usage passed through truthfully); ② tool-continuation history not replayable (trailingTurnSupportsThinking
 // =false) — thinking-off happens to trigger Kimi routing K3 to the K2.8 no-thinking variant (exactly what this parameter guards against), so there's
-// no downgrading: send at the downstream-requested level as-is (none/unknown → low floor), n2l=n2lTryOn (no stripping: blocks ride the return
+// no downgrading: send at the downstream-requested level as-is (none/unknown → low floor), n2l=N2LTryOn (no stripping: blocks ride the return
 // carrying signatures, next-turn history self-heals).
 // allowNoThink (top-level allowNoThinkBlock4Anthropic, default true) governs the history door independently of none2Low: true = the normal
-// thinking decision goes upstream as-is with n2l=n2lTryOn armed — if the upstream really rejects "unsigned history with thinking on"
+// thinking decision goes upstream as-is with n2l=N2LTryOn armed — if the upstream really rejects "unsigned history with thinking on"
 // (the rejection is level-independent), the main handler's one-shot fallback retreats to thinking-off and resends; false = cc-switch mode,
 // thinking preemptively off over such histories (explicit thinking-off requests never take this door — they follow ① or plain disabled).
 // Under none2Low, true keeps ②'s floor-low try-on verbatim.
 // Motivation: Kimi's docs — "turning off thinking routes to the K2.8 Preview no-thinking variant"; keeping thinking on keeps K3 from being downgraded.
-func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTriple, replay *searchReplayCtx, thinkStyle string, none2Low bool, allowNoThink bool) (map[string]interface{}, *toolRegistry, int, error) {
+func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *SearchTriple, replay *SearchReplayCtx, thinkStyle string, none2Low bool, allowNoThink bool) (map[string]interface{}, *toolRegistry, int, error) {
 	result := map[string]interface{}{}
 	if model := jsonutil.ObjStr(body, "model"); model != "" {
 		result["model"] = model
@@ -444,7 +453,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	case []interface{}:
 		msgs, err = convertInputToMessages(inp, reg, reqTriple, replay)
 		if err != nil {
-			return nil, nil, n2lNone, err
+			return nil, nil, N2LNone, err
 		}
 	}
 
@@ -454,12 +463,12 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	msgs = dropEmptyMessages(msgs)
 	msgs = ensureLeadingUserMessage(msgs)
 	if len(msgs) == 0 {
-		return nil, nil, n2lNone, fmt.Errorf("cannot convert request: empty messages")
+		return nil, nil, N2LNone, fmt.Errorf("cannot convert request: empty messages")
 	}
 	trimTrailingAssistantText(msgs)
 	msgs = dropEmptyMessages(msgs)
 	if len(msgs) == 0 {
-		return nil, nil, n2lNone, fmt.Errorf("cannot convert request: empty messages")
+		return nil, nil, N2LNone, fmt.Errorf("cannot convert request: empty messages")
 	}
 	result["messages"] = msgs
 
@@ -492,14 +501,14 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		cannotDisable = false
 	}
 	explicitlyDisabled := reasoningExplicitlyDisabled(effort)
-	adaptiveEffort := codexEffortToAnthropic(effort)
+	adaptiveEffort := CodexEffortToAnthropic(effort)
 	adaptiveShouldThink := adaptiveModel && (adaptiveThinkingIsDefault(model) || adaptiveEffort != "")
 	historyValid := trailingTurnSupportsThinking(msgs)
 	thinkingEnabled := false
-	budget := effortToThinkingBudget(effort)
+	budget := EffortToThinkingBudget(effort)
 	// n2l: the convertOff2Low upgrade mode (three states see the constants) — the return side strips thinking blocks
-	// per it for implicit upgrades (n2lStealth) (the main handler adds the [off->low] badge); both upgrade kinds retreat and retry on upstream 400 rejection.
-	n2l := n2lNone
+	// per it for implicit upgrades (N2LStealth) (the main handler adds the [off->low] badge); both upgrade kinds retreat and retry on upstream 400 rejection.
+	n2l := N2LNone
 	// upgradeNoneToLow upgrades thinking-off to low: adaptive models get thinking:adaptive+effort:low;
 	// budget models get enabled+2048 (capped at maxTokens/2; abandoned if the 1024 floor doesn't fit, staying off).
 	// With thinkingEnabled on, temperature/top_p aren't passed through (same rule as the normal thinking path).
@@ -532,9 +541,9 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			thinkingEnabled = true
 			return true
 		}
-		b := effortToThinkingBudget(effort)
+		b := EffortToThinkingBudget(effort)
 		if b <= 0 {
-			b = effortToThinkingBudget("low")
+			b = EffortToThinkingBudget("low")
 		}
 		if ceiling := maxTokens / 2; b > ceiling {
 			b = ceiling
@@ -548,10 +557,10 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 	}
 	// A tool continuation missing a signed thinking block can't be replayed with thinking on (real Anthropic 400s). allowNoThink
 	// (top-level allowNoThinkBlock4Anthropic, default true) picks the strategy for such histories: true = send the normal thinking
-	// decision below anyway and arm the main handler's one-shot thinking-off retry (n2lTryOn); false = cc-switch mode (thinking
+	// decision below anyway and arm the main handler's one-shot thinking-off retry (N2LTryOn); false = cc-switch mode (thinking
 	// preemptively off). Models that can't disable thinking error out directly (cc-switch's wording copied).
 	if !historyValid && cannotDisable {
-		return nil, nil, n2lNone, fmt.Errorf("Anthropic model requires thinking, but the tool history has no signed thinking block to replay")
+		return nil, nil, N2LNone, fmt.Errorf("Anthropic model requires thinking, but the tool history has no signed thinking block to replay")
 	}
 	switch {
 	case !historyValid && explicitlyDisabled:
@@ -559,7 +568,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		// convertOff2Low's implicit upgrade (low + strip on return) still governs. Otherwise off stays off — adaptive
 		// default-on models get an explicit disabled; budget models simply carry no thinking field.
 		if none2Low && upgradeNoneToLow() {
-			n2l = n2lStealth
+			n2l = N2LStealth
 		} else if adaptiveShouldThink {
 			result["thinking"] = map[string]interface{}{"type": "disabled"}
 		}
@@ -568,7 +577,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		// send at the downstream-requested level (none/unknown → low floor); no stripping — blocks ride the return carrying
 		// signatures, next-turn history self-heals; the main handler's one-shot fallback retreats to thinking-off on a real rejection.
 		if tryRequestedThinking() {
-			n2l = n2lTryOn
+			n2l = N2LTryOn
 		}
 	case !historyValid && !allowNoThink:
 		// cc-switch mode (allowNoThinkBlock4Anthropic=false): thinking preemptively off over a non-replayable history.
@@ -584,17 +593,17 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			// Fable/Mythos can't disable thinking: use low to express Codex's explicit none.
 			result["output_config"] = map[string]interface{}{"effort": "low"}
 			if none2Low {
-				n2l = n2lStealth // The downstream wanted thinking off: with convertOff2Low on, thinking blocks are stripped on the return side
+				n2l = N2LStealth // The downstream wanted thinking off: with convertOff2Low on, thinking blocks are stripped on the return side
 			}
 		}
 		if !historyValid {
 			// allowNoThink=true without convertOff2Low (the default): the normal decision goes upstream as-is, armed — the
 			// upstream's rejection of "thinking on without thinking history" is level-independent, so the one-shot fallback covers it.
-			n2l = n2lTryOn
+			n2l = N2LTryOn
 		}
 	case explicitlyDisabled:
 		if none2Low && upgradeNoneToLow() {
-			n2l = n2lStealth
+			n2l = N2LStealth
 		} else {
 			result["thinking"] = map[string]interface{}{"type": "disabled"}
 		}
@@ -606,7 +615,7 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 		if budget >= 1024 {
 			thinkingEnabled = true
 			if !historyValid {
-				n2l = n2lTryOn // Same allowNoThink arming as the adaptive arm (reached with !historyValid only in try-first mode)
+				n2l = N2LTryOn // Same allowNoThink arming as the adaptive arm (reached with !historyValid only in try-first mode)
 			}
 		}
 	}
@@ -634,11 +643,11 @@ func responsesToAnthropicTriple(body map[string]interface{}, reqTriple *searchTr
 			// without silently weakening a required/specified choice. Mirrors cc-switch 398-425.
 			if t := jsonutil.ObjStr(mapped, "type"); thinkingEnabled && (t == "any" || t == "tool") {
 				if cannotDisable {
-					return nil, nil, n2lNone, fmt.Errorf("Anthropic model requires adaptive thinking and cannot honor a forced tool_choice")
+					return nil, nil, N2LNone, fmt.Errorf("Anthropic model requires adaptive thinking and cannot honor a forced tool_choice")
 				}
 				result["thinking"] = map[string]interface{}{"type": "disabled"}
 				delete(result, "output_config")
-				n2l = n2lNone // Thinking has been turned off: the upstream won't produce thinking blocks, so the return side needs no stripping
+				n2l = N2LNone // Thinking has been turned off: the upstream won't produce thinking blocks, so the return side needs no stripping
 				if v, ok := body["temperature"]; ok {
 					result["temperature"] = v
 				}
@@ -694,7 +703,7 @@ func responsesSystemText(item map[string]interface{}) []string {
 //     tool_result blocks (consecutive ones merged into the same user message)
 //   - reasoning.encrypted_content with our envelope prefix → restored signed thinking blocks;
 //     with the search envelope prefix and a triple matching this request's route prediction → full search blocks restored (see searchEnvelopePrefix)
-func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *searchTriple, replay *searchReplayCtx) ([]map[string]interface{}, error) {
+func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *SearchTriple, replay *SearchReplayCtx) ([]map[string]interface{}, error) {
 	var msgs []map[string]interface{}
 	var reqMask []byte // Key-derived mask from the route prediction (nil = unpredictable; the envelope can't be unmasked and is naturally skipped)
 	if reqTriple != nil {
@@ -794,19 +803,19 @@ func convertInputToMessages(items []interface{}, reg *toolRegistry, reqTriple *s
 					// predating the ts era) are treated as oldest: stripped when a watermark exists, optimistically restored without one.
 					// Strip counts and restore moments are both recorded into replay (nil = convert only, no stats).
 					var cutoff time.Time
-					if replay != nil && replay.convID != "" {
-						cutoff = searchCutoffFor(replay.convID)
+					if replay != nil && replay.ConvID != "" {
+						cutoff = SearchCutoffFor(replay.ConvID)
 					}
 					switch {
 					case !cutoff.IsZero() && (ts.IsZero() || !ts.After(cutoff)):
-						replay.proactiveCutoff += len(blocks)
+						replay.ProactiveCutoff += len(blocks)
 					default:
 						for _, b := range blocks {
 							pushBlock(&msgs, "assistant", b)
 						}
 						// Only envelopes with ts are collected as restore moments: ts-less envelopes taking part in the oldest-pick would poison watermark learning
 						if replay != nil && !ts.IsZero() {
-							replay.restored = append(replay.restored, ts)
+							replay.Restored = append(replay.Restored, ts)
 						}
 					}
 				}
@@ -1185,9 +1194,9 @@ func trimTrailingAssistantText(msgs []map[string]interface{}) {
 	}
 }
 
-// effortToThinkingBudget maps Codex's reasoning.effort to an Anthropic thinking budget.
+// EffortToThinkingBudget maps Codex's reasoning.effort to an Anthropic thinking budget.
 // Unrecognized values return 0 (thinking not opened, normal sampling kept). Mirrors cc-switch's same-named function.
-func effortToThinkingBudget(effort string) int64 {
+func EffortToThinkingBudget(effort string) int64 {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
 	case "minimal", "low":
 		return 2048
@@ -1237,9 +1246,9 @@ func thinkingCannotBeDisabled(model string) bool {
 	return thinkingModelContains(model, "fable-5", "mythos-5")
 }
 
-// codexEffortToAnthropic maps Codex's reasoning.effort to output_config.effort
+// CodexEffortToAnthropic maps Codex's reasoning.effort to output_config.effort
 // (for adaptive models). Unrecognized values return empty. Mirrors cc-switch's same-named function.
-func codexEffortToAnthropic(effort string) string {
+func CodexEffortToAnthropic(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
 	case "minimal", "low":
 		return "low"
@@ -1425,22 +1434,22 @@ func decodeThinkingEnvelope(s string) map[string]interface{} {
 // (Codex session logs) without lying around as plaintext url/model/key hashes (user requirement; obfuscation, not encryption).
 const searchEnvelopePrefix = "p429-ant-search-v2:"
 
-// searchReplayCtx is the per-request context of search-envelope restoration (translation phase is single-goroutine, lock-free):
-// convID is for querying/learning the conversation watermark; proactiveCutoff counts watermark-proactively-stripped blocks (part of
-// [剥N], the split only goes to logs); restored collects the sealing moments of actually-restored envelopes (ts-less ones not collected) —
+// SearchReplayCtx is the per-request context of search-envelope restoration (translation phase is single-goroutine, lock-free):
+// ConvID is for querying/learning the conversation watermark; ProactiveCutoff counts watermark-proactively-stripped blocks (part of
+// [剥N], the split only goes to logs); Restored collects the sealing moments of actually-restored envelopes (ts-less ones not collected) —
 // the oldest of them is learned as the conversation watermark during 400-fallback stripping.
-type searchReplayCtx struct {
-	convID          string
-	proactiveCutoff int // Number of blocks stripped by the conversation watermark
-	restored        []time.Time
+type SearchReplayCtx struct {
+	ConvID          string
+	ProactiveCutoff int // Number of blocks stripped by the conversation watermark
+	Restored        []time.Time
 }
 
-// ctxKeySearchReplay is the internal request context key: hands the translation-time search-restoration context
+// CtxKeySearchReplay is the internal request context key: hands the translation-time search-restoration context
 // to the main handler (strip counts into the flight, watermark learning on 400). Same rationale as
-// ctxKeyTranslated: context, not headers, so nothing leaks upstream.
+// CtxKeyTranslated: context, not headers, so nothing leaks upstream.
 type ctxKeySearchReplayT struct{}
 
-var ctxKeySearchReplay ctxKeySearchReplayT
+var CtxKeySearchReplay ctxKeySearchReplayT
 
 // searchCutoff records the envelope watermark per conversation (lower bound of sealing moments): envelopes no newer than the watermark are all stripped by default
 // (the registry expires by age: a 400 hit means the oldest died, so same-age and older ones are certainly dead). Learned during 400-fallback
@@ -1451,15 +1460,15 @@ var searchCutoff = struct {
 	m map[string]time.Time
 }{m: make(map[string]time.Time)}
 
-// searchCutoffFor queries the conversation watermark; no record returns the zero value (no envelope is blocked).
-func searchCutoffFor(convID string) time.Time {
+// SearchCutoffFor queries the conversation watermark; no record returns the zero value (no envelope is blocked).
+func SearchCutoffFor(convID string) time.Time {
 	searchCutoff.Lock()
 	defer searchCutoff.Unlock()
 	return searchCutoff.m[convID]
 }
 
-// learnSearchCutoff raises the conversation watermark to ts (only rises, never falls).
-func learnSearchCutoff(convID string, ts time.Time) {
+// LearnSearchCutoff raises the conversation watermark to ts (only rises, never falls).
+func LearnSearchCutoff(convID string, ts time.Time) {
 	if convID == "" || ts.IsZero() {
 		return
 	}
@@ -1470,21 +1479,21 @@ func learnSearchCutoff(convID string, ts time.Time) {
 	}
 }
 
-// searchTriple is a search envelope's attribution info: url+model+key hash. KeyH stores only the key's
+// SearchTriple is a search envelope's attribution info: url+model+key hash. KeyH stores only the key's
 // first 16 hex of sha256, never the bare key. Model is only a troubleshooting reference, not part of the restoration comparison — see sameOrigin.
 // mask is the key-derived XOR mask (json:"-" never envelope-serialized): both encode and decode need it;
-// it's derived by newSearchTriple together once routing is settled.
-type searchTriple struct {
+// it's derived by NewSearchTriple together once routing is settled.
+type SearchTriple struct {
 	URL   string `json:"u"`
 	Model string `json:"m"`
 	KeyH  string `json:"k"`
 	mask  []byte `json:"-"`
 }
 
-// newSearchTriple builds the attribution triple: api is the actually-effective auth token (effectiveKey semantics);
+// NewSearchTriple builds the attribution triple: api is the actually-effective auth token (effectiveKey semantics);
 // only its hash is stored, and the envelope obfuscation mask is derived.
-func newSearchTriple(url, model, api string) *searchTriple {
-	return &searchTriple{URL: url, Model: model, KeyH: hashSearchKey(api), mask: searchEnvMask(api)}
+func NewSearchTriple(url, model, api string) *SearchTriple {
+	return &SearchTriple{URL: url, Model: model, KeyH: hashSearchKey(api), mask: searchEnvMask(api)}
 }
 
 // searchEnvMask derives a 32-byte obfuscation mask from the api key (domain-separated, not same-source as KeyH).
@@ -1505,7 +1514,7 @@ func xorSearchMask(mask, p []byte) []byte {
 // sameOrigin reports whether two attributions are the same upstream source: only the url+key legs are compared. The model leg doesn't participate —
 // field-tested 2026-09-10: cross-model replay on the same endpoint and key (k3-256k's search blocks handed to
 // kimi-for-coding follow-ups) returned 200 with zero re-search and the model gave body-level summaries; cross-model restoration isn't blocked.
-func (t *searchTriple) sameOrigin(o *searchTriple) bool {
+func (t *SearchTriple) sameOrigin(o *SearchTriple) bool {
 	return t.URL == o.URL && t.KeyH == o.KeyH
 }
 
@@ -1516,9 +1525,15 @@ func hashSearchKey(s string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// encodeSearchEnvelope encodes one search's two Anthropic blocks plus the attribution triple into an envelope string.
+// encodeSearchEnvelope encodes one search's two Anthropic blocks plus the attribution triple, sealed at the current moment.
 // Not encoded when the triple/blocks are missing or the server_tool_use has no query (empty search) — a shell has no replay value.
-func encodeSearchEnvelope(t *searchTriple, useBlk, resBlk map[string]interface{}) string {
+func encodeSearchEnvelope(t *SearchTriple, useBlk, resBlk map[string]interface{}) string {
+	return EncodeSearchEnvelopeAt(t, useBlk, resBlk, time.Now().Unix())
+}
+
+// EncodeSearchEnvelopeAt is encodeSearchEnvelope with an explicit sealing moment ts (the restore side's watermark basis),
+// letting callers build replay envelopes for a given moment.
+func EncodeSearchEnvelopeAt(t *SearchTriple, useBlk, resBlk map[string]interface{}, ts int64) string {
 	if t == nil || useBlk == nil || resBlk == nil {
 		return ""
 	}
@@ -1541,7 +1556,7 @@ func encodeSearchEnvelope(t *searchTriple, useBlk, resBlk map[string]interface{}
 	payload, err := json.Marshal(map[string]interface{}{
 		"t":  t,
 		"b":  []map[string]interface{}{useBlk, resBlk},
-		"ts": time.Now().Unix(), // Sealing moment: the basis for the restore side's per-conversation watermark stripping
+		"ts": ts, // Sealing moment: the basis for the restore side's per-conversation watermark stripping
 	})
 	if err != nil {
 		return ""
@@ -1558,7 +1573,7 @@ func encodeSearchEnvelope(t *searchTriple, useBlk, resBlk map[string]interface{}
 // mask is this request's route-prediction key-derived mask (nil/wrong → the XOR result isn't JSON, naturally
 // ok=false — the key leg's comparison is contained in the de-obfuscation itself); foreign envelopes or wrong block shapes
 // return ok=false.
-func decodeSearchEnvelope(s string, mask []byte) (*searchTriple, []map[string]interface{}, time.Time, bool) {
+func decodeSearchEnvelope(s string, mask []byte) (*SearchTriple, []map[string]interface{}, time.Time, bool) {
 	if !strings.HasPrefix(s, searchEnvelopePrefix) || len(mask) == 0 {
 		return nil, nil, time.Time{}, false
 	}
@@ -1568,7 +1583,7 @@ func decodeSearchEnvelope(s string, mask []byte) (*searchTriple, []map[string]in
 	}
 	b = xorSearchMask(mask, b)
 	var payload struct {
-		T  *searchTriple            `json:"t"`
+		T  *SearchTriple            `json:"t"`
 		B  []map[string]interface{} `json:"b"`
 		Ts int64                    `json:"ts"`
 	}
@@ -1586,12 +1601,12 @@ func decodeSearchEnvelope(s string, mask []byte) (*searchTriple, []map[string]in
 	return payload.T, payload.B, ts, true
 }
 
-// stripSearchBlocksInBody strips all replayed search structures from an Anthropic request body
+// StripSearchBlocksInBody strips all replayed search structures from an Anthropic request body
 // (server_tool_use/web_search_tool_result blocks): post-strip shell messages are deleted wholesale, adjacent same-role
 // messages merged (deleting a message can make user user adjacent). n is the number of search blocks stripped (each of the two block kinds counts 1,
 // deleted shell messages don't count extra), feeding the [剥N] display and log splits. ok=false when there are no search blocks at all (no retry needed).
 // Used for the fail-soft retry after a search-envelope restoration is rejected by the upstream (400 tool_call_id).
-func stripSearchBlocksInBody(body []byte) (nb []byte, n int, ok bool) {
+func StripSearchBlocksInBody(body []byte) (nb []byte, n int, ok bool) {
 	var m map[string]interface{}
 	if err := json.Unmarshal(body, &m); err != nil {
 		return nil, 0, false
@@ -1704,7 +1719,7 @@ func buildResponsesUsage(usage map[string]interface{}) map[string]interface{} {
 // triple is the search envelope's attribution triple (nil = no search envelopes, e.g. direct Anthropic-port calls).
 // stripThinking=true (convertOff2Low upgrade streams) drops thinking/redacted_thinking blocks
 // (no reasoning items produced); usage is unaffected, passed through truthfully.
-func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *toolRegistry, triple *searchTriple, stripThinking bool) map[string]interface{} {
+func anthropicToResponsesObject(msg map[string]interface{}, model string, reg *toolRegistry, triple *SearchTriple, stripThinking bool) map[string]interface{} {
 	id := jsonutil.ObjStr(msg, "id")
 	var responseID string
 	switch {

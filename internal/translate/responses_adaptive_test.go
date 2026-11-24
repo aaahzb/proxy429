@@ -1,4 +1,4 @@
-package main
+package translate
 
 // Tests for adaptive thinking / output_config.effort (mirroring cc-switch thinking_optimizer.rs
 // and transform_codex_anthropic.rs 312-425).
@@ -47,12 +47,12 @@ func TestCodexEffortToAnthropic(t *testing.T) {
 		"high": "high", "xhigh": "max", "max": "max", "ultra": "max",
 	}
 	for effort, want := range cases {
-		if got := codexEffortToAnthropic(effort); got != want {
+		if got := CodexEffortToAnthropic(effort); got != want {
 			t.Errorf("effort=%s got=%q, want %q", effort, got, want)
 		}
 	}
 	for _, effort := range []string{"", "none", "off", "disabled", "weird"} {
-		if got := codexEffortToAnthropic(effort); got != "" {
+		if got := CodexEffortToAnthropic(effort); got != "" {
 			t.Errorf("effort=%q got=%q, want 空", effort, got)
 		}
 	}
