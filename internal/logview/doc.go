@@ -95,6 +95,7 @@ claude</pre>
         <li><b>顺序决定结果</b>：按数组顺序匹配，第一个命中的生效，没有「更具体优先」。<code>*opus*</code> 写在 <code>*opus-4*</code> 前面时，<code>claude-opus-4-8</code> 只会命中前者。具体规则写在前面，<code>*</code> 兜底放最后。</li>
         <li><b>pattern 可以写数组</b>：<code>"pattern": ["*fable*", "*opus*"]</code> 等价于把同一条路由复制多份，每份一个 pattern。其余字段共享，位置和数组顺序就是匹配顺序。空数组或非字符串成员会在加载时报错。</li>
         <li><b>保留名</b>：纯 <code>*</code> 兜底路由在 Codex 菜单里固定叫 <code>Fallback</code>，fast 通道叫 <code>fast_route</code>。任何 pattern 不能整串正好等于这两个名字，撞名的路由不生效也不进菜单；pattern 是数组时只禁用撞名的那一项，其余成员照常生效。<code>Fall*</code> 这类通配不受影响。</li>
+        <li><b>effort 钉住思考档位</b>：路由写了 <code>effort</code>（<code>low</code>/<code>mid</code>/<code>high</code>/<code>max</code>，<code>mid</code> 按 <code>medium</code> 发给上游）时，在钉住点（路由落定后、搜索改写与原生 off-&gt;low 升级之前）请求体顶层 thinking 为 adaptive 的，代理把顶层 <code>output_config.effort</code> 强制改成该档位，客户端原本的档位被忽略；已经是该档位的不动也不出徽标。请求体不是 adaptive 形态（budget、关思考、没有 thinking 字段）时一个字节都不动，明确关思考永不被钉住（convertOff2Low 的静默升级在两个口都保持自己的 low），不写 <code>effort</code> 也完全不动。只有真正服务的路由算数：分类器、fast、图片和搜索兜底、Responses 透传各走各的路。状态页 API 列用青绿 <code>[from-&gt;to]</code> 徽标显示最后一次改写的前后值（更晚的搜索改写拥有徽标；400 兜底回关思考时徽标清空）。</li>
       </ul>
       <p>命中了哪条路由，看日志的 <code>[route]</code> 行，或状态页 model 列的 <code>[Pattern]</code>、<code>[分类器]</code>、<code>[Fast]</code>、<code>[多模态]</code>、<code>[搜索]</code> 前缀。</p>
     </section>
@@ -132,6 +133,7 @@ claude</pre>
       <ul>
         <li><b>逐字段优先级</b>：局部显式值（包括 <code>false</code> 和空串）&gt; <code>lazyApply</code> &gt; 内置默认。</li>
         <li><b>不继承连接字段</b>：<code>url</code>、<code>api</code>、<code>model</code>、<code>pattern</code>、<code>url_response_api</code> 永远不会从 lazyApply 继承。</li>
+        <li><b>effort 只能逐路由写</b>：<code>routes[]</code> 的 <code>effort</code> 钉住不参与继承，lazyApply 不提供这个字段，避免一个全局默认把所有路由的档位一起钉死。</li>
         <li><b>enhance_search 整体覆盖</b>：局部写了就整块生效，不会和 lazyApply 里的对象合并。</li>
         <li><b>个别对象可以退出</b>：在对象里写 <code>"noLazyApply": true</code>，它就不继承任何默认值，自己显式写的字段照常生效。</li>
         <li><b>会参与优先级链</b>：继承来的 <code>claudeSearch*</code> 视同局部写入，会压过 <code>search_fallback</code> 自己的值。想用 fallback 的值，就在该路由上写 <code>noLazyApply</code>。</li>
@@ -284,6 +286,7 @@ experimental_bearer_token = "proxy429"</pre>
         <tr><td><code>text_only</code></td><td>bool</td><td>false</td><td>上游不支持图片，图片请求转 multimodal_fallback</td></tr>
         <tr><td><code>no_search</code></td><td>bool</td><td>false</td><td>上游不支持搜索，搜索请求转 search_fallback</td></tr>
         <tr><td><code>thinking</code></td><td>string</td><td>auto</td><td>auto、adaptive 或 budget；只作用于 Responses 翻译口</td></tr>
+        <tr><td><code>effort</code></td><td>string</td><td>空</td><td>low、mid、high 或 max；adaptive 请求的 output_config.effort 强制成该档，已在同档不改，空等于不改</td></tr>
         <tr><td><code>convertOff2Low</code></td><td>string</td><td>空</td><td>空、translate 或 all</td></tr>
         <tr><td><code>enhance_search</code></td><td>object</td><td>无</td><td>摘要注入，子字段 summary_thinking 和 summary_level</td></tr>
         <tr><td><code>claudeSearchSummary</code></td><td>string</td><td>空</td><td>forceLow、forceMid、forceHigh 或 noForce</td></tr>
@@ -372,6 +375,7 @@ experimental_bearer_token = "proxy429"</pre>
         <tr><td><code>[Anthropic]</code> / <code>[translate]</code></td><td>API 列</td><td>协议来源：原生 Anthropic 口 / Responses 口翻译</td></tr>
         <tr><td><code>off</code> / <code>on N</code> / <code>adaptive</code> / <code>low</code> 等</td><td>API 列</td><td>实际发给上游的思考形态（行内就显示这组英文值）。名字是协议来源，值的颜色是 Anthropic 口径</td></tr>
         <tr><td><code>[off-&gt;low]</code></td><td>API 列</td><td>关思考被悄悄升级为 low，见「思考改写」</td></tr>
+        <tr><td><code>[from-&gt;to]</code></td><td>API 列</td><td>青绿色的请求体思考改写：路由 <code>effort</code> 钉住或搜索子代理改写，显示最后一次改写的前后值（更晚的改写重新取前后值）；<code>from</code> 为空表示请求本来没有 thinking 字段（显示 auto）</td></tr>
         <tr><td><code>[Search]</code> / <code>[SearchSummary-档位]</code></td><td>model 列</td><td>独立搜索请求 / 已注入摘要</td></tr>
         <tr><td><code>[Compact]</code></td><td>model 列</td><td>客户端上下文压缩请求：最后一条 user 消息以客户端压缩提示词开头（Claude Code 的 compact、Codex CLI 的 checkpoint compaction）时标记；历史里只是引用这些提示词不算。完成流附 <code>[170k-&gt;20k, 88%]</code>：左侧是压缩前的总输入上下文（input + cache_read + cache_creation），右侧是摘要输出的 token 数，百分比是被压掉的比例；用量未解析时只显示徽标、不显示数字</td></tr>
         <tr><td><code>[Read*1]</code> <code>[Edit*3]</code></td><td>model 列</td><td>本次响应里的工具调用次数，按首次出现排序。空参数的单次调用显示 *0</td></tr>
@@ -525,6 +529,7 @@ claude</pre>
         <li><b>Order decides</b>: entries match in array order and the first hit wins — there is no "more specific wins". If <code>*opus*</code> comes before <code>*opus-4*</code>, <code>claude-opus-4-8</code> only ever hits the former. Put specific rules first and the <code>*</code> catch-all last.</li>
         <li><b>pattern can be an array</b>: <code>"pattern": ["*fable*", "*opus*"]</code> equals copying the route once per pattern. All other fields are shared; position and array order are the match order. An empty array or a non-string member fails the load.</li>
         <li><b>Reserved names</b>: the pure <code>*</code> catch-all route is always called <code>Fallback</code> in the Codex menu, and the fast lane is <code>fast_route</code>. No pattern may be exactly one of these names; a colliding route neither takes effect nor enters the menu, and when pattern is an array only the colliding member is disabled. Wildcards like <code>Fall*</code> are unaffected.</li>
+        <li><b>effort pins the thinking level</b>: when a route sets <code>effort</code> (<code>low</code>/<code>mid</code>/<code>high</code>/<code>max</code>; <code>mid</code> goes upstream as <code>medium</code>), a request whose body at the pin point (after routing, before the search rewrite and the native off-&gt;low upgrades) carries adaptive thinking gets its top-level <code>output_config.effort</code> forced to that level, ignoring what the client asked for; a body already at that level is left untouched with no badge. Non-adaptive bodies (budget, thinking off, no thinking field) stay byte-for-byte untouched, explicit thinking-off is never pinned (the convertOff2Low quiet upgrade keeps its own low on both ports), and an unset <code>effort</code> never touches anything. Only the route that actually serves the request counts: classifier, fast, image/search fallback and Responses-passthrough lanes use their own paths. The API column shows the last rewrite as a teal <code>[from-&gt;to]</code> badge (a later search rewrite re-badges; the 400 fallback back to thinking-off clears it).</li>
       </ul>
       <p>To see which route won, read the <code>[route]</code> line in the log, or the <code>[Pattern]</code>, <code>[Classifier]</code>, <code>[Fast]</code>, <code>[Multimodal]</code>, <code>[Search]</code> prefix on the model column of the Status tab.</p>
     </section>
@@ -562,6 +567,7 @@ claude</pre>
       <ul>
         <li><b>Per-field precedence</b>: explicit local value (including <code>false</code> and empty strings) &gt; <code>lazyApply</code> &gt; built-in default.</li>
         <li><b>Connection fields are never inherited</b>: <code>url</code>, <code>api</code>, <code>model</code>, <code>pattern</code> and <code>url_response_api</code> never come from lazyApply.</li>
+        <li><b>effort is written per route only</b>: a route's <code>effort</code> pin is never inherited; lazyApply does not offer the field, so a global default can never pin every route's level at once.</li>
         <li><b>enhance_search replaces whole</b>: a local value replaces the lazyApply object entirely; the two are never merged.</li>
         <li><b>Objects can opt out</b>: <code>"noLazyApply": true</code> inside an object stops all inheritance; its own explicit fields still apply.</li>
         <li><b>Inherited values join the precedence chain</b>: an inherited <code>claudeSearch*</code> counts as locally written and beats <code>search_fallback</code>'s own value. To use the fallback's value, write <code>noLazyApply</code> on that route.</li>
@@ -714,6 +720,7 @@ experimental_bearer_token = "proxy429"</pre>
         <tr><td><code>text_only</code></td><td>bool</td><td>false</td><td>Upstream cannot take images; image requests divert to multimodal_fallback</td></tr>
         <tr><td><code>no_search</code></td><td>bool</td><td>false</td><td>Upstream cannot search; search requests divert to search_fallback</td></tr>
         <tr><td><code>thinking</code></td><td>string</td><td>auto</td><td>auto, adaptive or budget; affects the Responses translation port only</td></tr>
+        <tr><td><code>effort</code></td><td>string</td><td>empty</td><td>low, mid, high or max; forces output_config.effort for adaptive requests (a body already at the level is left alone), empty leaves the body untouched</td></tr>
         <tr><td><code>convertOff2Low</code></td><td>string</td><td>empty</td><td>Empty, translate or all</td></tr>
         <tr><td><code>enhance_search</code></td><td>object</td><td>none</td><td>Summary injection; subfields summary_thinking and summary_level</td></tr>
         <tr><td><code>claudeSearchSummary</code></td><td>string</td><td>empty</td><td>forceLow, forceMid, forceHigh or noForce</td></tr>
@@ -802,6 +809,7 @@ experimental_bearer_token = "proxy429"</pre>
         <tr><td><code>[Anthropic]</code> / <code>[translate]</code></td><td>API column</td><td>Protocol source: native Anthropic port / Responses port translated</td></tr>
         <tr><td><code>off</code> / <code>on N</code> / <code>adaptive</code> / <code>low</code> etc</td><td>API column</td><td>The thinking shape actually sent upstream. The name is the protocol source; the value's color is the Anthropic vocabulary</td></tr>
         <tr><td><code>[off-&gt;low]</code></td><td>API column</td><td>Thinking-off quietly upgraded to low, see "Thinking rewrite"</td></tr>
+        <tr><td><code>[from-&gt;to]</code></td><td>API column</td><td>Teal body-side thinking rewrite: a route <code>effort</code> pin or a search sub-agent rewrite, showing the value before the last rewrite and the one sent upstream; an empty <code>from</code> means the request had no thinking field (shown as auto)</td></tr>
         <tr><td><code>[Search]</code> / <code>[SearchSummary-level]</code></td><td>model column</td><td>Standalone search request / summary injected</td></tr>
         <tr><td><code>[Compact]</code></td><td>model column</td><td>Context-compaction badge for client compaction requests: marked when the request's final user message opens with a client compaction prompt (Claude Code compact, Codex CLI checkpoint compaction); prompts merely quoted in history do not count. A finished row appends <code>[170k-&gt;20k, 88%]</code>: left is the pre-compaction total input context (input + cache_read + cache_creation), right is the summary's output tokens, and the percentage is the share compressed away; when usage was not parsed, the badge shows without numbers</td></tr>
         <tr><td><code>[Read*1]</code> <code>[Edit*3]</code></td><td>model column</td><td>Tool-call counts in this response, in first-appearance order. A single call with empty arguments shows *0</td></tr>

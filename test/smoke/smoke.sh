@@ -10,6 +10,8 @@
 # History-quote negatives: s3 quotes the search marker in an earlier user turn (and still carries a web_search tool),
 # h1 quotes the compaction prompt in an earlier user turn. Their final user message is ordinary talk, so neither may arm
 # search/compaction: no upstream injection, badge fields stay false, and the global searchMarker=true count stays 2.
+# Route effort: e1/e3 on a route with effort:max get output_config.effort forced (adaptive shape only), e2 (budget) and
+# e4 (route without effort) must reach the mock byte-identical; the API column badge counts prove the [from->to] fields.
 # Vars: the config resolves $SMOKE_KEY from the top-level vars section (search_fallback uses it; routes keep a
 # literal key) — a green run proves variable expansion works end to end on the real startup path.
 # Pattern arrays: smoke-sf is written as "pattern": ["smoke-sf", "smoke-sf-alt"] (desugared into two route copies at
@@ -173,6 +175,26 @@ for n in s1 s2 s3 h1; do
   echo "anthropic $n -> HTTP $code"
 done
 
+# Route effort pin (e1 id 21, e2 id 22, e3 id 23, e4 id 24): e1/e2/e3 hit route smoke-effort (effort:max), e4 hits
+# smoke-noeff (no effort). e1 adaptive+high -> forced max; e2 enabled budget -> untouched; e3 adaptive without
+# output_config -> max appended; e4 adaptive+high -> byte-identical pass-through (the route did not opt in).
+cat > "$OUT/e1.json" <<'EOF'
+{"model":"smoke-effort","max_tokens":64,"stream":true,"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"messages":[{"role":"user","content":"x"}]}
+EOF
+cat > "$OUT/e2.json" <<'EOF'
+{"model":"smoke-effort","max_tokens":64,"stream":true,"thinking":{"type":"enabled","budget_tokens":2048},"messages":[{"role":"user","content":"x"}]}
+EOF
+cat > "$OUT/e3.json" <<'EOF'
+{"model":"smoke-effort","max_tokens":64,"stream":true,"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":"x"}]}
+EOF
+cat > "$OUT/e4.json" <<'EOF'
+{"model":"smoke-noeff","max_tokens":64,"stream":true,"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"messages":[{"role":"user","content":"x"}]}
+EOF
+for n in e1 e2 e3 e4; do
+  code=$(curl -s -o "$OUT/$n.resp" -w "%{http_code}" --max-time 30 -X POST "http://127.0.0.1:18083/v1/messages" -H "Content-Type: application/json" --data-binary "@$OUT/$n.json")
+  echo "anthropic $n -> HTTP $code"
+done
+
 sleep 1
 curl -s --max-time 10 "http://127.0.0.1:18083/__recentflights" > "$OUT/recent.json"
 curl -s --max-time 10 "http://127.0.0.1:18083/__logs" > "$OUT/page.html"
@@ -256,8 +278,8 @@ echo "[searchsum] single-request log lines: $slog (want 2)"
 # --- status-page badge fields: recentflights JSON carries the badge data, the served page carries the badge JS ---
 smark=$(grep -o '"searchMarker":true' "$OUT/recent.json" | wc -l | tr -d ' ')
 slvl=$(grep -o '"searchLevel":"high"' "$OUT/recent.json" | wc -l | tr -d ' ')
-sthk=$(grep -o '"searchThinkTo":"low"' "$OUT/recent.json" | wc -l | tr -d ' ')
-echo "badge fields in recent.json: searchMarker=true x$smark, searchLevel=high x$slvl, searchThinkTo=low x$sthk (want 2/2/2)"
+sthk=$(grep -o '"thinkTo":"low"' "$OUT/recent.json" | wc -l | tr -d ' ')
+echo "badge fields in recent.json: searchMarker=true x$smark, searchLevel=high x$slvl, thinkTo=low x$sthk (want 2/2/2)"
 [ "$smark" = "2" ] && [ "$slvl" = "2" ] && [ "$sthk" = "2" ] || { echo "SEARCH BADGE FIELDS WRONG in recent.json"; searchok=0; }
 grep -qF 'SearchSummary-' "$OUT/page.html" || { echo "SearchSummary BADGE JS MISSING in served page"; searchok=0; }
 grep -qF "thinkFrom||'auto'" "$OUT/page.html" || { echo "auto-from BADGE JS MISSING in served page"; searchok=0; }
@@ -290,6 +312,27 @@ if [ -n "$sid" ]; then
   echo "$s3up" | grep -q 'Explain that function, no search needed.' || { echo "S3 FINAL MESSAGE LOST upstream"; hqok=0; }
 fi
 [ "$hqok" = 1 ] && echo "HISTORY-QUOTE NEGATIVE SMOKE PASS" || { echo "HISTORY-QUOTE NEGATIVE SMOKE FAIL"; exit 1; }
+
+# --- route effort pin: e1 (id 21) / e2 (id 22) / e3 (id 23) hit smoke-effort (effort:max); e4 (id 24) hits smoke-noeff.
+# Only adaptive bodies are rewritten (e1 in place, e3 appended); a budget body and a route without effort pass untouched.
+efok=1
+e1up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=21&side=up")
+echo "$e1up" | grep -q '"effort":"max"' && ! echo "$e1up" | grep -q '"effort":"high"' || { echo "E1 EFFORT NOT FORCED TO MAX"; efok=0; }
+e2up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=22&side=up")
+echo "$e2up" | grep -q '"budget_tokens":2048' && ! echo "$e2up" | grep -q 'output_config' || { echo "E2 BUDGET BODY TOUCHED"; efok=0; }
+e3up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=23&side=up")
+echo "$e3up" | grep -q '"effort":"max"' || { echo "E3 OUTPUT_CONFIG NOT APPENDED"; efok=0; }
+e4up=$(curl -s --max-time 10 "http://127.0.0.1:18083/__flightreq?id=24&side=up")
+echo "$e4up" | grep -q '"effort":"high"' && ! echo "$e4up" | grep -q '"effort":"max"' || { echo "E4 NO-EFFORT ROUTE REWROTE THE BODY"; efok=0; }
+eto=$(grep -o '"thinkTo":"max"' "$OUT/recent.json" | wc -l | tr -d ' ')
+efrom=$(grep -o '"thinkFrom":"high"' "$OUT/recent.json" | wc -l | tr -d ' ')
+efromad=$(grep -o '"thinkFrom":"adaptive"' "$OUT/recent.json" | wc -l | tr -d ' ')
+eflog=$(grep -o 'adaptive thinking effort forced' "$OUT/data.json" | wc -l | tr -d ' ')
+# thinkFrom=high counts e1 plus the earlier s2 search rewrite (its client carried adaptive+high); adaptive is e3's "from".
+echo "effort badges: thinkTo=max x$eto, thinkFrom=high x$efrom, thinkFrom=adaptive x$efromad, log lines x$eflog (want 2/2/1/2)"
+[ "$eto" = "2" ] && [ "$efrom" = "2" ] && [ "$efromad" = "1" ] && [ "$eflog" = "2" ] || { echo "EFFORT BADGE/LOG COUNTS WRONG"; efok=0; }
+[ "$efok" = 1 ] && echo "EFFORT SMOKE PASS" || { echo "EFFORT SMOKE FAIL"; exit 1; }
+
 echo "page classifier(codex) log lines: $(grep -c 'classifier(codex)' "$OUT/data.json")"
 [ "$clsok" = 1 ] && echo "CLS SMOKE PASS" || { echo "CLS SMOKE FAIL"; exit 1; }
 if [ "$pairs" = "$want" ]; then echo "SMOKE PASS"; else echo "SMOKE FAIL (want [$want])"; exit 1; fi

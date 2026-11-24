@@ -31,12 +31,16 @@ func TestConfigExampleMatchesStruct(t *testing.T) {
 
 	// The demo enum value must be a level summaryLevelConfig actually recognizes.
 	validLevel := map[string]bool{"low": true, "mid": true, "high": true, "max": true}
+	validEffort := map[string]bool{"": true, "low": true, "mid": true, "high": true, "max": true}
 	for i, r := range c.Routes {
 		if r.Pattern == "" || r.URL == "" {
 			t.Errorf("routes[%d] 缺 pattern/url: %+v", i, r)
 		}
 		if es := r.EnhanceSearch; es != nil && !validLevel[es.SummaryLevel] {
 			t.Errorf("routes[%d].enhance_search.summary_level=%q 不是真实档位", i, es.SummaryLevel)
+		}
+		if !validEffort[r.Effort] {
+			t.Errorf("routes[%d].effort=%q 不是合法枚举", i, r.Effort)
 		}
 	}
 	if c.SearchFallback != nil && !validLevel[c.SearchFallback.SummaryLevel] {

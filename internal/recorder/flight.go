@@ -62,8 +62,8 @@ type Flight struct {
 	SearchPrompt     string                     // Summary instruction injected into a standalone search sub-agent request (empty when none), shown on the status page via the model cell's hover tooltip
 	SearchMarker     bool                       // Standalone search sub-agent request (its final user message opens with "Perform a web search for the query"); the web model column shows a [Search] badge
 	SearchLevel      string                     // Summary level actually injected into the marker request (empty = none); upgrades the badge to [SearchSummary-<level>]
-	SearchThinkFrom  string                     // Thinking value before the search thinking rewrite (empty = no thinking field, shown as auto)
-	SearchThinkTo    string                     // Configured level the search thinking rewrite targeted (empty = no rewrite); the API column shows [from->to]
+	ThinkFrom        string                     // Thinking value before the last body-side thinking rewrite (route effort pin / search rewrite; empty = no thinking field, shown as auto)
+	ThinkTo          string                     // Level a body-side rewrite wrote upstream (empty = no rewrite); the API column shows [from->to]
 	SearchGuardArmed bool                       // Marker request whose effective route enabled noBullshitOnEmptyClaudeSearch; only native Anthropic 200 SSE responses are buffered
 	SearchGuard      bool                       // The upstream response was discarded and replaced with the fixed empty-search stream; the web status column shows [空搜]
 	Translated       string                     // Translation-port origin tag ("responses"=translated stream, "responses-raw"=native passthrough via a route with url_response_api); the web API column shows [translate]/[Response]
@@ -503,8 +503,8 @@ type FinishedFlight struct {
 	SearchMarker     bool    // Standalone search marker hit on the final user message (the model column shows [Search])
 	Compaction       bool    // The final user message opened with a known client context-compaction prompt (the model column shows [Compact]); finished rows append the compact result via CompactSave
 	SearchLevel      string  // Injected summary level (empty = none; the badge upgrades to [SearchSummary-<level>])
-	SearchThinkFrom  string  // Thinking value before the rewrite (empty = no thinking field, shown as auto)
-	SearchThinkTo    string  // Rewrite target level (empty = no rewrite; the API column shows [from->to])
+	ThinkFrom        string  // Thinking value before the last body-side thinking rewrite (empty = no thinking field, shown as auto)
+	ThinkTo          string  // Level a body-side rewrite wrote upstream (empty = no rewrite; the API column shows [from->to])
 	Translated       string  // Translation-port origin tag ("responses"=translated, "responses-raw"=native passthrough); the web API column shows [translate]/[Response]
 	CountTokens      bool    // count_tokens probe stream; the web model column shows a [count_tokens] prefix
 	Tools            string  // Tool-call tag ("[Read*1][Edit*3]", empty when no tools), appended in the web model column
@@ -629,8 +629,8 @@ func AddFinished(f *Flight) {
 		SearchMarker:     f.SearchMarker,
 		Compaction:       f.Compaction.Load(),
 		SearchLevel:      f.SearchLevel,
-		SearchThinkFrom:  f.SearchThinkFrom,
-		SearchThinkTo:    f.SearchThinkTo,
+		ThinkFrom:        f.ThinkFrom,
+		ThinkTo:          f.ThinkTo,
 		Translated:       f.Translated,
 		CountTokens:      f.CountTokens,
 		Tools:            f.ToolCallsTag(),

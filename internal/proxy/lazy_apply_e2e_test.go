@@ -31,7 +31,7 @@ func TestLazyApplyDirectSearchE2E(t *testing.T) {
 			t.Errorf("lazyApply search fields should reach the upstream (missing %q): %s", sub, up)
 		}
 	}
-	for _, sub := range []string{`"searchMarker":true`, `"searchLevel":"high"`, `"searchThinkTo":"max"`} {
+	for _, sub := range []string{`"searchMarker":true`, `"searchLevel":"high"`, `"thinkTo":"max"`} {
 		if !strings.Contains(recent, sub) {
 			t.Errorf("recent flight badges should reflect lazyApply (missing %q): %s", sub, recent)
 		}

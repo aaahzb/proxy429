@@ -635,7 +635,7 @@ func TestRouteSearchFieldsOverrideSearchFallback(t *testing.T) {
 	}
 	checkPassthrough(t, out)
 	// Status-page badges: marker hit + injection + thinking rewrite all surfaced on the recent flight.
-	for _, sub := range []string{`"searchMarker":true`, `"searchLevel":"high"`, `"searchThinkFrom":"off"`, `"searchThinkTo":"max"`} {
+	for _, sub := range []string{`"searchMarker":true`, `"searchLevel":"high"`, `"thinkFrom":"off"`, `"thinkTo":"max"`} {
 		if !strings.Contains(recent, sub) {
 			t.Errorf("recentflights 应带搜索徽标字段（缺 %q）: %s", sub, recent)
 		}
@@ -662,7 +662,7 @@ func TestRouteSearchFieldsPartialOverride(t *testing.T) {
 
 	}
 	// Badges: noForce kills the injection (level stays empty), the thinking rewrite still shows from->to.
-	for _, sub := range []string{`"searchMarker":true`, `"searchLevel":""`, `"searchThinkFrom":"off"`, `"searchThinkTo":"low"`} {
+	for _, sub := range []string{`"searchMarker":true`, `"searchLevel":""`, `"thinkFrom":"off"`, `"thinkTo":"low"`} {
 		if !strings.Contains(recent, sub) {
 			t.Errorf("recentflights 徽标字段（缺 %q）: %s", sub, recent)
 		}
@@ -687,7 +687,7 @@ func TestRouteSearchFieldsOnSearchCapableRoute(t *testing.T) {
 		}
 	}
 	checkPassthrough(t, out)
-	for _, sub := range []string{`"searchMarker":true`, `"searchLevel":"mid"`, `"searchThinkFrom":"off"`, `"searchThinkTo":"low"`} {
+	for _, sub := range []string{`"searchMarker":true`, `"searchLevel":"mid"`, `"thinkFrom":"off"`, `"thinkTo":"low"`} {
 		if !strings.Contains(recent, sub) {
 			t.Errorf("recentflights 徽标字段（缺 %q）: %s", sub, recent)
 		}
@@ -739,7 +739,7 @@ func TestSearchRewriteKeepsThinkingForThinkingClient(t *testing.T) {
 	if !strings.Contains(out, "thinking_delta") {
 		t.Errorf("开思考客户端应照常看到思考块（不剥离）: %s", out)
 	}
-	for _, sub := range []string{`"searchThinkFrom":"high"`, `"searchThinkTo":"low"`} {
+	for _, sub := range []string{`"thinkFrom":"high"`, `"thinkTo":"low"`} {
 		if !strings.Contains(recent, sub) {
 			t.Errorf("recentflights 徽标字段（缺 %q）: %s", sub, recent)
 		}

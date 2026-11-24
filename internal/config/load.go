@@ -476,8 +476,8 @@ func attachConfigPresence(top map[string]json.RawMessage, c *Config) {
 	}
 }
 
-// ValidateConfigEnums rejects config values outside their supported sets (route thinking shapes, classifier thinking
-// policy, convertOff2Low scope), so a typo fails loudly at load/save time instead of silently doing nothing.
+// ValidateConfigEnums rejects config values outside their supported sets (route thinking shapes, route effort levels,
+// classifier thinking policy, convertOff2Low scope), so a typo fails loudly at load/save time instead of silently doing nothing.
 func ValidateConfigEnums(c *Config) error {
 	if err := validateLazyApplyEnums(c.LazyApply); err != nil {
 		return err
@@ -512,6 +512,11 @@ func ValidateConfigEnums(c *Config) error {
 		case "", "auto", "adaptive", "budget":
 		default:
 			return fmt.Errorf("route #%d (pattern %q) has invalid thinking value %q: only auto / adaptive / budget are supported", i+1, c.Routes[i].Pattern, c.Routes[i].Thinking)
+		}
+		switch c.Routes[i].Effort {
+		case "", "low", "mid", "high", "max":
+		default:
+			return fmt.Errorf("route #%d (pattern %q) has invalid effort value %q: only low / mid / high / max are supported (unset = leave the request's effort untouched)", i+1, c.Routes[i].Pattern, c.Routes[i].Effort)
 		}
 		switch c.Routes[i].ClaudeSearchThinking {
 		case "", "off", "low", "mid", "high", "max":

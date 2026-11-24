@@ -391,6 +391,58 @@ func classifierThinkingShape(body []byte, spans []jsonutil.FieldSpan) string {
 	return ""
 }
 
+// forceAdaptiveEffort rewrites the top-level output_config of an adaptive-thinking request body to exactly
+// {"effort":"<level>"} whatever effort the body carried. mid normalizes to medium. Returns the new body and the
+// wire level; changed=false means body is returned untouched (thinking not adaptive, malformed body, unknown
+// level, or already at that level — no pointless badge).
+func forceAdaptiveEffort(body []byte, effort string) (out []byte, level string, changed bool) {
+	if effort == "" {
+		return body, "", false
+	}
+	if effort == "mid" {
+		effort = "medium"
+	}
+	switch effort {
+	case "low", "medium", "high", "max":
+	default:
+		return body, "", false
+	}
+	if !bytes.Contains(body, []byte(`"adaptive"`)) { // Fast path: most bodies never carry the marker, skip the span scan then
+		return body, "", false
+	}
+	spans, ok := jsonutil.LocateTopFields(body)
+	if !ok {
+		return body, "", false
+	}
+	var thinkVal, ocVal []byte
+	for i := range spans {
+		s := &spans[i]
+		switch s.Name {
+		case "thinking":
+			thinkVal = body[s.ValStart:s.ValEnd]
+		case "output_config":
+			ocVal = body[s.ValStart:s.ValEnd]
+		}
+	}
+	var think struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(thinkVal, &think) != nil || think.Type != "adaptive" {
+		return body, "", false
+	}
+	if len(ocVal) > 0 && effortWordOf(ocVal) == effort {
+		return body, "", false
+	}
+	if !json.Valid(body) {
+		return body, "", false
+	}
+	nb, ok := jsonutil.SetTopLevelJSONValue(body, "output_config", []byte(`{"effort":"`+effort+`"}`))
+	if !ok {
+		return body, "", false
+	}
+	return nb, effort, true
+}
+
 // maybeRewriteClassifier applies the configured thinking policy when a classifier request matches, so classification returns fast.
 // Both policies first normalize thinking to off; under "low" the post-routing upgrade point then quietly raises it to low
 // upstream (that step needs the final model, which routing settles later) and thinking blocks are stripped from the response.

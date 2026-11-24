@@ -520,7 +520,7 @@ function apiCell(translated, think, thinkFrom, thinkTo){
   else { name = '[Anthropic]'; color = '#d97757'; }
   var html = '<span style="color:'+color+'">'+name+'</span>';
   if(thinkTo){
-    // 搜索子代理思考改写徽标 [原->新]（原值空 = 请求本无 thinking 字段，显示 auto），青绿；出现时取代普通 [think] 徽标
+    // Body-side thinking rewrite badge [from->to] (route effort pin / search sub-agent rewrite; empty from = the request had no thinking field, shown as auto), teal; replaces the normal [think] badge when present
     html += '<span style="color:#4ec9b0">['+esc((thinkFrom||'auto')+'->'+thinkTo)+']</span>';
   } else if(think === 'off->low'){
     // convertOff2Low 升级流双色徽标：off 用翻译紫（下游口径：它发的是关思考），
@@ -1054,7 +1054,7 @@ async function poll(){
     const fs = d.flights || [];
     fs.forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull, rd:!!f.reqDown, sd:!!f.respDown, rdt:!!f.reqDownTrunc, hfd:!!f.hasFullDown, lst:f.last||0}; });
     flightsBody.innerHTML = fs.map(f =>
-      '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>'+flightDot(f)+attemptTag(f)+' '+fmtStageDur(f.stageMs)+'</td><td>#'+f.id+lastTag(f)+'</td>'+modelCell(f)+apiCell(f.translated,f.think,f.searchThinkFrom,f.searchThinkTo)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+flightStatus(f)+'</td></tr>'
+      '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>'+flightDot(f)+attemptTag(f)+' '+fmtStageDur(f.stageMs)+'</td><td>#'+f.id+lastTag(f)+'</td>'+modelCell(f)+apiCell(f.translated,f.think,f.thinkFrom,f.thinkTo)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+flightStatus(f)+'</td></tr>'
     ).join('');
     // 在途流输出查看：手选单流优先，否则自动跟踪 grid，否则隐藏
     var fv = document.getElementById('flightView');
@@ -1158,7 +1158,7 @@ async function poll(){
         (rfd.list||[]).forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull, rd:!!f.reqDown, sd:!!f.respDown, rdt:!!f.reqDownTrunc, hfd:!!f.hasFullDown, lst:f.last||0}; });
         document.querySelector('#finishedFlights tbody').innerHTML = (rfd.list||[]).map(function(f){
           // Finished rows render the [剥N] strip badge in the cache-hit column, so clear stripped before the shared model cell (no duplicate badge).
-          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+lastTag(f)+'</td>'+modelCell(Object.assign({}, f, {stripped:0}))+apiCell(f.translated,f.think,f.searchThinkFrom,f.searchThinkTo)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+(f.total||'-')+'</td><td>'+(f.gaveUp?'[重试尽]':(f.status?(f.status===200?'200':'['+f.status+']'):'-'))+(f.attempts>1?'<span style="color:#d7ba7d">[重试'+(f.attempts-1)+'次]</span>':'')+(f.noStop?'<span style="color:#f48771">[无stop]</span>':'')+(f.searchGuard?'<span style="color:#f48771">[空搜]</span>':'')+'</td><td>'+(f.hitRate||'-')+(f.stripped>0?'<span style="color:#f48771">[剥'+f.stripped+']</span>':'')+'</td><td>'+(f.cacheAge||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
+          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+lastTag(f)+'</td>'+modelCell(Object.assign({}, f, {stripped:0}))+apiCell(f.translated,f.think,f.thinkFrom,f.thinkTo)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+(f.total||'-')+'</td><td>'+(f.gaveUp?'[重试尽]':(f.status?(f.status===200?'200':'['+f.status+']'):'-'))+(f.attempts>1?'<span style="color:#d7ba7d">[重试'+(f.attempts-1)+'次]</span>':'')+(f.noStop?'<span style="color:#f48771">[无stop]</span>':'')+(f.searchGuard?'<span style="color:#f48771">[空搜]</span>':'')+'</td><td>'+(f.hitRate||'-')+(f.stripped>0?'<span style="color:#f48771">[剥'+f.stripped+']</span>':'')+'</td><td>'+(f.cacheAge||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
         }).join('');
       }
     }catch(e){}

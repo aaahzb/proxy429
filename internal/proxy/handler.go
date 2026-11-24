@@ -202,7 +202,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	authToken := ""
 	var targetModel string
 	fastRouteHit := false
-	convFlag := "" // The effective route's convertOff2Low value, captured where routing settles ("" = feature off)
+	convFlag := ""    // The effective route's convertOff2Low value, captured where routing settles ("" = feature off)
+	routeEffort := "" // The effective route's effort pin, captured where routing settles ("" = never touch output_config)
 	// Standalone search sub-agent handling (single-request search+summary): the effective levels are resolved
 	// where routing settles; the request body is transformed after the routing block.
 	searchInjectLevel := ""     // ""/low/mid/high/max: inject the summary instruction into the search request itself
@@ -313,6 +314,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.ID, origModel, rr.URL, origModel, rr.Model)
 				f.RouteReason.Store(recorder.RoutePattern)
 				convFlag = config.EffectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.Presence.Written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
+				routeEffort = rr.Effort // Captured only here: fallback/classifier/fast/Responses-raw lanes are served otherwise and never inherit it (the pin site itself exempts the quiet off->low upgrade)
 				searchGuardEnabled = config.EffectiveSearchGuard(c, rr, nil)
 				// Enhance search / route-level claudeSearch*: when the route effectively supports search (no_search:false),
 				// a standalone search sub-agent request gets the summary instruction injected into the request itself
@@ -334,6 +336,23 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	f.OrigModel = origModel
 	f.TargetModel = targetModel
 
+	// Route-level effort pin: when the upstream-bound body carries adaptive thinking, force output_config.effort to
+	// the route's level whatever the client asked for (mid went to the wire as medium). Non-adaptive bodies are left
+	// byte-identical, and so are bodies already at the level (forceAdaptiveEffort returns changed=false).
+	// The quiet off->low upgrade owns its level: on the translated port it already rewrote an explicit thinking-off
+	// body into adaptive+low before this point (n2lMode from ctx is still fresh — the native upgrade below reassigns
+	// it later), and pinning that body would quietly send the client's "off" at the route level.
+	if routeEffort != "" && n2lMode != translate.N2LStealth {
+		if nb, level, changed := forceAdaptiveEffort(body, routeEffort); changed {
+			from := f.Think
+			log.Printf("[effort] #%d adaptive thinking effort forced %q -> %q", f.ID, from, level)
+			body = nb
+			f.ThinkFrom = from // Empty from renders as auto in the API column's [from->to] badge
+			f.ThinkTo = level
+			f.Think = level
+		}
+	}
+
 	// Standalone search sub-agent request (single-request search+summary): inject the summary instruction into the
 	// search request itself and/or rewrite its thinking, then the normal forward path takes over — the upstream
 	// searches and answers in one request and its response streams through untouched (no proxy-side synthesis; only
@@ -345,10 +364,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		f.SearchGuardArmed = searchGuardEnabled
 		if searchThinkLevel != "" {
 			thinkFrom := f.Think
+			if thinkFrom == "off->low" {
+				thinkFrom = "off" // Stealth-upgrade display sentinel, not a thinking value: the rewrite badge reads [off->search level]
+			}
 			if nb, ok := rewriteSearchThinking(body, searchThinkLevel); ok {
 				body = nb
-				f.SearchThinkFrom = thinkFrom // Empty from renders as auto in the API column's [from->to] badge
-				f.SearchThinkTo = searchThinkLevel
+				f.ThinkFrom = thinkFrom // Empty from renders as auto in the API column's [from->to] badge
+				f.ThinkTo = searchThinkLevel
 				if searchThinkLevel != "off" && (thinkFrom == "" || thinkFrom == "off") {
 					// The client never asked for thinking (absent or explicitly off) but the rewrite turned it on:
 					// strip the returning thinking blocks (the convertOff2Low machinery) so the client stays unaware.
@@ -635,7 +657,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			// with thinking on"): switch thinking back off and retry once immediately — the downstream wanted thinking off anyway (or at
 			// most accepts it off), so it's semantically lossless; no backoff budget burned (attempt--, same as the search-strip fallback).
 			// After the fallback the upstream receives thinking-off, so the response carries no thinking blocks and response-side stripping has nothing to do;
-			// the badge falls back to truthful display as well.
+			// the [from->to] badge is cleared with it so the API column shows the truthful final value.
 			if n2lMode != translate.N2LNone && bytes.Contains(head, []byte("thinking")) {
 				if nb, ok := disableThinkingInBody(body); ok {
 					if n2lMode == translate.N2LTryOn {
@@ -653,7 +675,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 					}
 					n2lMode = translate.N2LNone
 					f.Think = extractThinkMode(body)
-					f.StripThinking.Store(false) // The retried response is genuinely thinking-off; there is nothing left to strip
+					f.ThinkFrom, f.ThinkTo = "", "" // A stale [from->to] badge would claim a rewrite the retried thinking-off body no longer carries
+					f.StripThinking.Store(false)    // The retried response is genuinely thinking-off; there is nothing left to strip
 					attempt--
 					resp.Body.Close()
 					continue

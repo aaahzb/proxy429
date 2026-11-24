@@ -62,7 +62,8 @@
       "url": "https://api.anthropic.com",
       "api": "sk-ant-replace-with-your-key",
       "model": "claude-fable-5",
-      "thinking": "adaptive"
+      "thinking": "adaptive",
+      "effort": "max"
     }
   ],
   "classifier_route": {
