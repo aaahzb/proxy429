@@ -4,6 +4,7 @@ package main
 //   mode=429      → returns HTTP 429 (case A: status-code retry)
 //   mode=bodyerr  → returns HTTP 200 + SSE error event (case B: in-body error retry)
 //   mode=ok       → returns HTTP 200 + normal SSE (case C: normal pass-through)
+//   mode=slow     → like ok, but holds 1.5s after message_start — lets the smoke read a live status row and cancel a downstream before any usage delta
 //   mode=think    → returns HTTP 200 + SSE with a leading thinking block (exercises the convertOff2Low response stripper)
 //   mode=search   → returns HTTP 200 + SSE with server_tool_use + web_search_tool_result + summary text (a real search upstream's one-request answer)
 // It also prints the received thinking/reasoning_effort/max_tokens to verify classifier rewriting.
@@ -36,6 +37,8 @@ func main() {
 				mode = "bodyerr"
 			case strings.HasPrefix(r.URL.Path, "/search/"):
 				mode = "search"
+			case strings.HasPrefix(r.URL.Path, "/slow/"):
+				mode = "slow"
 			default:
 				mode = "429"
 			}
@@ -61,7 +64,7 @@ func main() {
 			w.WriteHeader(200)
 			w.Write([]byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"rate limited\"}}\n\n"))
 			return
-		case "ok":
+		case "ok", "slow":
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(200)
 			flusher, _ := w.(http.Flusher)
@@ -74,6 +77,11 @@ func main() {
 			w.Write([]byte("event: message_start\ndata: " + msgStart + "\n\n"))
 			if flusher != nil {
 				flusher.Flush()
+			}
+			if mode == "slow" {
+				// Hold the stream after message_start (input usage visible, no message_delta yet): the smoke reads
+				// the live token cell mid-stream and cancels a downstream here to pin the [input/-] display.
+				time.Sleep(1500 * time.Millisecond)
 			}
 			// Faithful block framing (start/delta/stop with index and typed text_delta) so downstream
 			// converters that key on delta.type see real text. Each delta is followed by a message_delta
@@ -164,7 +172,7 @@ func main() {
 			return
 		}
 	})
-	log.Println("mock 服务器启动: 监听 127.0.0.1:9099 (?mode=429|bodyerr|ok|think|search，或路径前缀 /ok/ /think/ /bodyerr/ /search/)")
+	log.Println("mock 服务器启动: 监听 127.0.0.1:9099 (?mode=429|bodyerr|ok|slow|think|search，或路径前缀 /ok/ /slow/ /think/ /bodyerr/ /search/)")
 	log.Fatal(http.ListenAndServe("127.0.0.1:9099", nil))
 }
 

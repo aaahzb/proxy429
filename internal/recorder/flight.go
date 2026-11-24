@@ -48,15 +48,23 @@ type Flight struct {
 	// convertAlltoStream-rebuilt JSON streams store contentDown, native streams store reqDown only when rewritten
 	// (classifier thinking rewrite / routed model etc.); all empty means both sides identical, and endpoints fall back
 	// to the other side, reporting the actual side via the X-Proxy429-Side header. Guarded by contentMu.
-	reqDown          []byte                     // Raw downstream→proxy request body (truncation/full rules same as reqBody)
-	reqDownTruncated bool                       // Whether reqDown was truncated to just the head
-	ContentDown      []byte                     // Proxy→downstream response content (capped at flightContentCap, keeps the tail)
-	FullContentDown  []byte                     // Proxy→downstream full response (recorded only with the 储存完整结构体 toggle on)
-	FullPartialDown  bool                       // Downstream-side mirror of fullPartial: down bytes that flowed with the toggle off mean no complete down full copy (guarded by contentMu)
-	InTokens         int64                      // This stream's cumulative input_tokens (stored from lastInput when forward ends)
-	CacheRead        int64                      // This stream's cumulative cache_read
-	CacheCreation    int64                      // This stream's cumulative cache_creation (cache writes; part of the hit-rate denominator)
-	OutTokens        int64                      // This stream's cumulative output_tokens
+	reqDown          []byte // Raw downstream→proxy request body (truncation/full rules same as reqBody)
+	reqDownTruncated bool   // Whether reqDown was truncated to just the head
+	ContentDown      []byte // Proxy→downstream response content (capped at flightContentCap, keeps the tail)
+	FullContentDown  []byte // Proxy→downstream full response (recorded only with the 储存完整结构体 toggle on)
+	FullPartialDown  bool   // Downstream-side mirror of fullPartial: down bytes that flowed with the toggle off mean no complete down full copy (guarded by contentMu)
+	InTokens         int64  // This stream's cumulative input_tokens (stored from lastInput when forward ends)
+	CacheRead        int64  // This stream's cumulative cache_read
+	CacheCreation    int64  // This stream's cumulative cache_creation (cache writes; part of the hit-rate denominator)
+	OutTokens        int64  // This stream's cumulative output_tokens
+	// Live display copies for the console's token in/out column, updated from every usage event and
+	// never rolled back when a stream is interrupted (unlike the aggregate fields above, which only
+	// count complete responses): TokIn = last-seen total input (input + cache_read + cache_creation),
+	// TokOut = output once the terminal usage delta has arrived. Each side packs its seen flag into
+	// the low bit (value<<1 | seen) so one atomic read yields a consistent pair and the zero value
+	// means "unseen" (a bare &Flight{} needs no init). Atomics because the web console polls them.
+	TokIn            atomic.Int64
+	TokOut           atomic.Int64
 	FirstByteMs      int64                      // This stream's first-byte latency (ms), recorded only on the normal response path
 	TPS              float64                    // This stream's streaming tok/s, recorded only on the normal response path
 	SearchPrompt     string                     // Summary instruction injected into a standalone search sub-agent request (empty when none), shown on the status page via the model cell's hover tooltip
@@ -101,6 +109,42 @@ type Flight struct {
 
 // SetCompactEffort records the top-level compactEffort pin (wire form) for this compaction request; call once at body read.
 func (f *Flight) SetCompactEffort(level string) { f.compactEffort.Store(level) }
+
+// NoteLiveUsage records the last-seen usage for the console's token in/out column (display only).
+// Input becomes visible once any component is non-zero (ARK's all-zero message_start is skipped
+// until the delta carries the real split); output only once the terminal usage delta arrived
+// (message_delta / Responses terminal event / non-stream JSON parse), so a stream cancelled before
+// it renders "[input/-]". Call after each usage parse, passing the running last* values.
+func (f *Flight) NoteLiveUsage(in, cacheRead, cacheCreation, out int64, deltaSeen bool) {
+	if total := in + cacheRead + cacheCreation; total > 0 {
+		f.TokIn.Store(total<<1 | 1)
+	}
+	if deltaSeen {
+		f.TokOut.Store(out<<1 | 1)
+	}
+}
+
+// LiveTokens returns the console token cell snapshot: total input and output tokens, each with its
+// seen flag (unpacked from the packed atomic). Safe to call from any goroutine.
+func (f *Flight) LiveTokens() (in int64, inSeen bool, out int64, outSeen bool) {
+	p := f.TokIn.Load()
+	if inSeen = p&1 == 1; inSeen {
+		in = p >> 1
+	}
+	p = f.TokOut.Load()
+	if outSeen = p&1 == 1; outSeen {
+		out = p >> 1
+	}
+	return
+}
+
+// ResetLiveUsage clears the token column state at the start of a forwarding attempt. A retried attempt
+// reuses the Flight, and the failed attempt's usage was rolled back from the aggregates, so its
+// last-seen numbers must not mix into the attempt that will actually be delivered.
+func (f *Flight) ResetLiveUsage() {
+	f.TokIn.Store(0)
+	f.TokOut.Store(0)
+}
 
 // CompactEffortValue returns the stored compactEffort pin; empty = no pin for this flight.
 func (f *Flight) CompactEffortValue() string {
@@ -526,6 +570,10 @@ type FinishedFlight struct {
 	CacheRead        int64   // This stream's cumulative cache_read
 	CacheCreation    int64   // This stream's cumulative cache_creation
 	OutTokens        int64   // This stream's cumulative output_tokens
+	TokIn            int64   // Display-only last-seen total input (input + cache_read + cache_creation; not rolled back on interruption)
+	TokInSeen        bool    // TokIn was observed (false = the in/out column shows "-" on that side)
+	TokOut           int64   // Display-only output tokens (recorded once the terminal usage delta arrived)
+	TokOutSeen       bool    // TokOut was observed
 	FirstByteMs      int64   // This stream's first-byte latency (ms)
 	TPS              float64 // This stream's streaming tok/s
 	SearchPrompt     string  // Summary instruction injected into a standalone search sub-agent request (empty when none)
@@ -610,6 +658,7 @@ func (f *Flight) RefreshArchivedDown() { refreshArchivedDown(f) }
 func AddFinished(f *Flight) {
 	content := f.SnapshotContent()
 	model := f.ModelDisplay()
+	tokIn, tokInSeen, tokOut, tokOutSeen := f.LiveTokens()
 	// When the model actually returned by the upstream differs from the route target, append a third segment so the user sees the real landing spot.
 	if f.UpstreamModel != "" && f.UpstreamModel != f.TargetModel && f.UpstreamModel != f.OrigModel {
 		model = model + " -> " + f.UpstreamModel
@@ -650,6 +699,10 @@ func AddFinished(f *Flight) {
 		CacheRead:        f.CacheRead,
 		CacheCreation:    f.CacheCreation,
 		OutTokens:        f.OutTokens,
+		TokIn:            tokIn,
+		TokInSeen:        tokInSeen,
+		TokOut:           tokOut,
+		TokOutSeen:       tokOutSeen,
 		FirstByteMs:      f.FirstByteMs,
 		TPS:              f.TPS,
 		SearchPrompt:     f.SearchPrompt,

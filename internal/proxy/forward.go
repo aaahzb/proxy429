@@ -238,6 +238,9 @@ func sleepWithPing(ctx context.Context, w http.ResponseWriter, flusher http.Flus
 // Returns this stream's final output_tokens, for the handler's token/s sample.
 func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.Reader, f *recorder.Flight, headersSent bool) int64 {
 	defer resp.Body.Close()
+	// Each attempt owns the token column: a retry reuses the Flight, and the failed attempt's usage was
+	// rolled back from the aggregates, so it must not linger in the display.
+	f.ResetLiveUsage()
 	// convertOff2Low native-port upgrade (off->low): strip thinking blocks from the response so the client keeps seeing the
 	// thinking-off shape it asked for. Only on a 200 (error bodies pass through untouched), never on Responses passthrough.
 	var stripper *translate.ThinkingStripper
@@ -293,6 +296,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 				f.CacheRead = cr
 				f.CacheCreation = cc
 				f.OutTokens = out
+				f.NoteLiveUsage(in, cr, cc, out, true) // A complete non-stream JSON carries the real usage on both sides
 				recorder.Stats.Mu.Lock()
 				recorder.Stats.InputTokens += in
 				recorder.Stats.CacheRead += cr
@@ -396,6 +400,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 		for _, line := range bytes.Split(data, []byte("\n")) {
 			if responsesRaw {
 				recorder.ParseResponsesStreamStats(line, &lastOutput, &lastInput, &lastCacheRead, &lastCacheCreation, &sawDeltaUsage)
+				f.NoteLiveUsage(lastInput, lastCacheRead, lastCacheCreation, lastOutput, sawDeltaUsage)
 				if itemID, name, ok := recorder.ParseResponsesToolStart(line); ok {
 					f.NoteToolCall(name) // Tool-call counting: the finished-streams list shows tags like [exec_command*1]
 					respTools[itemID] = name
@@ -418,6 +423,7 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 				continue
 			}
 			recorder.ParseSSEStats(line, &lastOutput, &lastInput, &lastCacheRead, &lastCacheCreation, &sawDeltaUsage)
+			f.NoteLiveUsage(lastInput, lastCacheRead, lastCacheCreation, lastOutput, sawDeltaUsage)
 			if ts, ok := recorder.ParseToolCallStart(line); ok {
 				f.NoteToolCall(ts.Name) // Tool-call counting: the finished-streams list shows [Read*1][Edit*3]
 				tr := &recorder.OpenToolCall{Name: ts.Name}
@@ -513,6 +519,9 @@ func forward(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.
 // On an incomplete stream nothing is written to the client, so the caller can safely retry the whole thing (resend the streaming request, drain again).
 func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte, br *bufio.Reader, f *recorder.Flight) (bool, int64) {
 	defer resp.Body.Close()
+	// Each attempt owns the token column: an incomplete stream is retried wholesale on the same Flight
+	// (its usage rolls back), so the discarded attempt's numbers must not linger in the display.
+	f.ResetLiveUsage()
 	f.Phase.Store(1)
 	f.Status = resp.StatusCode
 	f.SetStage(recorder.StageForward)
@@ -529,6 +538,7 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 	var usageObj map[string]interface{}        // Merged usage: start as the base, delta overwriting
 	blocks := map[int]map[string]interface{}{} // index -> content block (start skeleton + delta accumulation)
 	var lastOutput, lastInput, lastCacheRead, lastCacheCreation int64
+	var sawDeltaUsage bool // Terminal usage seen; drives the live token column even if the rebuild is later retried
 	complete := false
 
 	// strVal takes a string field from a map (missing or non-string returns an empty string).
@@ -550,7 +560,8 @@ func collectStreamToJSON(w http.ResponseWriter, resp *http.Response, head []byte
 			}
 			f.Bytes.Add(int64(len(line)))
 			f.AppendContent(line)
-			recorder.ParseSSEStats(line, &lastOutput, &lastInput, &lastCacheRead, &lastCacheCreation, nil)
+			recorder.ParseSSEStats(line, &lastOutput, &lastInput, &lastCacheRead, &lastCacheCreation, &sawDeltaUsage)
+			f.NoteLiveUsage(lastInput, lastCacheRead, lastCacheCreation, lastOutput, sawDeltaUsage)
 
 			s := bytes.TrimRight(line, "\r\n")
 			if !bytes.HasPrefix(s, []byte("data:")) {

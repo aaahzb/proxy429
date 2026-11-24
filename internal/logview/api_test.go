@@ -140,6 +140,90 @@ func TestRecentFlightsCompactionFields(t *testing.T) {
 	}
 }
 
+// TestRecentFlightsTokensField verifies the finished-streams JSON carries the token in/out column:
+// "-" when nothing was received, "input/-" for a stream cancelled before the usage delta, and
+// "input/output" for a complete one. bytes stays on the row for the cell's hover title.
+func TestRecentFlightsTokensField(t *testing.T) {
+	resetStats()
+	oldFinished := recorder.Finished
+	defer func() { recorder.Finished = oldFinished }()
+	recorder.Finished = []recorder.FinishedFlight{
+		{ID: 1, Bytes: 394000, TokIn: 107000, TokInSeen: true},
+		{ID: 2, TokIn: 18, TokInSeen: true, TokOut: 10, TokOutSeen: true},
+		{ID: 3},
+	}
+
+	req := httptest.NewRequest("GET", "/__recentflights", nil)
+	req.RemoteAddr = "127.0.0.1:1"
+	rec := httptest.NewRecorder()
+	RecentFlightsHandler(rec, req)
+	var d struct {
+		List []struct {
+			ID     uint64 `json:"id"`
+			Tokens string `json:"tokens"`
+			Bytes  int64  `json:"bytes"`
+		} `json:"list"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatalf("响应非 JSON: %v", err)
+	}
+	if len(d.List) != 3 {
+		t.Fatalf("recentFlights 应有 3 行，实际 %s", rec.Body.String())
+	}
+	// Newest first: ID 3 (nothing received), ID 2 (complete), ID 1 (cancelled before the delta).
+	if got := d.List[0]; got.ID != 3 || got.Tokens != "-" {
+		t.Errorf("row without usage = %+v, want tokens -", got)
+	}
+	if got := d.List[1]; got.ID != 2 || got.Tokens != "18/10" {
+		t.Errorf("complete row = %+v, want tokens 18/10", got)
+	}
+	if got := d.List[2]; got.ID != 1 || got.Tokens != "107k/-" || got.Bytes != 394000 {
+		t.Errorf("cancelled row = %+v, want tokens 107k/- with bytes kept for the hover title", got)
+	}
+}
+
+// TestLogDataFlightTokens verifies the in-flight JSON always carries the live token in/out value,
+// which is a bare "-" when neither side has been received.
+func TestLogDataFlightTokens(t *testing.T) {
+	resetStats()
+	defer func() {
+		recorder.Flights.Mu.Lock()
+		delete(recorder.Flights.M, 7)
+		delete(recorder.Flights.M, 8)
+		recorder.Flights.Mu.Unlock()
+	}()
+	f := &recorder.Flight{ID: 7}
+	f.NoteLiveUsage(107000, 0, 0, 4, true)
+	blank := &recorder.Flight{ID: 8}
+	recorder.Flights.Mu.Lock()
+	recorder.Flights.M[7] = f
+	recorder.Flights.M[8] = blank
+	recorder.Flights.Mu.Unlock()
+
+	req := httptest.NewRequest("GET", "/__logs/data", nil)
+	req.RemoteAddr = "127.0.0.1:1234" // isLocalRequest gate
+	rec := httptest.NewRecorder()
+	logDataHandler(rec, req)
+	var d struct {
+		Flights []struct {
+			ID     uint64 `json:"id"`
+			Tokens string `json:"tokens"`
+		} `json:"flights"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatalf("响应非 JSON: %v", err)
+	}
+	if len(d.Flights) != 2 {
+		t.Fatalf("在途流应有 2 行，实际 %s", rec.Body.String())
+	}
+	if got := d.Flights[0]; got.ID != 7 || got.Tokens != "107k/4" {
+		t.Errorf("stream with usage = %+v, want tokens 107k/4", got)
+	}
+	if got := d.Flights[1]; got.ID != 8 || got.Tokens != "-" {
+		t.Errorf("stream without usage = %+v, want tokens -", got)
+	}
+}
+
 // resetStats clears the global recorder state so tests don't affect each other.
 func resetStats() {
 	recorder.Stats.Mu.Lock()

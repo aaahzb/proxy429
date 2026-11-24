@@ -262,19 +262,42 @@ func CompactSave(in, cacheRead, cacheCreation, out int64) string {
 		return ""
 	}
 	pct := int(math.Round((1 - float64(out)/float64(total)) * 100))
-	k := func(n int64) string {
-		switch {
-		case n >= 1e6:
-			return fmt.Sprintf("%.1fM", float64(n)/1e6)
-		case n >= 10000:
-			return fmt.Sprintf("%.0fk", float64(n)/1e3)
-		case n >= 1000:
-			return fmt.Sprintf("%.1fk", float64(n)/1e3)
-		default:
-			return strconv.FormatInt(n, 10)
-		}
+	return fmt.Sprintf("%s->%s, %d%%", compactNum(total), compactNum(out), pct)
+}
+
+// compactNum formats a token count compactly for the console (107k / 170k / 1.2M), the shared
+// convention of the compaction result and the token in/out column. The unit thresholds sit on the
+// rounding boundaries so no value renders as "1000k" or "10.0k": 999,500+ rounds to "1.0M", and
+// 9,950+ rounds to a whole "10k".
+func compactNum(n int64) string {
+	switch {
+	case n >= 999500:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 9950:
+		return fmt.Sprintf("%.0fk", float64(n)/1e3)
+	case n >= 1000:
+		return fmt.Sprintf("%.1fk", float64(n)/1e3)
+	default:
+		return strconv.FormatInt(n, 10)
 	}
-	return fmt.Sprintf("%s->%s, %d%%", k(total), k(out), pct)
+}
+
+// FmtTokens formats a stream's displayed token pair — total input / output — as "107k/4".
+// Each side that was never observed renders "-" (e.g. "107k/-" for a stream cancelled before the
+// usage delta), and "-" alone when neither is known. Display-only: unlike the aggregate stats it
+// keeps whatever the head/tail actually reported for an interrupted stream.
+func FmtTokens(in int64, inSeen bool, out int64, outSeen bool) string {
+	if !inSeen && !outSeen {
+		return "-"
+	}
+	left, right := "-", "-"
+	if inSeen {
+		left = compactNum(in)
+	}
+	if outSeen {
+		right = compactNum(out)
+	}
+	return left + "/" + right
 }
 
 // humanBytes compresses byte counts to 2.3KB / 1.20MB forms for live traffic display.

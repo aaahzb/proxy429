@@ -151,13 +151,13 @@ const logViewerHTML = `<!DOCTYPE html>
   <div id="hijackWarn" style="display:none;background:#3d1414;border:1px solid #c0392b;border-radius:4px;padding:8px 10px;margin-bottom:8px;color:#f0b9b0">⚠ 检测到系统代理已开启，但 NO_PROXY 环境变量未排除回环地址——遵循系统代理的客户端（如 Codex）会把发往 127.0.0.1 的请求交给代理服务器，表现为 503 且本代理收不到任何请求。修复：到「配置」页底部重跑一次 Codex 一键命令（脚本会自动修好），然后重启 Codex。</div>
   <div class="cards" id="cards"></div>
   <div>在途流 <label style="margin-left:8px;color:#9a9a9a;font-weight:normal"><input type="checkbox" id="autoTrackChk" checked>自动跟踪最新</label> <label style="color:#9a9a9a;font-weight:normal">最多显示 <input type="number" id="maxFlightsInput" min="1" max="20" value="3" style="width:40px;background:#1e1e1e;color:#d4d4d4;border:1px solid #333;border-radius:3px;padding:2px 4px;font:inherit"> 个</label></div>
-  <table id="flights"><thead><tr><th></th><th>#</th><th>model</th><th>API<span class="thq" title="协议来源：橙 [Anthropic] = Anthropic 口原生流量、紫 [translate] = Responses 口翻译成 Anthropic。名后 [值] = 实际发给上游的思考配置最短形态，其颜色 = 词汇口径（思考是针对上游的：上游收到的都是 Anthropic 格式）——橙 = Anthropic thinking（直连原样或翻译映射后）。值：关 = thinking 关或 effort none/off；开 N = enabled+budget_tokens N；adaptive = 自适应无档；low/high/max 等档位词 = adaptive 的 effort；无 [值] = 请求体未带思考字段">?</span></th><th>字节</th><th>状态</th></tr></thead><tbody></tbody></table>
+  <table id="flights"><thead><tr><th></th><th>#</th><th>model</th><th>API<span class="thq" title="协议来源：橙 [Anthropic] = Anthropic 口原生流量、紫 [translate] = Responses 口翻译成 Anthropic。名后 [值] = 实际发给上游的思考配置最短形态，其颜色 = 词汇口径（思考是针对上游的：上游收到的都是 Anthropic 格式）——橙 = Anthropic thinking（直连原样或翻译映射后）。值：关 = thinking 关或 effort none/off；开 N = enabled+budget_tokens N；adaptive = 自适应无档；low/high/max 等档位词 = adaptive 的 effort；无 [值] = 请求体未带思考字段">?</span></th><th>token 入/出<span class="thq" title="该流的总输入 / 输出 tokens（输入 = input + 缓存读 + 缓存写）。在途时显示头部/尾部已到达的数值，完成后才准确；未收到的一侧显示 -">?</span></th><th>字节</th><th>状态</th></tr></thead><tbody></tbody></table>
   <div id="flightViewWrap" style="display:none;margin-top:8px">
     <div>流 #<span id="flightViewId"></span> <span id="flightViewKind">输出</span> <button id="flightViewWhatBtn" class="ghost" style="display:none">看请求体</button> <button id="flightViewSideBtn" class="ghost" style="display:none">链路:代理<->上游</button><span id="flightViewSideNote" style="color:#d7ba7d"></span> <button id="flightViewRawBtn" class="ghost">显示原始</button> <button id="flightViewDlBtn" class="ghost" style="display:none">下载请求体</button> <button id="flightViewDlOutBtn" class="ghost" style="display:none">下载输出</button> <button id="flightViewTreeBtn" class="ghost" style="display:none">交互式JSON</button> <button id="flightViewClose" class="ghost">关闭</button></div>
     <div id="flightView" style="max-height:300px;overflow:auto;background:#1e1e1e;border:1px solid #333;padding:8px"></div>
   </div>
   <div style="margin-top:10px">最近完成的流</div>
-  <table id="finishedFlights"><thead><tr><th>#</th><th>model</th><th>API<span class="thq" title="协议来源：橙 [Anthropic] = Anthropic 口原生流量、紫 [translate] = Responses 口翻译成 Anthropic。名后 [值] = 实际发给上游的思考配置最短形态，其颜色 = 词汇口径（思考是针对上游的：上游收到的都是 Anthropic 格式）——橙 = Anthropic thinking（直连原样或翻译映射后）。值：关 = thinking 关或 effort none/off；开 N = enabled+budget_tokens N；adaptive = 自适应无档；low/high/max 等档位词 = adaptive 的 effort；无 [值] = 请求体未带思考字段">?</span></th><th>字节</th><th>总时间</th><th>状态码</th><th>缓存命中</th><th>缓存年龄<span class="thq" title="该会话+路由最近一次缓存写入距现在的时长（m:ss 递增）。显示方括号且数字冻结（如 [4:32]）时：同会话同路由有一条正在进行的流刚刷新了缓存，方括号内是刷新那一刻的年龄；该流完成后恢复递增（新锚）。上游缓存真实存活期是动态的——点击「缓存命中」卡片，弹窗内有各上游（按 URL+模型归类）实测的缓存存活时间可对照">?</span></th><th>首字</th><th>tok/s</th><th>结束</th></tr></thead><tbody></tbody></table>
+  <table id="finishedFlights"><thead><tr><th>#</th><th>model</th><th>API<span class="thq" title="协议来源：橙 [Anthropic] = Anthropic 口原生流量、紫 [translate] = Responses 口翻译成 Anthropic。名后 [值] = 实际发给上游的思考配置最短形态，其颜色 = 词汇口径（思考是针对上游的：上游收到的都是 Anthropic 格式）——橙 = Anthropic thinking（直连原样或翻译映射后）。值：关 = thinking 关或 effort none/off；开 N = enabled+budget_tokens N；adaptive = 自适应无档；low/high/max 等档位词 = adaptive 的 effort；无 [值] = 请求体未带思考字段">?</span></th><th>token 入/出<span class="thq" title="该流的总输入 / 输出 tokens（输入 = input + 缓存读 + 缓存写），完成后才准确；未收到的一侧显示 -（如被下游取消的流 [107k/-]）。鼠标悬停单元格显示该流字节数">?</span></th><th>总时间</th><th>状态码</th><th>缓存命中</th><th>缓存年龄<span class="thq" title="该会话+路由最近一次缓存写入距现在的时长（m:ss 递增）。显示方括号且数字冻结（如 [4:32]）时：同会话同路由有一条正在进行的流刚刷新了缓存，方括号内是刷新那一刻的年龄；该流完成后恢复递增（新锚）。上游缓存真实存活期是动态的——点击「缓存命中」卡片，弹窗内有各上游（按 URL+模型归类）实测的缓存存活时间可对照">?</span></th><th>首字</th><th>tok/s</th><th>结束</th></tr></thead><tbody></tbody></table>
 </div>
 
 <div class="pane" id="pane-logs">
@@ -478,6 +478,14 @@ function fmtBytes(n){
   if(n<1024) return n+'B';
   if(n<1048576) return (n/1024).toFixed(1)+'KB';
   return (n/1048576).toFixed(2)+'MB';
+}
+// token 入/出列：[总输入/输出] 例如 [107k/4]。未收到的一侧显示 -（如被取消的流 [107k/-]），
+// 两侧都未知时整格显示 -。传入 bytes（最近完成流）时单元格带 title，悬停显示该流字节数——
+// 该表用它替换了字节列；在途流字节数就在旁边一列，不重复挂提示。
+function tokensCell(t, bytes){
+  var title = bytes===undefined ? '' : ' title="'+fmtBytes(bytes)+'"';
+  if(!t || t==='-') return '<td'+title+'>-</td>';
+  return '<td'+title+'>['+esc(t)+']</td>';
 }
 // model 列单元格：有 searchPrompt 时整个 td 加 title，hover 显示系统原生提示词（宽度自适应、无滚动条）。
 // routeReason 非 0（透传）时前置 [标签]，一眼看出是什么原因路由的（如 [Fast]claude-sonnet-5 -> glm-5.2）。
@@ -1056,7 +1064,7 @@ async function poll(){
     const fs = d.flights || [];
     fs.forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull, rd:!!f.reqDown, sd:!!f.respDown, rdt:!!f.reqDownTrunc, hfd:!!f.hasFullDown, lst:f.last||0}; });
     flightsBody.innerHTML = fs.map(f =>
-      '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>'+flightDot(f)+attemptTag(f)+' '+fmtStageDur(f.stageMs)+'</td><td>#'+f.id+lastTag(f)+'</td>'+modelCell(f)+apiCell(f.translated,f.think,f.thinkFrom,f.thinkTo)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+flightStatus(f)+'</td></tr>'
+      '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>'+flightDot(f)+attemptTag(f)+' '+fmtStageDur(f.stageMs)+'</td><td>#'+f.id+lastTag(f)+'</td>'+modelCell(f)+apiCell(f.translated,f.think,f.thinkFrom,f.thinkTo)+tokensCell(f.tokens)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+flightStatus(f)+'</td></tr>'
     ).join('');
     // 在途流输出查看：手选单流优先，否则自动跟踪 grid，否则隐藏
     var fv = document.getElementById('flightView');
@@ -1160,7 +1168,7 @@ async function poll(){
         (rfd.list||[]).forEach(function(f){ flightFlags[f.id] = {rt:!!f.reqTrunc, hf:!!f.hasFull, rd:!!f.reqDown, sd:!!f.respDown, rdt:!!f.reqDownTrunc, hfd:!!f.hasFullDown, lst:f.last||0}; });
         document.querySelector('#finishedFlights tbody').innerHTML = (rfd.list||[]).map(function(f){
           // Finished rows render the [剥N] strip badge in the cache-hit column, so clear stripped before the shared model cell (no duplicate badge).
-          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+lastTag(f)+'</td>'+modelCell(Object.assign({}, f, {stripped:0}))+apiCell(f.translated,f.think,f.thinkFrom,f.thinkTo)+'<td>'+fmtBytes(f.bytes)+'</td><td>'+(f.total||'-')+'</td><td>'+(f.gaveUp?'[重试尽]':(f.status?(f.status===200?'200':'['+f.status+']'):'-'))+(f.attempts>1?'<span style="color:#d7ba7d">[重试'+(f.attempts-1)+'次]</span>':'')+(f.noStop?'<span style="color:#f48771">[无stop]</span>':'')+(f.searchGuard?'<span style="color:#f48771">[空搜]</span>':'')+'</td><td>'+(f.hitRate||'-')+(f.stripped>0?'<span style="color:#f48771">[剥'+f.stripped+']</span>':'')+'</td><td>'+(f.cacheAge||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
+          return '<tr style="cursor:pointer" onclick="selectFlight('+f.id+')"><td>#'+f.id+lastTag(f)+'</td>'+modelCell(Object.assign({}, f, {stripped:0}))+apiCell(f.translated,f.think,f.thinkFrom,f.thinkTo)+tokensCell(f.tokens, f.bytes)+'<td>'+(f.total||'-')+'</td><td>'+(f.gaveUp?'[重试尽]':(f.status?(f.status===200?'200':'['+f.status+']'):'-'))+(f.attempts>1?'<span style="color:#d7ba7d">[重试'+(f.attempts-1)+'次]</span>':'')+(f.noStop?'<span style="color:#f48771">[无stop]</span>':'')+(f.searchGuard?'<span style="color:#f48771">[空搜]</span>':'')+'</td><td>'+(f.hitRate||'-')+(f.stripped>0?'<span style="color:#f48771">[剥'+f.stripped+']</span>':'')+'</td><td>'+(f.cacheAge||'-')+'</td><td>'+(f.firstByte||'-')+'</td><td>'+(f.tps||'-')+'</td><td>'+f.ended+'</td></tr>';
         }).join('');
       }
     }catch(e){}
@@ -2018,6 +2026,8 @@ var enHTMLRepl = [][2]string{
 	{`最多显示`, `Show at most`},
 	{` 个</label>`, `</label>`},
 	{`<th>字节</th>`, `<th>Bytes</th>`},
+	{`<th>token 入/出<span class="thq" title="该流的总输入 / 输出 tokens（输入 = input + 缓存读 + 缓存写）。在途时显示头部/尾部已到达的数值，完成后才准确；未收到的一侧显示 -">?</span></th>`, `<th>token in/out<span class="thq" title="This stream's total input / output tokens (input = input + cache read + cache write). In flight it shows what the head/tail has delivered so far and is exact only once finished; a side never received shows -">?</span></th>`},
+	{`<th>token 入/出<span class="thq" title="该流的总输入 / 输出 tokens（输入 = input + 缓存读 + 缓存写），完成后才准确；未收到的一侧显示 -（如被下游取消的流 [107k/-]）。鼠标悬停单元格显示该流字节数">?</span></th>`, `<th>token in/out<span class="thq" title="This stream's total input / output tokens (input = input + cache read + cache write), exact once finished; a side never received shows - (e.g. [107k/-] for a stream cancelled by the downstream). Hover a cell to see that stream's byte count">?</span></th>`},
 	{`<th>状态</th>`, `<th>State</th>`},
 	{`<th>总时间</th>`, `<th>Total</th>`},
 	{`<th>状态码</th>`, `<th>HTTP</th>`},
@@ -2259,17 +2269,26 @@ var enThinkRepl = map[string]string{
 	"[开":  "[on ",
 }
 
-// renderLogViewerEN renders the Chinese master page into English: replacing by descending key length;
-// unmapped Chinese stays as-is (the browser-side i18n script backstops alert/confirm/prompt).
-func renderLogViewerEN(page string) string {
-	page = strings.Replace(page, "__DOC_BODY__", logViewerDocEN, 1)
-	sort.Slice(enHTMLRepl, func(i, j int) bool { return len(enHTMLRepl[i][0]) > len(enHTMLRepl[j][0]) })
-	repl := make([]string, 0, len(enHTMLRepl)*2+4)
-	for _, p := range enHTMLRepl {
+// enReplacer is the English page replacer, built once at startup: handlers render pages concurrently,
+// so sorting the pair table per request would race on the shared slice; strings.Replacer is immutable
+// and safe for concurrent use. Keys are ordered by descending length, so short words (e.g. 「缓存命中」)
+// can't pre-emptively truncate long sentences (e.g. 「缓存命中明细（按真实上游模型）」).
+var enReplacer = func() *strings.Replacer {
+	sorted := append([][2]string(nil), enHTMLRepl...)
+	sort.Slice(sorted, func(i, j int) bool { return len(sorted[i][0]) > len(sorted[j][0]) })
+	repl := make([]string, 0, len(sorted)*2+len(enThinkRepl)*2)
+	for _, p := range sorted {
 		repl = append(repl, p[0], p[1])
 	}
 	for zh, en := range enThinkRepl {
 		repl = append(repl, zh, en)
 	}
-	return strings.NewReplacer(repl...).Replace(page)
+	return strings.NewReplacer(repl...)
+}()
+
+// renderLogViewerEN renders the Chinese master page into English;
+// unmapped Chinese stays as-is (the browser-side i18n script backstops alert/confirm/prompt).
+func renderLogViewerEN(page string) string {
+	page = strings.Replace(page, "__DOC_BODY__", logViewerDocEN, 1)
+	return enReplacer.Replace(page)
 }

@@ -39,6 +39,31 @@ func TestLogViewerLineageLastTag(t *testing.T) {
 	}
 }
 
+// TestTokensColumn pins the console's token in/out column layout: a new column between API and
+// bytes on in-flight rows, and the bytes column replaced on finished rows with the byte count as
+// the cell's hover title.
+func TestTokensColumn(t *testing.T) {
+	if n := strings.Count(logViewerHTML, "<th>token 入/出"); n != 2 {
+		t.Errorf("both stream tables should carry the token in/out header, found %d", n)
+	}
+	if !strings.Contains(logViewerHTML, "apiCell(f.translated,f.think,f.thinkFrom,f.thinkTo)+tokensCell(f.tokens)+'<td>'+fmtBytes(f.bytes)+'</td><td>'") {
+		t.Error("in-flight rows should render the token cell between API and the retained bytes column")
+	}
+	if !strings.Contains(logViewerHTML, "tokensCell(f.tokens, f.bytes)+'<td>'+(f.total||'-')") {
+		t.Error("finished rows should replace the bytes column with the token cell and keep bytes as its hover title")
+	}
+	en := renderLogViewerEN(logViewerHTML)
+	if n := strings.Count(en, "<th>token in/out"); n != 2 {
+		t.Errorf("English tables should carry the token in/out header, found %d", n)
+	}
+	if strings.Contains(en, "<th>token 入/出") {
+		t.Error("Chinese token header leaked into the English console")
+	}
+	if !strings.Contains(en, "Hover a cell to see that stream's byte count") {
+		t.Error("English finished header tooltip should explain the hover byte count")
+	}
+}
+
 func TestCompactionConsoleBadge(t *testing.T) {
 	if !strings.Contains(logViewerHTML, "f.compaction") || !strings.Contains(logViewerHTML, "f.compactEffort") {
 		t.Error("model cell should render the [Compact] badge from f.compaction and upgrade it from f.compactEffort")

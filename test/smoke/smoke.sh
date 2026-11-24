@@ -15,6 +15,9 @@
 # Compact effort: e5 is a genuine compaction request on the same effort:max route and the top-level compactEffort=mid
 # must beat that route pin (upstream medium, not max) and carry the compact display fields; h1 (a history quote) must
 # stay unflagged with an empty compactEffort.
+# Token column: completed rows carry "tokens":"18/50"; the /slow mock holds 1.5s after message_start so a live row and
+# a downstream-cancelled row both read [18/-] (input seen, tail not yet); the served page swaps the finished table's
+# bytes column for this cell with the byte count as its hover title.
 # Vars: the config resolves $SMOKE_KEY from the top-level vars section (search_fallback uses it; routes keep a
 # literal key) — a green run proves variable expansion works end to end on the real startup path.
 # Pattern arrays: smoke-sf is written as "pattern": ["smoke-sf", "smoke-sf-alt"] (desugared into two route copies at
@@ -365,6 +368,63 @@ echo "compact effort log lines: $clog (want 1)"
 [ "$clog" = "1" ] || { echo "E5 COMPACT EFFORT LOG LINE WRONG"; efok=0; }
 grep -qF "f.compactEffort?'-'+esc(f.compactEffort):''" "$OUT/page.html" || { echo "COMPACT-EFFORT BADGE JS MISSING in served page"; efok=0; }
 [ "$efok" = 1 ] && echo "EFFORT SMOKE PASS" || { echo "EFFORT SMOKE FAIL"; exit 1; }
+
+# --- token in/out column: a completed stream shows 18/50 (mock message_start 10+5+3=18, message_delta ends at 50);
+# the /slow mock holds 1.5s after message_start so an in-flight row shows the head's 18 with the tail still "-",
+# and a downstream cancel in that window archives the same [18/-] (the display keeps it while the aggregates roll
+# back). The served page swaps the bytes column for this cell on finished rows, with bytes as the hover title.
+tokok=1
+grep -q '"tokens":"18/50"' "$OUT/recent.json" || { echo "TOKENS COMPLETE ROW MISSING (want 18/50)"; tokok=0; }
+trows=$(grep -o '"id":' "$OUT/recent.json" | wc -l | tr -d ' ')
+tcells=$(grep -o '"tokens":"' "$OUT/recent.json" | wc -l | tr -d ' ')
+echo "recent token cells: $tcells / $trows rows (want equal, every row carries one)"
+[ "$trows" -gt 0 ] && [ "$trows" = "$tcells" ] || { echo "TOKENS FIELD MISSING ON SOME ROWS"; tokok=0; }
+grep -q '"tokens":""' "$OUT/recent.json" && { echo "TOKENS EMPTY VALUE MUST NOT RENDER (unseen is \"-\")"; tokok=0; }
+# The console language follows the environment (zh on a zh Windows profile, en elsewhere, e.g. WSL CI),
+# so the header check accepts either language's label.
+grep -qF '<th>token 入/出' "$OUT/page.html" || grep -qF '<th>token in/out' "$OUT/page.html" || { echo "TOKENS HEADER MISSING in served page"; tokok=0; }
+grep -qF 'function tokensCell(' "$OUT/page.html" || { echo "TOKENS CELL JS MISSING in served page"; tokok=0; }
+grep -qF 'tokensCell(f.tokens, f.bytes)' "$OUT/page.html" || { echo "TOKENS BYTES-REPLACEMENT JS MISSING in served page"; tokok=0; }
+cat > "$OUT/t1.json" <<'EOF'
+{"model":"smoke-slow","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"T"}]}
+EOF
+curl -s -o "$OUT/t1.resp" --max-time 20 -X POST "http://127.0.0.1:18083/v1/messages" -H "Content-Type: application/json" --data-binary "@$OUT/t1.json" &
+t1pid=$!
+# Poll instead of a fixed sleep: the /slow mock holds 1.5s after message_start, so finding the value
+# early finishes early and a loaded machine still has the whole window before the first delta.
+ltok=""
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  ltok=$(curl -s --max-time 5 "http://127.0.0.1:18083/__logs/data" | grep -o '"tokens":"[^"]*"' | head -1)
+  [ "$ltok" = '"tokens":"18/-"' ] && break
+  sleep 0.1
+done
+echo "live in-flight token cell: ${ltok:-<none>} (want \"tokens\":\"18/-\")"
+[ "$ltok" = '"tokens":"18/-"' ] || { echo "IN-FLIGHT TOKENS LIVE VALUE WRONG"; tokok=0; }
+wait "$t1pid" 2>/dev/null || true
+grep -q 'message_stop' "$OUT/t1.resp" || { echo "T1 SLOW STREAM DID NOT COMPLETE"; tokok=0; }
+cat > "$OUT/t2.json" <<'EOF'
+{"model":"smoke-slow","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"T"}]}
+EOF
+curl -s -o /dev/null --max-time 20 -X POST "http://127.0.0.1:18083/v1/messages" -H "Content-Type: application/json" --data-binary "@$OUT/t2.json" &
+t2pid=$!
+# Cancel only once the proxy has parsed message_start (the in-flight row reads 18/-), so the archived
+# row is deterministic; a wall-clock cutoff would race connect/parse on a loaded machine.
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ "$(curl -s --max-time 5 "http://127.0.0.1:18083/__logs/data" | grep -o '"tokens":"18/-"' | head -1)" = '"tokens":"18/-"' ] && break
+  sleep 0.05
+done
+kill "$t2pid" 2>/dev/null || true
+wait "$t2pid" 2>/dev/null || true
+# The 499 row lands after the cancel; poll for the newest smoke-slow 499 row instead of a fixed sleep.
+cancelled=""
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  curl -s --max-time 5 "http://127.0.0.1:18083/__recentflights" > "$OUT/recent2.json"
+  cancelled=$(sed 's/},{/}\n{/g' "$OUT/recent2.json" | grep '"model":"smoke-slow"' | grep '"status":499' | head -1)
+  [ -n "$cancelled" ] && break
+  sleep 0.2
+done
+echo "$cancelled" | grep -q '"tokens":"18/-"' || { echo "INTERRUPTED ROW MUST KEEP [18/-] (got: ${cancelled:-no smoke-slow 499 row})"; tokok=0; }
+[ "$tokok" = 1 ] && echo "TOKENS SMOKE PASS" || { echo "TOKENS SMOKE FAIL"; exit 1; }
 
 echo "page classifier(codex) log lines: $(grep -c 'classifier(codex)' "$OUT/data.json")"
 [ "$clsok" = 1 ] && echo "CLS SMOKE PASS" || { echo "CLS SMOKE FAIL"; exit 1; }

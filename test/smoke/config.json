@@ -18,6 +18,7 @@
     { "pattern": ["smoke-sf", "smoke-sf-alt"], "url": "http://127.0.0.1:9099/ok", "api": "smoke", "no_search": true, "claudeSearchSummary": "forceHigh" },
     { "pattern": "smoke-enh", "url": "http://127.0.0.1:9099/search", "api": "smoke", "enhance_search": { "summary_level": "high", "summary_thinking": true } },
     { "pattern": "smoke-effort", "url": "http://127.0.0.1:9099/ok", "api": "smoke", "effort": "max" },
-    { "pattern": "smoke-noeff", "url": "http://127.0.0.1:9099/ok", "api": "smoke" }
+    { "pattern": "smoke-noeff", "url": "http://127.0.0.1:9099/ok", "api": "smoke" },
+    { "pattern": "smoke-slow", "url": "http://127.0.0.1:9099/slow", "api": "smoke" }
   ]
 }

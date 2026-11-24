@@ -44,6 +44,7 @@ type flightInfo struct {
 	ReqDownTrunc  bool   `json:"reqDownTrunc,omitempty"`  // Downstream-side request body truncated to just the head 256KB (download greyed out after switching to the downstream side)
 	HasFullDown   bool   `json:"hasFullDown,omitempty"`   // Downstream-side full output copy still held (the downstream side's download output; interactive JSON prefers it when present)
 	Last          uint64 `json:"last,omitempty"`          // Lineage parent flight id (same-session message-hash prefix chain); omitted when none — the # column shows 「#N<-M」 when present
+	Tokens        string `json:"tokens"`                  // Live total input / output tokens ("107k/4"; "-" for a side not received yet, bare "-" when neither), shown between API and bytes
 }
 
 // logData is the JSON returned by /__logs/data: recent logs + full status counters + the in-flight stream list.
@@ -145,6 +146,7 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 			StageMs:       f.StageMs(),
 			Think:         f.Think,
 			Last:          f.LastFlight,
+			Tokens:        recorder.FmtTokens(f.LiveTokens()),
 		})
 	}
 	if d.Flights == nil {
@@ -388,6 +390,7 @@ func RecentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 			"searchGuard":   ff.SearchGuard,
 			"attempts":      ff.Attempts,
 			"bytes":         ff.Bytes,
+			"tokens":        recorder.FmtTokens(ff.TokIn, ff.TokInSeen, ff.TokOut, ff.TokOutSeen),
 			"total":         recorder.FmtMs(ff.TotalMs),
 			"stage":         ff.Stage,
 			"ended":         ff.Ended.Format("15:04:05"),

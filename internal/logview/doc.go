@@ -369,6 +369,7 @@ experimental_bearer_token = "proxy429"</pre>
         <li><b>总时间</b>：从代理收到下游请求，到把响应全部发回下游。包含内部处理、首字等待、吐字和收尾。</li>
         <li><b>首字</b>：从发出请求到收到首个输出字节的耗时。</li>
         <li><b>tok/s</b>：输出 token 数除以流式耗时。</li>
+        <li><b>token 入/出</b>：该流的总输入 / 输出 tokens，格式 <code>[107k/4]</code>。输入 = input + cache_read + cache_creation；在途时显示头部/尾部已到达的数值，完成后才准确；未收到的一侧显示 <code>-</code>，例如被下游取消、只拿到头部的流显示 <code>[107k/-]</code>。在途流该列位于 API 和「字节」之间；最近完成流用它替换「字节」列，鼠标悬停单元格显示该流字节数。</li>
         <li><b>缓存命中</b>：<code>cache_read / (input + cache_read + cache_creation)</code>。缓存写入不算命中，但计入总输入。高命中率主要来自上游模型的原生上下文缓存，代理只透传 usage。中断的流不参与缓存命中聚合，避免把半截上下文算成低命中。</li>
         <li><b>缓存年龄</b>：按会话和路由锚定，显示最近一次缓存写入距现在多久。同会话同路由有流正在吐字时，最新完成行冻结为方括号形式，表示缓存刚被刷新。开始时刻在 5 分钟内的最新行不会被「保留完成流 N」挤掉。没有会话标识的请求恒显示 <code>-</code>。</li>
         <li><b># 列</b>：<code>#80&lt;-73</code> 表示 80 号流的请求延续自 73 号流。同一个会话、且 73 号的消息链是 80 号的前缀时才会标注。裸 <code>#N</code> 表示没有父流，例如子代理首轮或 <code>/clear</code> 之后。</li>
@@ -815,6 +816,7 @@ experimental_bearer_token = "proxy429"</pre>
         <li><b>Total</b>: from the proxy receiving the downstream request to the full response being sent back. Includes internal handling, first-byte wait, streaming and wrap-up.</li>
         <li><b>TTFT</b>: from sending the request to receiving the first output byte.</li>
         <li><b>tok/s</b>: output tokens divided by streaming time.</li>
+        <li><b>token in/out</b>: the stream's total input / output tokens, formatted <code>[107k/4]</code>. Input = input + cache_read + cache_creation; in flight it shows what the head/tail has delivered so far and is exact only once the stream finishes, and a side never received shows <code>-</code> (a stream cancelled by the downstream after its head reads <code>[107k/-]</code>). On in-flight rows the column sits between API and Bytes; on finished rows it replaces the Bytes column, and hovering a cell shows that stream's byte count.</li>
         <li><b>Cache hit</b>: <code>cache_read / (input + cache_read + cache_creation)</code>. Cache writes do not count as hits but do count as input. A high hit rate comes mostly from the upstream model's native context cache; the proxy only passes usage through. Interrupted streams are excluded from the cache-hit aggregate so a half-finished context is not counted as a low hit.</li>
         <li><b>Cache age</b>: anchored per session and route, showing how long ago the latest cache write happened. While a stream of the same session and route is streaming, the newest finished row freezes into brackets, meaning the cache was just refreshed. A newest row that started within the last 5 minutes is protected from the "Keep finished N" trim. Requests without a session marker always show <code>-</code>.</li>
         <li><b># column</b>: <code>#80&lt;-73</code> means stream 80 continues from stream 73. It is annotated only when the session matches and stream 73's message chain is a prefix of stream 80's. A bare <code>#N</code> means no parent, e.g. a sub-agent's first round or right after <code>/clear</code>.</li>
