@@ -3,6 +3,7 @@ package recorder
 import (
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -250,6 +251,30 @@ func HumanNum(n int64) string {
 	default:
 		return fmt.Sprintf("%.2fM", float64(n)/1000000)
 	}
+}
+
+// CompactSave formats a context-compaction result: the total input context (input + cache_read + cache_creation)
+// versus the summary's output tokens, and the percentage compressed away (e.g. "170k->20k, 88%").
+// Returns "" when either side is unknown, so the console shows the [Comp] badge without numbers.
+func CompactSave(in, cacheRead, cacheCreation, out int64) string {
+	total := in + cacheRead + cacheCreation
+	if total <= 0 || out <= 0 {
+		return ""
+	}
+	pct := int(math.Round((1 - float64(out)/float64(total)) * 100))
+	k := func(n int64) string {
+		switch {
+		case n >= 1e6:
+			return fmt.Sprintf("%.1fM", float64(n)/1e6)
+		case n >= 10000:
+			return fmt.Sprintf("%.0fk", float64(n)/1e3)
+		case n >= 1000:
+			return fmt.Sprintf("%.1fk", float64(n)/1e3)
+		default:
+			return strconv.FormatInt(n, 10)
+		}
+	}
+	return fmt.Sprintf("%s->%s, %d%%", k(total), k(out), pct)
 }
 
 // humanBytes compresses byte counts to 2.3KB / 1.20MB forms for live traffic display.

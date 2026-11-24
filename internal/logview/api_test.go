@@ -98,6 +98,48 @@ func TestRecentFlightsNoStopField(t *testing.T) {
 	}
 }
 
+// TestRecentFlightsCompactionFields verifies the finished-streams JSON carries the compaction badge flag and the
+// compact result derived from the stream's usage; a row without parsed usage keeps an empty result (no numbers),
+// and a non-compaction row never carries a result even when its usage would produce one.
+func TestRecentFlightsCompactionFields(t *testing.T) {
+	resetStats()
+	oldFinished := recorder.Finished
+	defer func() { recorder.Finished = oldFinished }()
+	recorder.Finished = []recorder.FinishedFlight{
+		{ID: 1, Compaction: true, InTokens: 1000, CacheRead: 169000, OutTokens: 20000},
+		{ID: 2, Compaction: true},
+		{ID: 3, InTokens: 1000, CacheRead: 169000, OutTokens: 20000},
+	}
+
+	req := httptest.NewRequest("GET", "/__recentflights", nil)
+	req.RemoteAddr = "127.0.0.1:1"
+	rec := httptest.NewRecorder()
+	RecentFlightsHandler(rec, req)
+	var d struct {
+		List []struct {
+			ID          uint64 `json:"id"`
+			Compaction  bool   `json:"compaction"`
+			CompactSave string `json:"compactSave"`
+		} `json:"list"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatalf("响应非 JSON: %v", err)
+	}
+	if len(d.List) != 3 {
+		t.Fatalf("recentFlights 应有 3 行，实际 %s", rec.Body.String())
+	}
+	// Newest first: ID 3 (plain), ID 2 (no usage), ID 1 (170k->20k, 88%).
+	if got := d.List[0]; got.ID != 3 || got.Compaction || got.CompactSave != "" {
+		t.Errorf("non-compaction row = %+v, want compaction false and empty compactSave", got)
+	}
+	if got := d.List[1]; got.ID != 2 || !got.Compaction || got.CompactSave != "" {
+		t.Errorf("row without usage = %+v, want compaction true and empty compactSave", got)
+	}
+	if got := d.List[2]; got.ID != 1 || !got.Compaction || got.CompactSave != "170k->20k, 88%" {
+		t.Errorf("row with usage = %+v, want compaction true and compactSave 170k->20k, 88%%", got)
+	}
+}
+
 // resetStats clears the global recorder state so tests don't affect each other.
 func resetStats() {
 	recorder.Stats.Mu.Lock()

@@ -691,6 +691,24 @@ func hasSearchSubagentMarker(body []byte) bool {
 	return bytes.Contains(body, []byte(searchSubagentMarker))
 }
 
+// compactionMarkers are the known client context-compaction prompts: Claude Code's current compact prompt,
+// Claude Code's legacy compact prompt, and Codex CLI's checkpoint compaction prompt.
+var compactionMarkers = [][]byte{
+	[]byte("CRITICAL: Respond with TEXT ONLY"),
+	[]byte("Your task is to create a detailed summary of the conversation so far"),
+	[]byte("You are performing a CONTEXT CHECKPOINT COMPACTION"),
+}
+
+// isCompactionRequest reports whether the request body carries a known client context-compaction prompt.
+func isCompactionRequest(body []byte) bool {
+	for _, marker := range compactionMarkers {
+		if bytes.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // searchStringEnd locates the closing quote of the JSON string containing position `from`
 // (scanning forward, backslash-escape aware). Returns -1 when the string never terminates.
 func searchStringEnd(body []byte, from int) int {

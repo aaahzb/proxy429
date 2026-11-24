@@ -28,6 +28,7 @@ type flightInfo struct {
 	CountTokens     bool   `json:"countTokens,omitempty"` // count_tokens probe stream; the model column shows a [count_tokens] prefix
 	SearchPrompt    string `json:"searchPrompt,omitempty"`
 	SearchMarker    bool   `json:"searchMarker,omitempty"`    // Standalone search sub-agent marker hit; the model column shows [Search]
+	Compaction      bool   `json:"compaction,omitempty"`      // Client context-compaction request; the model column shows [Comp]
 	SearchLevel     string `json:"searchLevel,omitempty"`     // Injected summary level; the badge upgrades to [SearchSummary-<level>]
 	SearchThinkFrom string `json:"searchThinkFrom,omitempty"` // Thinking value before the search rewrite (empty renders as auto)
 	SearchThinkTo   string `json:"searchThinkTo,omitempty"`   // Search rewrite target level (empty = none; the API column shows [from->to])
@@ -130,6 +131,7 @@ func logDataHandler(w http.ResponseWriter, r *http.Request) {
 			CountTokens:     f.CountTokens,
 			SearchPrompt:    f.SearchPrompt,
 			SearchMarker:    f.SearchMarker,
+			Compaction:      f.Compaction.Load(),
 			SearchLevel:     f.SearchLevel,
 			SearchThinkFrom: f.SearchThinkFrom,
 			SearchThinkTo:   f.SearchThinkTo,
@@ -369,6 +371,10 @@ func RecentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 				cacheAge = recorder.FmtCacheAge(now.Sub(ff.Start))
 			}
 		}
+		compactSave := ""
+		if ff.Compaction {
+			compactSave = recorder.CompactSave(ff.InTokens, ff.CacheRead, ff.CacheCreation, ff.OutTokens)
+		}
 		out = append(out, map[string]any{
 			"id":              ff.ID,
 			"model":           ff.Model,
@@ -395,6 +401,8 @@ func RecentFlightsHandler(w http.ResponseWriter, r *http.Request) {
 			"tps":             recorder.FmtTps(ff.TPS),
 			"searchPrompt":    ff.SearchPrompt,
 			"searchMarker":    ff.SearchMarker,
+			"compaction":      ff.Compaction,
+			"compactSave":     compactSave,
 			"searchLevel":     ff.SearchLevel,
 			"searchThinkFrom": ff.SearchThinkFrom,
 			"searchThinkTo":   ff.SearchThinkTo,
