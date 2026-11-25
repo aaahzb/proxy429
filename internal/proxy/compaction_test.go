@@ -145,12 +145,12 @@ func TestCompactionBadgeEndToEnd(t *testing.T) {
 			b, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			inFlight = string(b)
-			if strings.Contains(inFlight, `"compaction":true`) && strings.Contains(inFlight, `"compactEffort":"low"`) {
+			if strings.Contains(inFlight, `"compaction":true`) && strings.Contains(inFlight, `"model":"claude-opus-4-8 [low]"`) {
 				break
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("in-flight JSON never exposed compaction:true and compactEffort:low; last response: %s", inFlight)
+			t.Fatalf("in-flight JSON never exposed compaction:true and the model column's [low]; last response: %s", inFlight)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -190,17 +190,17 @@ func TestCompactionBadgeEndToEnd(t *testing.T) {
 	}
 	var decoded struct {
 		List []struct {
-			ID            int    `json:"id"`
-			Compaction    bool   `json:"compaction"`
-			CompactEffort string `json:"compactEffort"`
-			CompactSave   string `json:"compactSave"`
+			ID             int    `json:"id"`
+			Compaction     bool   `json:"compaction"`
+			CompactSave    string `json:"compactSave"`
+			CompactSavePct string `json:"compactSavePct"`
 		} `json:"list"`
 	}
 	if err := json.Unmarshal([]byte(recent), &decoded); err != nil {
 		t.Fatalf("recentFlights is not JSON: %v", err)
 	}
-	if len(decoded.List) != 1 || !decoded.List[0].Compaction || decoded.List[0].CompactEffort != "low" || decoded.List[0].CompactSave != "170k->20k, 88%" {
-		t.Errorf("finished row = %+v, want compaction true, compactEffort low and compactSave 170k->20k, 88%%", decoded.List)
+	if len(decoded.List) != 1 || !decoded.List[0].Compaction || decoded.List[0].CompactSave != "170k->20k, 88%" || decoded.List[0].CompactSavePct != "88%" {
+		t.Errorf("finished row = %+v, want compaction true, compactSave 170k->20k, 88%% and compactSavePct 88%%", decoded.List)
 	}
 
 	// Live-bug regression: a normal request whose conversation history quotes the prompts must stay
@@ -243,10 +243,10 @@ func TestCompactionBadgeEndToEnd(t *testing.T) {
 	if newest.ID < older.ID {
 		newest, older = older, newest
 	}
-	if newest.Compaction || newest.CompactEffort != "" || newest.CompactSave != "" {
-		t.Errorf("history-quoting row = %+v, want no compaction flag, no compactEffort pin and no save result", newest)
+	if newest.Compaction || newest.CompactSave != "" || newest.CompactSavePct != "" {
+		t.Errorf("history-quoting row = %+v, want no compaction flag and no save result", newest)
 	}
-	if !older.Compaction || older.CompactEffort != "low" || older.CompactSave != "170k->20k, 88%" {
-		t.Errorf("compaction row = %+v, want compaction true, compactEffort low and compactSave 170k->20k, 88%%", older)
+	if !older.Compaction || older.CompactSave != "170k->20k, 88%" || older.CompactSavePct != "88%" {
+		t.Errorf("compaction row = %+v, want compaction true, compactSave 170k->20k, 88%% and compactSavePct 88%%", older)
 	}
 }

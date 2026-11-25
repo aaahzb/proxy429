@@ -72,13 +72,13 @@ type Flight struct {
 	SearchLevel      string                     // Summary level actually injected into the marker request (empty = none); upgrades the badge to [SearchSummary-<level>]
 	ThinkFrom        string                     // Thinking value before the last body-side thinking rewrite (route effort pin / search rewrite; empty = no thinking field, shown as auto)
 	ThinkTo          string                     // Level a body-side rewrite wrote upstream (empty = no rewrite); the API column shows [from->to]
-	Effort           string                     // Route-configured effort level in wire form (mid→medium); empty = the route sets no effort. The model column shows [level] before the target model (appended when the model itself is not rewritten)
+	Effort           string                     // Route-configured effort level in wire form (mid→medium); empty = the route sets no effort. The model column shows [level] before the target model (appended when the model itself is not rewritten); a compactEffort pin displays in its place on compaction requests
 	SearchGuardArmed bool                       // Marker request whose effective route enabled noBullshitOnEmptyClaudeSearch; only native Anthropic 200 SSE responses are buffered
 	SearchGuard      bool                       // The upstream response was discarded and replaced with the fixed empty-search stream; the web status column shows [空搜]
 	Translated       string                     // Translation-port origin tag ("responses"=translated stream, "responses-raw"=native passthrough via a route with url_response_api); the web API column shows [translate]/[Response]
 	CountTokens      bool                       // count_tokens probe stream (countTokensPath); the response is just {"input_tokens":N}; the web model column shows a [count_tokens] prefix
-	Compaction       atomic.Bool                // The final user message opens with a known client context-compaction prompt (detected at body read); the web model column shows [Compact], upgraded to [Compact-<level>] when compactEffort is set. Atomic because logDataHandler reads it from another goroutine
-	compactEffort    atomic.Value               // Configured top-level compactEffort pin in wire form (mid->medium), stored once at body read when the request is a context compaction; the web model column shows [Compact-<level>]. Atomic because logDataHandler reads it from another goroutine
+	Compaction       atomic.Bool                // The final user message opens with a known client context-compaction prompt (detected at body read); the web model column shows [Compact] (a finished row folds the reduction percent in, [Compact 88%]). Atomic because logDataHandler reads it from another goroutine
+	compactEffort    atomic.Value               // Configured top-level compactEffort pin in wire form (mid->medium), stored once at body read when the request is a context compaction; ModelDisplay shows it in the model column's [level] slot. Atomic because logDataHandler reads it from another goroutine
 	SearchStripped   atomic.Int32               // Total replayed search blocks stripped (conversation-watermark strip + 400-fallback strip; the web shows a red [剥N] badge, the split only goes to the log)
 	StripThinking    atomic.Bool                // convertOff2Low upgrade (off->low): thinking blocks are stripped from the response before writing downstream (the client keeps seeing a thinking-off response)
 	NoStop           bool                       // Upstream 200 SSE stream ended without a terminal event (message_stop / response.completed|failed|incomplete) while the client stayed connected; the web status column shows a red [无stop] badge
@@ -108,6 +108,7 @@ type Flight struct {
 }
 
 // SetCompactEffort records the top-level compactEffort pin (wire form) for this compaction request; call once at body read.
+// Display-only: ModelDisplay shows it in the model column's [level] slot even when the body-side rewrite does not apply.
 func (f *Flight) SetCompactEffort(level string) { f.compactEffort.Store(level) }
 
 // NoteLiveUsage records the last-seen usage for the console's token in/out column (display only).
@@ -165,19 +166,24 @@ func (f *Flight) RealModel() string {
 }
 
 // ModelDisplay composes the web model-column string: "orig", or "orig -> target" when routing rewrote the model.
-// The route's configured [effort] pin sits before the target (appended when the model itself is not rewritten),
-// so the pin is visible even on requests the body-side rewrite left alone (e.g. non-adaptive bodies); whether a
-// rewrite actually happened is the API column's [from->to] badge, not this tag.
+// The [effort] tag sits before the target (appended when the model itself is not rewritten): the route's
+// configured pin, or the top-level compactEffort pin on a compaction request (it beats the route pin). The tag
+// is visible even on requests the body-side rewrite left alone (e.g. non-adaptive bodies); whether a rewrite
+// actually happened is the API column's [from->to] badge, not this tag.
 func (f *Flight) ModelDisplay() string {
+	effort := f.Effort
+	if ce := f.CompactEffortValue(); ce != "" {
+		effort = ce
+	}
 	model := f.OrigModel
 	if f.TargetModel != "" && f.TargetModel != f.OrigModel {
 		model = f.OrigModel + " -> "
-		if f.Effort != "" {
-			model += "[" + f.Effort + "] "
+		if effort != "" {
+			model += "[" + effort + "] "
 		}
 		model += f.TargetModel
-	} else if f.Effort != "" {
-		model += " [" + f.Effort + "]"
+	} else if effort != "" && model != "" {
+		model += " [" + effort + "]"
 	}
 	return model
 }
@@ -578,8 +584,7 @@ type FinishedFlight struct {
 	TPS              float64 // This stream's streaming tok/s
 	SearchPrompt     string  // Summary instruction injected into a standalone search sub-agent request (empty when none)
 	SearchMarker     bool    // Standalone search marker hit on the final user message (the model column shows [Search])
-	Compaction       bool    // The final user message opened with a known client context-compaction prompt (the model column shows [Compact], upgraded to [Compact-<level>] when compactEffort is set); finished rows append the compact result via CompactSave
-	CompactEffort    string  // Configured compactEffort pin (wire form); the finished row's model column shows [Compact-<level>]
+	Compaction       bool    // The final user message opened with a known client context-compaction prompt (the model column shows [Compact] with the reduction percent folded in; the compactEffort level already rides the archived Model string)
 	SearchLevel      string  // Injected summary level (empty = none; the badge upgrades to [SearchSummary-<level>])
 	ThinkFrom        string  // Thinking value before the last body-side thinking rewrite (empty = no thinking field, shown as auto)
 	ThinkTo          string  // Level a body-side rewrite wrote upstream (empty = no rewrite; the API column shows [from->to])
@@ -708,7 +713,6 @@ func AddFinished(f *Flight) {
 		SearchPrompt:     f.SearchPrompt,
 		SearchMarker:     f.SearchMarker,
 		Compaction:       f.Compaction.Load(),
-		CompactEffort:    f.CompactEffortValue(),
 		SearchLevel:      f.SearchLevel,
 		ThinkFrom:        f.ThinkFrom,
 		ThinkTo:          f.ThinkTo,

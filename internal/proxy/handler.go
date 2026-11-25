@@ -136,7 +136,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	f.SetReqBody(body)
 	f.Compaction.Store(isCompactionRequest(body)) // Display-only: a client context-compaction request gets a [Compact] badge in the console
 	if f.Compaction.Load() && c.CompactEffort != "" {
-		f.SetCompactEffort(wireEffort(c.CompactEffort)) // Display-only: the model column shows [Compact-<level>] even when the body-side rewrite does not apply
+		f.SetCompactEffort(wireEffort(c.CompactEffort)) // Display-only: the model column shows [level] even when the body-side rewrite does not apply
 	}
 	// The downstream-side (downstream→proxy) request body of dual-link recording: the translation port brings the Responses original via context
 	// (necessarily different from the translated body, so always stored); native streams defer to a comparison with the first upstream-bound body and are stored only on difference.
@@ -327,10 +327,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[route] #%d %s -> %s (model %s -> %s)", f.ID, origModel, upstream, origModel, rr.Model)
 				f.RouteReason.Store(recorder.RoutePattern)
 				convFlag = config.EffectiveConvertOff2Low(c, rr.ConvertOff2Low, rr.Presence.Written("convertOff2Low", rr.ConvertOff2Low != ""), rr.NoLazyApply)
-				routeEffort = rr.Effort // Captured only here: fallback/classifier/fast/Responses-raw lanes are served otherwise and never inherit it (the pin site itself exempts the quiet off->low upgrade)
-				if !(f.Compaction.Load() && c.CompactEffort != "") {
-					f.Effort = wireEffort(rr.Effort) // Display-only: the model column shows the configured pin when the body-side rewrite doesn't apply; a compactEffort pin takes over that display on compaction requests ([Compact-<level>] carries it)
-				}
+				routeEffort = rr.Effort          // Captured only here: fallback/classifier/fast/Responses-raw lanes are served otherwise and never inherit it (the pin site itself exempts the quiet off->low upgrade)
+				f.Effort = wireEffort(rr.Effort) // Display-only: the model column shows the configured pin when the body-side rewrite doesn't apply; ModelDisplay prefers a compactEffort pin on compaction requests
 				searchGuardEnabled = config.EffectiveSearchGuard(c, rr, nil)
 				// Enhance search / route-level claudeSearch*: when the route effectively supports search (no_search:false),
 				// a standalone search sub-agent request gets the summary instruction injected into the request itself

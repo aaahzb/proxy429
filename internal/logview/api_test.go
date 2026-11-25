@@ -99,8 +99,9 @@ func TestRecentFlightsNoStopField(t *testing.T) {
 }
 
 // TestRecentFlightsCompactionFields verifies the finished-streams JSON carries the compaction badge flag and the
-// compact result derived from the stream's usage; a row without parsed usage keeps an empty result (no numbers),
-// and a non-compaction row never carries a result even when its usage would produce one.
+// compact result derived from the stream's usage: the badge percent plus the full hover description. A row without
+// parsed usage keeps both empty (no numbers), and a non-compaction row never carries a result even when its usage
+// would produce one.
 func TestRecentFlightsCompactionFields(t *testing.T) {
 	resetStats()
 	oldFinished := recorder.Finished
@@ -117,9 +118,10 @@ func TestRecentFlightsCompactionFields(t *testing.T) {
 	RecentFlightsHandler(rec, req)
 	var d struct {
 		List []struct {
-			ID          uint64 `json:"id"`
-			Compaction  bool   `json:"compaction"`
-			CompactSave string `json:"compactSave"`
+			ID             uint64 `json:"id"`
+			Compaction     bool   `json:"compaction"`
+			CompactSave    string `json:"compactSave"`
+			CompactSavePct string `json:"compactSavePct"`
 		} `json:"list"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
@@ -128,15 +130,15 @@ func TestRecentFlightsCompactionFields(t *testing.T) {
 	if len(d.List) != 3 {
 		t.Fatalf("recentFlights 应有 3 行，实际 %s", rec.Body.String())
 	}
-	// Newest first: ID 3 (plain), ID 2 (no usage), ID 1 (170k->20k, 88%).
-	if got := d.List[0]; got.ID != 3 || got.Compaction || got.CompactSave != "" {
-		t.Errorf("non-compaction row = %+v, want compaction false and empty compactSave", got)
+	// Newest first: ID 3 (plain), ID 2 (no usage), ID 1 (170k->20k, 88% / 88%).
+	if got := d.List[0]; got.ID != 3 || got.Compaction || got.CompactSave != "" || got.CompactSavePct != "" {
+		t.Errorf("non-compaction row = %+v, want compaction false and empty compact result", got)
 	}
-	if got := d.List[1]; got.ID != 2 || !got.Compaction || got.CompactSave != "" {
-		t.Errorf("row without usage = %+v, want compaction true and empty compactSave", got)
+	if got := d.List[1]; got.ID != 2 || !got.Compaction || got.CompactSave != "" || got.CompactSavePct != "" {
+		t.Errorf("row without usage = %+v, want compaction true and empty compact result", got)
 	}
-	if got := d.List[2]; got.ID != 1 || !got.Compaction || got.CompactSave != "170k->20k, 88%" {
-		t.Errorf("row with usage = %+v, want compaction true and compactSave 170k->20k, 88%%", got)
+	if got := d.List[2]; got.ID != 1 || !got.Compaction || got.CompactSave != "170k->20k, 88%" || got.CompactSavePct != "88%" {
+		t.Errorf("row with usage = %+v, want compaction true, compactSave 170k->20k, 88%% and compactSavePct 88%%", got)
 	}
 }
 

@@ -71,14 +71,28 @@ func TestTokensColumn(t *testing.T) {
 }
 
 func TestCompactionConsoleBadge(t *testing.T) {
-	if !strings.Contains(logViewerHTML, "f.compaction") || !strings.Contains(logViewerHTML, "f.compactEffort") {
-		t.Error("model cell should render the [Compact] badge from f.compaction and upgrade it from f.compactEffort")
+	if !strings.Contains(logViewerHTML, "f.compaction") || !strings.Contains(logViewerHTML, "f.compactSavePct") {
+		t.Error("model cell should render the [Compact] badge from f.compaction and fold in the reduction percent from f.compactSavePct")
 	}
-	if !strings.Contains(logViewerHTML, `model = model + '<span style="color:#ce9178">['+esc(f.compactSave)+']</span>'`) {
-		t.Error("finished rows should append the compact result after the model name")
+	if !strings.Contains(logViewerHTML, `(f.compactSave?' title="'+escAttr(f.compactSave)+'"':'')`) {
+		t.Error("the compact result should live in the badge's hover title, attribute-escaped")
 	}
-	if !strings.Contains(logViewerHTML, `if(f.compaction) model = '<span style="color:#ce9178">[Compact'+(f.compactEffort?'-'+esc(f.compactEffort):'')+']</span>' + model`) {
-		t.Error("the [Compact] badge should stay ahead of the model name and carry the configured level")
+	if strings.Contains(logViewerHTML, `title="'+esc(f.compactSave)`) {
+		t.Error("the badge's title attribute must not use text-only esc (quotes would break out)")
+	}
+	if !strings.Contains(logViewerHTML, `if(f.compaction) model = '<span style="color:#ce9178"'`) {
+		t.Error("the [Compact] badge should stay ahead of the model name")
+	}
+	// The level moved into the model string's [level] slot (ModelDisplay), so neither the old badge suffix
+	// nor a trailing [result] tag may come back.
+	if strings.Contains(logViewerHTML, "[Compact-") {
+		t.Error("the [Compact] badge should no longer carry the compactEffort level")
+	}
+	if strings.Contains(logViewerHTML, `esc(f.compactSave)+']</span>'`) {
+		t.Error("finished rows should no longer append the compact result after the model name")
+	}
+	if strings.Contains(logViewerHTML, "f.compactEffort") {
+		t.Error("the page should no longer read the removed compactEffort JSON field")
 	}
 	en := renderLogViewerEN(logViewerHTML)
 	if !strings.Contains(en, "Context-compaction badge") {
@@ -86,17 +100,6 @@ func TestCompactionConsoleBadge(t *testing.T) {
 	}
 	if strings.Contains(en, "上下文压缩标记") {
 		t.Error("Chinese compaction doc leaked into the English console")
-	}
-}
-
-func TestFlightInfoCompactEffortJSON(t *testing.T) {
-	b, _ := json.Marshal(flightInfo{ID: 1, Compaction: true, CompactEffort: "max"})
-	if !strings.Contains(string(b), `"compactEffort":"max"`) {
-		t.Errorf("flightInfo should carry compactEffort: %s", b)
-	}
-	b2, _ := json.Marshal(flightInfo{ID: 1})
-	if strings.Contains(string(b2), "compactEffort") {
-		t.Errorf("a flight without a compactEffort pin should omit the field: %s", b2)
 	}
 }
 

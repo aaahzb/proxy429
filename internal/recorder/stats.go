@@ -253,16 +253,22 @@ func HumanNum(n int64) string {
 	}
 }
 
-// CompactSave formats a context-compaction result: the total input context (input + cache_read + cache_creation)
-// versus the summary's output tokens, and the percentage compressed away (e.g. "170k->20k, 88%").
-// Returns "" when either side is unknown, so the console shows the [Compact] (or [Compact-<level>]) badge without numbers.
-func CompactSave(in, cacheRead, cacheCreation, out int64) string {
+// CompactResult formats a context-compaction result: the total input context (input + cache_read + cache_creation)
+// versus the summary's output tokens. pct is the share compressed away ("88%") shown in the model column's
+// [Compact 88%] badge, detail the full "170k->20k, 88%" its hover title shows. Both empty when either side is
+// unknown, leaving a plain [Compact] badge without numbers. pct floors at 0% when the summary is larger than
+// the billed context (upstreams that under-report input tokens), never negative.
+func CompactResult(in, cacheRead, cacheCreation, out int64) (pct, detail string) {
 	total := in + cacheRead + cacheCreation
 	if total <= 0 || out <= 0 {
-		return ""
+		return "", ""
 	}
-	pct := int(math.Round((1 - float64(out)/float64(total)) * 100))
-	return fmt.Sprintf("%s->%s, %d%%", compactNum(total), compactNum(out), pct)
+	saved := 1 - float64(out)/float64(total)
+	if saved < 0 {
+		saved = 0
+	}
+	pct = fmt.Sprintf("%d%%", int(math.Round(saved*100)))
+	return pct, compactNum(total) + "->" + compactNum(out) + ", " + pct
 }
 
 // compactNum formats a token count compactly for the console (107k / 170k / 1.2M), the shared

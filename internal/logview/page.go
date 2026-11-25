@@ -494,15 +494,12 @@ function modelCell(f){
   var model = f.model;
   var tag = routeTag(f.routeReason);
   if(tag) model = tag + model;
-  // [Compact] marks a client context-compaction request; when the top-level compactEffort pins a level the badge
-  // carries it ([Compact-max], wire form so mid reads medium) and the route [level] tag is suppressed on that flight.
-  // Finished rows append the result ([170k->20k, 88%]) after the model name; the in-flight JSON carries no
-  // compactSave field, so only the badge shows there.
-  if(f.compaction) model = '<span style="color:#ce9178">[Compact'+(f.compactEffort?'-'+esc(f.compactEffort):'')+']</span>' + model;
+  // [Compact] marks a client context-compaction request; finished rows fold the reduction percent in
+  // ([Compact 88%], the full numbers on hover). The compactEffort level rides the model string's [level] slot.
+  if(f.compaction) model = '<span style="color:#ce9178"'+(f.compactSave?' title="'+escAttr(f.compactSave)+'"':'')+'>[Compact'+(f.compactSavePct?' '+esc(f.compactSavePct):'')+']</span>' + model;
   // 独立搜索子代理徽标：所有标记命中挂 [Search]，摘要注入成功升级为 [SearchSummary-档位]（青绿 #4ec9b0，与路由标签淡蓝区分）
   if(f.searchMarker) model = (f.searchLevel ? '<span style="color:#4ec9b0">[SearchSummary-'+esc(f.searchLevel)+']</span>' : '<span style="color:#4ec9b0">[Search]</span>') + model;
   if(f.countTokens) model = '<span style="color:#9d9d9d">[count_tokens]</span>' + model;
-  if(f.compactSave) model = model + '<span style="color:#ce9178">['+esc(f.compactSave)+']</span>';
   // 工具调用标签（"[Read*1][Edit*3]"）：跟在 model 链后，金色区分；来自服务端 toolCallsTag 的已格式化串，转义后插入
   // （注意：本函数内局部变量不能叫 esc——var 声明提升会遮蔽全局 esc()，上面这行就会拿不到函数）
   if(f.tools) model = model + '<span style="color:#d7ba7d">' + esc(f.tools) + '</span>';
@@ -510,8 +507,7 @@ function modelCell(f){
   // 完成流改挂缓存命中列（见行模板）——同一红标两处只出现一处，避免重复计数观感
   if(f.stripped > 0) model = model + '<span style="color:#f48771">[剥' + f.stripped + ']</span>';
   if(!f.searchPrompt) return '<td>'+model+'</td>';
-  var escP = String(f.searchPrompt).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  return '<td title="'+escP+'">'+model+'</td>';
+  return '<td title="'+escAttr(f.searchPrompt)+'">'+model+'</td>';
 }
 // API 列单元格：协议来源 + 思考值合一格（省一列）——
 // 名部分：空 = Anthropic 口原生流量（Claude Code 等，橙色 [Anthropic]，#d97757 = Claude 珊瑚橙）；
@@ -569,6 +565,10 @@ function attemptTag(f){
 // 转义 & < >，innerHTML 安全插入用户内容（tool input/搜索结果可能含 <>）。
 function esc(s){
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+// 转义 & < > "，供双引号属性（title="…"）安全插入；文本节点仍用 esc。
+function escAttr(s){
+  return esc(s).replace(/"/g,'&quot;');
 }
 // 解析 SSE 原文为 HTML：按到达顺序提取 text/thinking/tool_use/server_tool_use/web_search_tool_result，
 // 每类独立成块渲染（tool 各起新行），"啥都渲染"。后端只 tee raw，解析放前端避免影响透传热路径。
