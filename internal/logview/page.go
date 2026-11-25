@@ -1019,7 +1019,7 @@ function fmtNum(n){
   if(n<1000000) return (n/1000).toFixed(1)+'k';
   return (n/1000000).toFixed(2)+'M';
 }
-function card(k,v){ return '<div class="card"><div class="k">'+k+'</div><div class="v">'+v+'</div></div>'; }
+function card(k,v,t){ return '<div class="card"'+(t?' title="'+escAttr(t)+'"':'')+'><div class="k">'+k+'</div><div class="v">'+v+'</div></div>'; }
 
 async function poll(){
   try{
@@ -1038,7 +1038,7 @@ async function poll(){
     cardsEl.innerHTML =
       card('活跃/等待', d.active + ' / ' + d.waiting) +
       card('发给上游', fmtBytes(d.bytesUp)) + card('上游返回', fmtBytes(d.bytesDown)) +
-      '<div class="card" id="cacheCard" style="cursor:pointer"><div class="k">缓存命中</div><div class="v">'+cacheHitPct(d.cacheRead, d.inputTokens, d.cacheCreation)+'</div></div>' + card('输入', fmtNum(d.inputTokens)) +
+      '<div class="card" id="cacheCard" style="cursor:pointer"><div class="k">缓存命中</div><div class="v">'+cacheHitPct(d.cacheRead, d.inputTokens, d.cacheCreation)+'</div></div>' + card('输入（未命中）', fmtNum(d.inputTokens), '未命中缓存的新鲜输入 token（中断的流不计入）；总输入 = 未命中 + 缓存读取 + 缓存写入，与各流 token 列「入」同构成') +
       card('输出', fmtNum(d.outputTokens)) + '<div class="card" id="retryCard" style="cursor:pointer"><div class="k">重试</div><div class="v">'+d.retries+'</div></div>' +
       '<div class="card" id="clsCard" style="cursor:pointer"><div class="k">分类器</div><div class="v">'+d.classifiers+'</div></div>' + card('首字', (d.avgFirstByte/1000).toFixed(2)+'s') +
       card('tok/s', d.tps.toFixed(1));
@@ -2125,7 +2125,7 @@ var enHTMLRepl = [][2]string{
 	{`card('发给上游', fmtBytes(d.bytesUp))`, `card('To upstream', fmtBytes(d.bytesUp))`},
 	{`card('上游返回', fmtBytes(d.bytesDown))`, `card('From upstream', fmtBytes(d.bytesDown))`},
 	{`<div class="k">缓存命中</div>`, `<div class="k">Cache hit</div>`},
-	{`card('输入', fmtNum(d.inputTokens))`, `card('Input', fmtNum(d.inputTokens))`},
+	{`card('输入（未命中）', fmtNum(d.inputTokens), '未命中缓存的新鲜输入 token（中断的流不计入）；总输入 = 未命中 + 缓存读取 + 缓存写入，与各流 token 列「入」同构成')`, `card('Input (uncached)', fmtNum(d.inputTokens), 'Fresh input tokens that missed the cache (interrupted streams excluded). Total input = uncached + cache read + cache write, the same composition as the per-stream token in/out "in" column.')`},
 	{`card('输出', fmtNum(d.outputTokens))`, `card('Output', fmtNum(d.outputTokens))`},
 	{`<div class="k">重试</div>`, `<div class="k">Retries</div>`},
 	{`<div class="k">分类器</div>`, `<div class="k">Classifier</div>`},

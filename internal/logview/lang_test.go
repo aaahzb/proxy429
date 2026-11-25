@@ -4,9 +4,11 @@ import (
 	"proxy429/internal/config"
 	"proxy429/internal/platform"
 
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -94,6 +96,83 @@ func TestRenderLogViewerEN(t *testing.T) {
 	// The Chinese master page is unaffected
 	if !strings.Contains(logViewerHTML, `<html lang="zh">`) {
 		t.Errorf("中文母版 lang=zh 被改动")
+	}
+}
+
+// scriptRanges returns the [start,end) byte ranges of every <script> body in page.
+func scriptRanges(page string) [][2]int {
+	var out [][2]int
+	for off := 0; ; {
+		i := strings.Index(page[off:], "<script>")
+		if i < 0 {
+			return out
+		}
+		body := off + i + len("<script>")
+		j := strings.Index(page[body:], "</script>")
+		if j < 0 {
+			return out
+		}
+		out = append(out, [2]int{body, body + j})
+		off = body + j + len("</script>")
+	}
+}
+
+// TestRenderLogViewerENJSQuoteSafety: an enHTMLRepl value whose key sits inside a <script> block is
+// injected into inline JS. An unpaired ASCII single quote there (an English apostrophe like
+// "stream's") terminates the enclosing single-quoted literal and silently kills the whole script
+// block: the page then shows nothing and every text grep still passes. HTML-context values may use
+// apostrophes freely, so only script-block keys are checked.
+func TestRenderLogViewerENJSQuoteSafety(t *testing.T) {
+	ranges := scriptRanges(logViewerHTML)
+	inScript := func(pos int) bool {
+		for _, r := range ranges {
+			if pos >= r[0] && pos < r[1] {
+				return true
+			}
+		}
+		return false
+	}
+	for _, pair := range enHTMLRepl {
+		key, val := pair[0], pair[1]
+		js := false
+		for off := 0; ; {
+			i := strings.Index(logViewerHTML[off:], key)
+			if i < 0 {
+				break
+			}
+			if inScript(off + i) {
+				js = true
+				break
+			}
+			off += i + 1
+		}
+		if !js {
+			continue
+		}
+		if kn, vn := strings.Count(key, "'"), strings.Count(val, "'"); kn != vn {
+			t.Errorf("enHTMLRepl 替换值会注入内联 JS，单引号个数必须与原文一致（%d -> %d）: %q -> %q", kn, vn, key, val)
+		}
+	}
+}
+
+// TestRenderLogViewerENJSSyntax parses every script block of the rendered English page with
+// node --check when node is on PATH (GitHub runners ship it); without node the quote-safety test
+// above is the backstop.
+func TestRenderLogViewerENJSSyntax(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH; TestRenderLogViewerENJSQuoteSafety is the backstop")
+	}
+	page := renderLogViewerEN(logViewerHTML)
+	dir := t.TempDir()
+	for i, r := range scriptRanges(page) {
+		f := filepath.Join(dir, fmt.Sprintf("script%d.js", i))
+		if err := os.WriteFile(f, []byte(page[r[0]:r[1]]), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command(node, "--check", f).CombinedOutput(); err != nil {
+			t.Errorf("英文页 script 块 %d 语法错误: %v\n%s", i, err, out)
+		}
 	}
 }
 
@@ -256,6 +335,27 @@ func TestLogViewerInflightCardMerged(t *testing.T) {
 		if strings.Contains(logViewerHTML, gone) {
 			t.Errorf("旧的分开卡片应已移除: %q", gone)
 		}
+	}
+}
+
+// TestLogViewerInputCardUncached pins the status input card's scope: the card counts only fresh input
+// tokens that missed the cache, so the label and hover title spell out the total-input formula — this
+// is what keeps it from being mistaken for a smaller version of the per-stream total-input column
+// (whose values also include cache read + cache write).
+func TestLogViewerInputCardUncached(t *testing.T) {
+	want := `card('输入（未命中）', fmtNum(d.inputTokens), '未命中缓存的新鲜输入 token（中断的流不计入）；总输入 = 未命中 + 缓存读取 + 缓存写入，与各流 token 列「入」同构成')`
+	if !strings.Contains(logViewerHTML, want) {
+		t.Errorf("状态卡片缺少带未命中说明的输入卡 %q", want)
+	}
+	if strings.Contains(logViewerHTML, `card('输入', fmtNum(d.inputTokens))`) {
+		t.Errorf("旧的裸「输入」卡应已移除（会与单流总输入口径混淆）")
+	}
+	if !strings.Contains(logViewerHTML, `' title="'+escAttr(t)+'"'`) {
+		t.Errorf("card() 的 title 必须经 escAttr 注入（裸引号会破坏属性）")
+	}
+	en := renderLogViewerEN(logViewerHTML)
+	if !strings.Contains(en, `card('Input (uncached)'`) {
+		t.Errorf("英文页缺少 Input (uncached) 卡")
 	}
 }
 

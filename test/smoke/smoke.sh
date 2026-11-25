@@ -386,6 +386,10 @@ grep -q '"tokens":""' "$OUT/recent.json" && { echo "TOKENS EMPTY VALUE MUST NOT 
 grep -qF '<th>token 入/出' "$OUT/page.html" || grep -qF '<th>token in/out' "$OUT/page.html" || { echo "TOKENS HEADER MISSING in served page"; tokok=0; }
 grep -qF 'function tokensCell(' "$OUT/page.html" || { echo "TOKENS CELL JS MISSING in served page"; tokok=0; }
 grep -qF 'tokensCell(f.tokens, f.bytes)' "$OUT/page.html" || { echo "TOKENS BYTES-REPLACEMENT JS MISSING in served page"; tokok=0; }
+# The status input card is the uncached-only counter: its label and hover title must explain the
+# total-input formula, whichever language the environment serves.
+grep -qF "card('输入（未命中）'" "$OUT/page.html" || grep -qF "card('Input (uncached)'" "$OUT/page.html" || { echo "UNCACHED INPUT CARD MISSING in served page"; tokok=0; }
+grep -qF '未命中缓存的新鲜输入 token' "$OUT/page.html" || grep -qF 'Fresh input tokens that missed the cache' "$OUT/page.html" || { echo "UNCACHED INPUT CARD TITLE MISSING in served page"; tokok=0; }
 cat > "$OUT/t1.json" <<'EOF'
 {"model":"smoke-slow","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"T"}]}
 EOF

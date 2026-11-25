@@ -357,7 +357,7 @@ experimental_bearer_token = "proxy429"</pre>
 
     <section class="docSec" id="doc-status" data-group="Console Reference">
       <h3>Status tab &amp; stats</h3>
-      <p>The Status tab opens with stat cards: Active/Waiting, To upstream, From upstream, Cache hit, Input, Output, Retries, Classifier, TTFT, tok/s. In-flight and recently finished streams each get a table; click a row to inspect it.</p>
+      <p>The Status tab opens with stat cards: Active/Waiting, To upstream, From upstream, Cache hit, Input (uncached), Output, Retries, Classifier, TTFT, tok/s. In-flight and recently finished streams each get a table; click a row to inspect it.</p>
       <h4>Metric definitions</h4>
       <ul>
         <li><b>Total</b>: from the proxy receiving the downstream request to the full response being sent back. Includes internal handling, first-byte wait, streaming and wrap-up.</li>
@@ -365,6 +365,7 @@ experimental_bearer_token = "proxy429"</pre>
         <li><b>tok/s</b>: output tokens divided by streaming time.</li>
         <li><b>token in/out</b>: the stream's total input / output tokens, formatted <code>107k/4</code>. Input = input + cache_read + cache_creation; in flight it shows what the head/tail has delivered so far and is exact only once the stream finishes, and a side never received shows <code>-</code> (a stream cancelled by the downstream after its head reads <code>107k/-</code>). On in-flight rows the column sits between API and Bytes; on finished rows it replaces the Bytes column, and hovering a cell shows that stream's byte count.</li>
         <li><b>Cache hit</b>: <code>cache_read / (input + cache_read + cache_creation)</code>. Cache writes do not count as hits but do count as input. A high hit rate comes mostly from the upstream model's native context cache; the proxy only passes usage through. Interrupted streams are excluded from the cache-hit aggregate so a half-finished context is not counted as a low hit.</li>
+        <li><b>Input (uncached)</b>: only fresh input tokens that missed the cache (interrupted streams excluded); total input = uncached + cache read + cache write, the same composition as each stream's token in/out "in" value. Hover the card to see this note.</li>
         <li><b>Cache age</b>: anchored per session and route, showing how long ago the latest cache write happened. While a stream of the same session and route is streaming, the newest finished row freezes into brackets, meaning the cache was just refreshed. A newest row that started within the last 5 minutes is protected from the "Keep finished N" trim. Requests without a session marker always show <code>-</code>.</li>
         <li><b># column</b>: <code>#80&lt;-73</code> means stream 80 continues from stream 73. It is annotated only when the session matches and stream 73's message chain is a prefix of stream 80's. A bare <code>#N</code> means no parent, e.g. a sub-agent's first round or right after <code>/clear</code>.</li>
       </ul>
